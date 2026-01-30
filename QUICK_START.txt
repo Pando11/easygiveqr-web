@@ -1,0 +1,37 @@
+═══════════════════════════════════════════════════════════════
+  STRIPE WEBHOOK QUICK START
+═══════════════════════════════════════════════════════════════
+
+STEP 1: Install Stripe CLI (if needed)
+  See: C:\Users\The Yoda Trader\INSTALL_STRIPE_CLI_NOW.md
+
+STEP 2: Login to Stripe
+  stripe login
+
+STEP 3: Start webhook forwarding
+  .\start-stripe-webhooks.ps1
+  OR
+  stripe listen --forward-to http://localhost:3000/api/stripe-webhook
+
+STEP 4: Copy the webhook secret
+  Look for: "Ready! Your webhook signing secret is whsec_xxxxx"
+  Add to .env.local: STRIPE_WEBHOOK_SECRET=whsec_xxxxx
+
+STEP 5: Start Next.js app (in separate terminal)
+  npm run dev
+
+STEP 6: Test it
+  .\test-stripe-webhook.ps1
+  OR
+  stripe trigger checkout.session.completed
+
+═══════════════════════════════════════════════════════════════
+  HOW TO CONFIRM EVENTS ARE RECEIVED
+═══════════════════════════════════════════════════════════════
+
+✓ Stripe CLI shows: --> checkout.session.completed [evt_xxxxx]
+✓ Stripe CLI shows: <-- [200] http://localhost:3000/api/stripe-webhook
+✓ Next.js console shows no errors
+✓ Check Supabase donations table for new record
+
+═══════════════════════════════════════════════════════════════

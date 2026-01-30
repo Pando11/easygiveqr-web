@@ -1,0 +1,53 @@
+═══════════════════════════════════════════════════════════════
+  STEP 7B: QUICK COMMAND REFERENCE (Windows)
+═══════════════════════════════════════════════════════════════
+
+1. INSTALL STRIPE CLI (if needed)
+   https://github.com/stripe/stripe-cli/releases/latest
+   Download: stripe_X.X.X_windows_x86_64.msi
+   Install by double-clicking
+
+2. LOGIN TO STRIPE
+   stripe login
+
+3. START WEBHOOK FORWARDING (Window 1)
+   cd "C:\Users\The Yoda Trader\easygiveqr-web"
+   stripe listen --forward-to http://localhost:3000/api/stripe-webhook
+   
+   COPY THE whsec_xxxxx SECRET FROM OUTPUT!
+
+4. ADD TO .env.local
+   Open: C:\Users\The Yoda Trader\easygiveqr-web\.env.local
+   Add line: STRIPE_WEBHOOK_SECRET=whsec_xxxxxxxxxxxxx
+   (Use the secret from step 3)
+
+5. START NEXT.JS DEV SERVER (Window 2)
+   cd "C:\Users\The Yoda Trader\easygiveqr-web"
+   npm run dev
+
+6. TEST IT
+   - Go to: http://localhost:3000/donate
+   - Fill form and complete payment with test card: 4242 4242 4242 4242
+   - Check Window 1 for: --> checkout.session.completed [evt_...]
+   - Check Window 1 for: <-- [200] http://localhost:3000/api/stripe-webhook
+   - Check Supabase donations table for new row
+
+═══════════════════════════════════════════════════════════════
+  VERIFY WEBHOOK WORKED
+═══════════════════════════════════════════════════════════════
+
+✓ Stripe CLI shows: --> checkout.session.completed [evt_xxxxx]
+✓ Stripe CLI shows: <-- [200] http://localhost:3000/api/stripe-webhook
+✓ Next.js console shows: [Stripe Webhook] Successfully processed donation
+✓ Supabase donations table has new row with stripe_session_id
+
+═══════════════════════════════════════════════════════════════
+  SQL QUERY TO CHECK DONATIONS
+═══════════════════════════════════════════════════════════════
+
+SELECT * FROM donations 
+WHERE stripe_session_id LIKE 'cs_%' 
+ORDER BY created_at DESC 
+LIMIT 5;
+
+═══════════════════════════════════════════════════════════════
