@@ -17,23 +17,50 @@
 
 ### 2. Verify constraints in PROD
 
-Run this in **Supabase PROD** → SQL Editor:
+**Supabase Dashboard** → **Production project** → **SQL Editor**. Run these two queries (copy/paste).
+
+**1) Confirm a UNIQUE constraint exists on `donations.stripe_session_id`:**
 
 ```sql
-SELECT constraint_name, constraint_type, table_name
-FROM information_schema.table_constraints
-WHERE table_name IN ('donations', 'stripe_webhook_events')
-AND constraint_type = 'UNIQUE';
+select
+  tc.constraint_name,
+  tc.constraint_type,
+  kcu.column_name
+from information_schema.table_constraints tc
+join information_schema.key_column_usage kcu
+  on tc.constraint_name = kcu.constraint_name
+ and tc.table_schema = kcu.table_schema
+where tc.table_schema = 'public'
+  and tc.table_name = 'donations'
+  and tc.constraint_type in ('UNIQUE', 'PRIMARY KEY')
+order by tc.constraint_type, tc.constraint_name, kcu.ordinal_position;
 ```
 
-**Required result:**
+**2) Confirm a UNIQUE constraint exists on `stripe_webhook_events.event_id`:**
 
-- `donations`: **`donations_stripe_session_id_key`** (or equivalent) on column **`stripe_session_id`** → UNIQUE.
-- `stripe_webhook_events`: **`stripe_webhook_events_event_id_key`** (or equivalent) on column **`event_id`** → UNIQUE.
+```sql
+select
+  tc.constraint_name,
+  tc.constraint_type,
+  kcu.column_name
+from information_schema.table_constraints tc
+join information_schema.key_column_usage kcu
+  on tc.constraint_name = kcu.constraint_name
+ and tc.table_schema = kcu.table_schema
+where tc.table_schema = 'public'
+  and tc.table_name = 'stripe_webhook_events'
+  and tc.constraint_type in ('UNIQUE', 'PRIMARY KEY')
+order by tc.constraint_type, tc.constraint_name, kcu.ordinal_position;
+```
+
+**What “pass” looks like**
+
+- **donations:** A row with `constraint_type = 'UNIQUE'` and `column_name = 'stripe_session_id'`.
+- **stripe_webhook_events:** A row with `constraint_type = 'UNIQUE'` and `column_name = 'event_id'`.
 
 If either UNIQUE is missing, apply/fix the migration in PROD before proceeding.
 
-**Pass:** Both tables have the UNIQUE constraints above. Screenshot or copy the query result.
+**Pass:** Both queries show the UNIQUE rows above. Screenshot or copy the results.
 
 ---
 

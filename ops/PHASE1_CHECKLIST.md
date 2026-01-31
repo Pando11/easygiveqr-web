@@ -21,13 +21,7 @@
   - [ ] `donations.church_id` FOREIGN KEY constraint exists
 - [ ] Migration applied: `20260127_create_stripe_webhook_events.sql` (or equivalent)
   - [ ] `stripe_webhook_events.event_id` UNIQUE constraint exists
-- [ ] **Proof:** Run SQL query to verify constraints:
-  ```sql
-  SELECT constraint_name, constraint_type
-  FROM information_schema.table_constraints
-  WHERE table_name IN ('donations', 'stripe_webhook_events')
-  AND constraint_type = 'UNIQUE';
-  ```
+- [ ] **Proof:** Run the two SQL queries in **Supabase PROD** → SQL Editor (see `ops/PHASE1_LAUNCH_RUNBOOK.md` section A step 2). Pass = donations has UNIQUE on `stripe_session_id`; stripe_webhook_events has UNIQUE on `event_id`.
 - [ ] **Why this matters:** Code idempotency is not enough. Webhooks get retried. Without DB uniqueness you will eventually duplicate donations.
 
 ## Vercel Environment Variables (Production)
@@ -151,14 +145,7 @@ Capture evidence of successful setup:
 - [ ] **Vercel deployment URL:** `________________`
 - [ ] **Deployment timestamp:** `________________`
 - [ ] **Screenshot:** Stripe webhook delivery = 200 OK
-- [ ] **Screenshot/Query:** Database uniqueness constraints exist
-  ```sql
-  -- Proof query
-  SELECT constraint_name, constraint_type
-  FROM information_schema.table_constraints
-  WHERE table_name IN ('donations', 'stripe_webhook_events')
-  AND constraint_type = 'UNIQUE';
-  ```
+- [ ] **Screenshot/Query:** Database uniqueness constraints exist (run the two queries in PHASE1_LAUNCH_RUNBOOK.md section A step 2)
 - [ ] **Screenshot:** SendGrid delivered event
 - [ ] **Screenshot:** Health endpoint response (`/api/health`)
 - [ ] **Screenshot:** Smoke test results (all PASS)
