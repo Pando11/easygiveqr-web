@@ -15,7 +15,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
+    def load_dotenv(_path=None):
+        return False
 
 
 @dataclass
