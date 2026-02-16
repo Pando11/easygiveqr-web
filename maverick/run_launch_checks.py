@@ -39,15 +39,40 @@ def _fail(name: str, details: str) -> CheckResult:
 
 def check_env_keys() -> list[CheckResult]:
     results: list[CheckResult] = []
-    required = ["STRIPE_SECRET_KEY", "STRIPE_PUBLISHABLE_KEY", "DATABASE_URL"]
+    stripe_secret = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    stripe_publishable = os.getenv("STRIPE_PUBLISHABLE_KEY", "").strip()
+    database_url = os.getenv("DATABASE_URL", "").strip()
 
-    for key in required:
-        value = os.getenv(key, "").strip()
-        if value:
-            redacted = f"{value[:7]}..." if len(value) > 10 else "***"
-            results.append(_pass(f"env:{key}", f"set ({redacted})"))
-        else:
-            results.append(_fail(f"env:{key}", "missing"))
+    if stripe_secret.startswith("sk_"):
+        results.append(_pass("env:STRIPE_SECRET_KEY", f"set ({stripe_secret[:7]}...)"))
+    elif stripe_secret:
+        results.append(_fail("env:STRIPE_SECRET_KEY", "present but invalid format (expected sk_*)"))
+    else:
+        results.append(_fail("env:STRIPE_SECRET_KEY", "missing"))
+
+    if stripe_publishable.startswith("pk_"):
+        results.append(
+            _pass("env:STRIPE_PUBLISHABLE_KEY", f"set ({stripe_publishable[:7]}...)")
+        )
+    elif stripe_publishable:
+        results.append(
+            _fail(
+                "env:STRIPE_PUBLISHABLE_KEY",
+                "present but invalid format (expected pk_*)",
+            )
+        )
+    else:
+        results.append(_fail("env:STRIPE_PUBLISHABLE_KEY", "missing"))
+
+    placeholder_markers = ("user:pass@host:port/dbname", "postgres:...@containers-")
+    if not database_url:
+        results.append(_fail("env:DATABASE_URL", "missing"))
+    elif any(marker in database_url for marker in placeholder_markers):
+        results.append(_fail("env:DATABASE_URL", "placeholder value detected"))
+    elif database_url.startswith("postgresql://") or database_url.startswith("postgres://"):
+        results.append(_pass("env:DATABASE_URL", f"set ({database_url[:8]}...)"))
+    else:
+        results.append(_fail("env:DATABASE_URL", "invalid format (expected postgres URL)"))
     return results
 
 
@@ -60,6 +85,12 @@ def check_flask_routes(project_dir: Path) -> list[CheckResult]:
         import app as maverick_app_module  # noqa: WPS433
     except Exception as exc:
         return [_fail("flask:import", f"failed to import app.py ({exc})")]
+
+    # Monkeypatch DB query calls during smoke tests to keep checks side-effect free.
+    def fake_execute_query(_query, _params=None, fetch=False):
+        return [] if fetch else True
+
+    maverick_app_module.execute_query = fake_execute_query
 
     app = maverick_app_module.app
     client = app.test_client()
@@ -116,6 +147,10 @@ def check_flask_routes(project_dir: Path) -> list[CheckResult]:
 
 def run_worker_dry_run(script_name: str, project_dir: Path) -> CheckResult:
     cmd = [sys.executable, script_name, "--dry-run"]
+    env = os.environ.copy()
+    if "user:pass@host:port/dbname" in env.get("DATABASE_URL", ""):
+        env["DATABASE_URL"] = ""
+
     try:
         completed = subprocess.run(
             cmd,
@@ -124,6 +159,7 @@ def run_worker_dry_run(script_name: str, project_dir: Path) -> CheckResult:
             text=True,
             timeout=180,
             check=False,
+            env=env,
         )
     except Exception as exc:
         return _fail(f"worker:{script_name}", f"failed to execute ({exc})")
