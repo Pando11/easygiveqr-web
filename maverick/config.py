@@ -30,6 +30,7 @@ class Config:
     AWS_S3_BUCKET_BACKUPS: str = os.getenv("AWS_S3_BUCKET_BACKUPS", "")
 
     # Payments
+    STRIPE_ENV: str = os.getenv("STRIPE_ENV", "dev")
     STRIPE_SECRET_KEY: str = os.getenv("STRIPE_SECRET_KEY", "")
     STRIPE_PUBLISHABLE_KEY: str = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
     STRIPE_WEBHOOK_SECRET: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")

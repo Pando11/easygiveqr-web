@@ -39,19 +39,40 @@ def _fail(name: str, details: str) -> CheckResult:
 
 def check_env_keys() -> list[CheckResult]:
     results: list[CheckResult] = []
+    stripe_env = (os.getenv("STRIPE_ENV") or "dev").strip().lower()
     stripe_secret = os.getenv("STRIPE_SECRET_KEY", "").strip()
     stripe_publishable = os.getenv("STRIPE_PUBLISHABLE_KEY", "").strip()
     stripe_webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
     database_url = os.getenv("DATABASE_URL", "").strip()
 
-    if stripe_secret.startswith("sk_"):
+    if stripe_env in {"dev", "test", "production"}:
+        results.append(_pass("env:STRIPE_ENV", stripe_env))
+    else:
+        results.append(_fail("env:STRIPE_ENV", f"unsupported value: {stripe_env}"))
+
+    if stripe_env in {"dev", "test"}:
+        secret_prefix = "sk_test_"
+        publishable_prefix = "pk_test_"
+    elif stripe_env == "production":
+        secret_prefix = "sk_live_"
+        publishable_prefix = "pk_live_"
+    else:
+        secret_prefix = "sk_"
+        publishable_prefix = "pk_"
+
+    if stripe_secret.startswith(secret_prefix):
         results.append(_pass("env:STRIPE_SECRET_KEY", f"set ({stripe_secret[:7]}...)"))
     elif stripe_secret:
-        results.append(_fail("env:STRIPE_SECRET_KEY", "present but invalid format (expected sk_*)"))
+        results.append(
+            _fail(
+                "env:STRIPE_SECRET_KEY",
+                f"present but invalid format (expected {secret_prefix}*)",
+            )
+        )
     else:
         results.append(_fail("env:STRIPE_SECRET_KEY", "missing"))
 
-    if stripe_publishable.startswith("pk_"):
+    if stripe_publishable.startswith(publishable_prefix):
         results.append(
             _pass("env:STRIPE_PUBLISHABLE_KEY", f"set ({stripe_publishable[:7]}...)")
         )
@@ -59,7 +80,7 @@ def check_env_keys() -> list[CheckResult]:
         results.append(
             _fail(
                 "env:STRIPE_PUBLISHABLE_KEY",
-                "present but invalid format (expected pk_*)",
+                f"present but invalid format (expected {publishable_prefix}*)",
             )
         )
     else:

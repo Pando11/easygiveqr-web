@@ -18,6 +18,12 @@ from utils.sms import send_reminder, send_sms
 
 load_dotenv()
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+stripe_env = (os.getenv("STRIPE_ENV") or "dev").lower()
+
+if stripe_env in {"dev", "test"} and stripe.api_key and stripe.api_key.startswith("sk_live_"):
+    print("WARNING: STRIPE_ENV is dev/test but STRIPE_SECRET_KEY looks like a live key.")
+if stripe_env == "production" and stripe.api_key and stripe.api_key.startswith("sk_test_"):
+    print("WARNING: STRIPE_ENV is production but STRIPE_SECRET_KEY looks like a test key.")
 
 app = Flask(__name__)
 app.config.from_object(Config())

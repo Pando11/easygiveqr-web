@@ -100,6 +100,7 @@ python run_stripe_minions.py --minion reconciliation --auto-fix
 
 ## Required environment variables
 
+- `STRIPE_ENV` (`dev` for stripe.dev / test mode, `production` for live mode)
 - `STRIPE_SECRET_KEY`
 - `STRIPE_PUBLISHABLE_KEY`
 - `STRIPE_WEBHOOK_SECRET`
@@ -116,6 +117,15 @@ Create webhook endpoint:
 - Events:
   - `payment_intent.succeeded`
   - `payment_intent.payment_failed`
+
+## Stripe.dev quick bootstrap
+
+1. Set `STRIPE_ENV=dev`
+2. Use `sk_test_...` and `pk_test_...` keys
+3. Start Stripe CLI forwarding:
+   - `stripe listen --forward-to http://localhost:5000/stripe/webhook`
+4. Validate:
+   - `python stripe_dev_bootstrap.py --check-api`
 
 ## Safety rules
 

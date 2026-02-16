@@ -67,6 +67,7 @@ AWS_REGION=us-east-1
 STRIPE_SECRET_KEY=
 STRIPE_PUBLISHABLE_KEY=
 STRIPE_WEBHOOK_SECRET=
+STRIPE_ENV=dev
 APP_BASE_URL=http://localhost:5000
 SECRET_KEY=generate-random-secret-key
 TC_USERNAME=margaret
@@ -110,6 +111,7 @@ MARGARET_PHONE=
 Instruction pack:
 - `STRIPE_MINIONS_INSTRUCTIONS.md`
 - `minions/stripe_minions_context.example.json`
+- `STRIPE_DEV_SETUP.md`
 
 Run all minions in dry-run mode:
 
@@ -121,6 +123,12 @@ Print the Stripe minion briefing payload:
 
 ```bash
 python minions/briefing.py
+```
+
+Validate Stripe.dev configuration:
+
+```bash
+python stripe_dev_bootstrap.py --check-api
 ```
 
 ## Week 7 launch testing (one command)
