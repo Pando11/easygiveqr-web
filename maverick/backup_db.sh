@@ -4,6 +4,29 @@ set -euo pipefail
 # Maverick Database Backup Script
 # Intended for daily scheduled execution
 
+send_backup_notification() {
+  local body="$1"
+  if [[ -n "${TWILIO_ACCOUNT_SID:-}" && -n "${TWILIO_AUTH_TOKEN:-}" && -n "${TWILIO_PHONE_NUMBER:-}" && -n "${HEIDI_PHONE:-}" ]]; then
+    curl -sS -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json" \
+      --data-urlencode "Body=${body}" \
+      --data-urlencode "From=${TWILIO_PHONE_NUMBER}" \
+      --data-urlencode "To=${HEIDI_PHONE}" \
+      -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" >/dev/null || true
+  else
+    echo "Twilio backup notification skipped: missing credentials/phone variables."
+  fi
+}
+
+on_exit() {
+  local exit_code="$1"
+  if [[ "${exit_code}" -eq 0 ]]; then
+    send_backup_notification "Maverick backup completed successfully at $(date)"
+  else
+    send_backup_notification "Maverick backup FAILED at $(date)"
+  fi
+}
+trap 'on_exit $?' EXIT
+
 echo "Starting Maverick backup..."
 
 DATE=$(date +%Y-%m-%d)
