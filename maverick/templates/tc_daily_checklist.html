@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block title %}Daily Checklist - Maverick TC{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2 style="margin-bottom: 10px;">Today's Checklist</h2>
+    <p style="color: #6b7280; margin-bottom: 20px;">
+        Upcoming deadlines and one-click reminder sends.
+    </p>
+
+    <div style="overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="text-align: left; border-bottom: 1px solid #e5e7eb;">
+                    <th style="padding: 10px 8px;">Property</th>
+                    <th style="padding: 10px 8px;">Type</th>
+                    <th style="padding: 10px 8px;">Date</th>
+                    <th style="padding: 10px 8px;">Days</th>
+                    <th style="padding: 10px 8px;">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for deadline in deadlines %}
+                {% set days_until = (deadline.deadline_date - today).days %}
+                <tr style="border-bottom: 1px solid #f1f5f9;">
+                    <td style="padding: 10px 8px;">{{ deadline.property_address }}</td>
+                    <td style="padding: 10px 8px;">{{ deadline.deadline_type.replace('_', ' ').title() }}</td>
+                    <td style="padding: 10px 8px;">{{ deadline.deadline_date.strftime('%Y-%m-%d') }}</td>
+                    <td style="padding: 10px 8px;">
+                        {% if days_until < 0 %}
+                            <span style="color: #b91c1c;">{{ days_until }}d</span>
+                        {% elif days_until == 0 %}
+                            <span style="color: #92400e;">Today</span>
+                        {% else %}
+                            {{ days_until }}d
+                        {% endif %}
+                    </td>
+                    <td style="padding: 10px 8px;">
+                        <button class="btn" style="padding: 8px 12px; font-size: 14px;"
+                                onclick="sendReminder({{ deadline.id }})">
+                            Send now
+                        </button>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="5" style="padding: 14px 8px; color: #6b7280;">No active deadlines.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function sendReminder(deadlineId) {
+    try {
+        if (window.showLoading) {
+            window.showLoading("Sending reminder...");
+        }
+        const response = await fetch(`/tc/reminder/${deadlineId}/send`, { method: "POST" });
+        const data = await response.json();
+        if (data.success) {
+            if (window.showSuccess) {
+                window.showSuccess("Reminder sent.");
+            }
+        } else if (window.showError) {
+            window.showError(data.error || "Failed to send reminder.");
+        }
+    } catch (_err) {
+        if (window.showError) {
+            window.showError("Network error while sending reminder.");
+        }
+    } finally {
+        if (window.hideLoading) {
+            window.hideLoading();
+        }
+    }
+}
+</script>
+{% endblock %}

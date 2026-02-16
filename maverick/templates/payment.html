@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Payment - Maverick TC</title>
+    <script src="https://js.stripe.com/v3/"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .payment-container {
+            max-width: 500px;
+            width: 100%;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            overflow: hidden;
+        }
+
+        .payment-header {
+            background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .payment-header h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+
+        .payment-header p {
+            opacity: 0.9;
+        }
+
+        .payment-body {
+            padding: 30px;
+        }
+
+        .payment-details {
+            background: #f9fafb;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+        }
+
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #e5e7eb;
+            gap: 16px;
+        }
+
+        .detail-row:last-child {
+            border-bottom: none;
+            font-weight: 600;
+            font-size: 18px;
+            margin-top: 10px;
+            padding-top: 15px;
+            border-top: 2px solid #d1d5db;
+        }
+
+        .payment-form {
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #374151;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 16px;
+        }
+
+        #card-element {
+            padding: 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            background: white;
+        }
+
+        #card-errors {
+            color: #ef4444;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 16px;
+            background: #10b981;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .btn:hover {
+            background: #059669;
+        }
+
+        .btn:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+        }
+
+        .alternative-payment {
+            margin-top: 30px;
+            padding-top: 30px;
+            border-top: 2px solid #e5e7eb;
+            text-align: center;
+        }
+
+        .alternative-payment h3 {
+            margin-bottom: 15px;
+            color: #374151;
+        }
+
+        .payment-option {
+            display: inline-block;
+            margin: 0 10px;
+            padding: 10px 20px;
+            background: #f3f4f6;
+            border-radius: 6px;
+            text-decoration: none;
+            color: #1e3a8a;
+            font-weight: 600;
+        }
+
+        .success-message {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .success-message h2 {
+            color: #10b981;
+            margin-bottom: 15px;
+            font-size: 28px;
+        }
+
+        .success-message p {
+            color: #6b7280;
+            margin-bottom: 10px;
+        }
+
+        .spinner {
+            display: none;
+            margin: 20px auto;
+            border: 4px solid #f3f4f6;
+            border-top: 4px solid #10b981;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="payment-container">
+        <div class="payment-header">
+            <h1>Maverick TC Payment</h1>
+            <p>Secure payment via Stripe</p>
+        </div>
+
+        <div class="payment-body" id="paymentForm">
+            <div class="payment-details">
+                <div class="detail-row">
+                    <span>Property:</span>
+                    <strong>{{ payment.property_address }}</strong>
+                </div>
+                <div class="detail-row">
+                    <span>Payment Type:</span>
+                    <strong>{{ payment.payment_type|title }}</strong>
+                </div>
+                {% if payment.referral_credit != "0.00" %}
+                <div class="detail-row">
+                    <span>Service Fee:</span>
+                    <span>${{ payment.original_amount }}</span>
+                </div>
+                <div class="detail-row" style="color: #10b981;">
+                    <span>Referral Credit:</span>
+                    <span>-${{ payment.referral_credit }}</span>
+                </div>
+                {% endif %}
+                <div class="detail-row">
+                    <span>Amount Due:</span>
+                    <strong>${{ payment.amount }}</strong>
+                </div>
+            </div>
+
+            <form id="payment-form" class="payment-form">
+                <div class="form-group">
+                    <label for="cardholder-name">Cardholder Name</label>
+                    <input type="text" id="cardholder-name" placeholder="John Smith" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="card-element">Card Details</label>
+                    <div id="card-element"></div>
+                    <div id="card-errors" role="alert"></div>
+                </div>
+
+                <div class="spinner" id="spinner"></div>
+
+                <button type="submit" id="submit-button" class="btn">
+                    Pay ${{ payment.amount }}
+                </button>
+            </form>
+
+            <div class="alternative-payment">
+                <h3>Or pay via:</h3>
+                <a href="https://venmo.com/{{ venmo_handle }}" target="_blank" class="payment-option">Venmo</a>
+                <a href="https://paypal.me/{{ paypal_handle }}" target="_blank" class="payment-option">PayPal</a>
+                <p style="margin-top: 15px; font-size: 14px; color: #6b7280;">
+                    If paying via Venmo/PayPal, please text Margaret to confirm.
+                </p>
+            </div>
+        </div>
+
+        <div class="success-message" id="successMessage">
+            <h2>Payment Successful</h2>
+            <p>Thank you for your payment of ${{ payment.amount }}</p>
+            <p style="margin-top: 20px;">Margaret will continue coordinating your transaction.</p>
+            <p style="margin-top: 30px; font-size: 14px; color: #6b7280;">You can close this page.</p>
+        </div>
+    </div>
+
+    <script>
+        const stripeKey = "{{ stripe_publishable_key }}";
+        if (!stripeKey) {
+            document.getElementById("card-errors").textContent =
+                "Stripe is not configured yet. Please contact support.";
+            document.getElementById("submit-button").disabled = true;
+        }
+
+        const stripe = Stripe(stripeKey || "pk_test_placeholder");
+        const elements = stripe.elements();
+
+        const cardElement = elements.create("card", {
+            style: {
+                base: {
+                    fontSize: "16px",
+                    color: "#374151",
+                    "::placeholder": { color: "#9ca3af" }
+                }
+            }
+        });
+        cardElement.mount("#card-element");
+
+        cardElement.on("change", (event) => {
+            const displayError = document.getElementById("card-errors");
+            displayError.textContent = event.error ? event.error.message : "";
+        });
+
+        const form = document.getElementById("payment-form");
+        const submitButton = document.getElementById("submit-button");
+        const spinner = document.getElementById("spinner");
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+
+            submitButton.disabled = true;
+            submitButton.textContent = "Processing...";
+            spinner.style.display = "block";
+
+            const { paymentMethod, error } = await stripe.createPaymentMethod({
+                type: "card",
+                card: cardElement,
+                billing_details: {
+                    name: document.getElementById("cardholder-name").value
+                }
+            });
+
+            if (error) {
+                document.getElementById("card-errors").textContent = error.message;
+                submitButton.disabled = false;
+                submitButton.textContent = "Pay ${{ payment.amount }}";
+                spinner.style.display = "none";
+                return;
+            }
+
+            fetch("/pay/{{ payment.transaction_id }}/{{ payment.payment_type }}/process", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    payment_method_id: paymentMethod.id,
+                    amount: {{ payment.amount_number }}
+                })
+            })
+                .then((response) => response.json())
+                .then((data) => {
+                    if (data.success) {
+                        document.getElementById("paymentForm").style.display = "none";
+                        document.getElementById("successMessage").style.display = "block";
+                    } else {
+                        document.getElementById("card-errors").textContent =
+                            data.error || "Payment failed. Please try again.";
+                        submitButton.disabled = false;
+                        submitButton.textContent = "Pay ${{ payment.amount }}";
+                        spinner.style.display = "none";
+                    }
+                })
+                .catch(() => {
+                    document.getElementById("card-errors").textContent =
+                        "Network error. Please try again.";
+                    submitButton.disabled = false;
+                    submitButton.textContent = "Pay ${{ payment.amount }}";
+                    spinner.style.display = "none";
+                });
+        });
+    </script>
+</body>
+</html>
