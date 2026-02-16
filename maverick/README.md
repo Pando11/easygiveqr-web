@@ -131,6 +131,12 @@ Validate Stripe.dev configuration:
 python stripe_dev_bootstrap.py --check-api
 ```
 
+One-shot Stripe.dev bring-up (from repo root):
+
+```bash
+make stripe-dev-up
+```
+
 ## Week 7 launch testing (one command)
 
 Run the launch smoke harness:

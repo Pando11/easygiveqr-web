@@ -49,6 +49,12 @@ Run:
 python stripe_dev_bootstrap.py --check-api
 ```
 
+Or run the full one-shot sequence from repo root:
+
+```bash
+make stripe-dev-up
+```
+
 This validates:
 - key formats
 - webhook secret presence
