@@ -155,6 +155,17 @@
 const dropZone = document.getElementById("dropZone");
 const fileInput = document.getElementById("contract_pdf");
 const fileName = document.getElementById("fileName");
+const uploadForm = document.getElementById("uploadForm");
+const phoneInput = document.getElementById("agent_phone");
+const emailInput = document.getElementById("agent_email");
+
+function notifyError(message) {
+    if (typeof window.showError === "function") {
+        window.showError(message);
+    } else {
+        alert(message);
+    }
+}
 
 // Click to upload
 dropZone.addEventListener("click", () => {
@@ -209,8 +220,26 @@ document.getElementById("referral_source").addEventListener("change", (e) => {
 });
 
 // Form submission
-document.getElementById("uploadForm").addEventListener("submit", async (e) => {
+uploadForm.addEventListener("submit", async (e) => {
     e.preventDefault();
+
+    const phoneRegex = /^\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}$/;
+    if (!phoneRegex.test(phoneInput.value.trim())) {
+        notifyError("Please enter a valid phone number (example: 806-555-1234).");
+        return;
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(emailInput.value.trim())) {
+        notifyError("Please enter a valid email address.");
+        return;
+    }
+
+    const selectedFile = fileInput.files[0];
+    if (selectedFile && selectedFile.size > 16 * 1024 * 1024) {
+        notifyError("File too large. Maximum size is 16MB.");
+        return;
+    }
 
     const formData = new FormData(e.target);
     const submitBtn = document.getElementById("submitBtn");
@@ -228,6 +257,10 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
     submitBtn.textContent = "Uploading...";
 
     try {
+        if (typeof window.showLoading === "function") {
+            window.showLoading("Uploading contract...");
+        }
+
         const response = await fetch("/upload", {
             method: "POST",
             body: formData
@@ -237,6 +270,9 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
 
         if (result.success) {
             successMsg.style.display = "block";
+            if (typeof window.showSuccess === "function") {
+                window.showSuccess("Contract uploaded successfully.");
+            }
             e.target.reset();
             fileName.style.display = "none";
             document.getElementById("referralNameGroup").style.display = "none";
@@ -244,11 +280,16 @@ document.getElementById("uploadForm").addEventListener("submit", async (e) => {
         } else {
             errorMsg.style.display = "block";
             document.getElementById("errorText").textContent = result.error || "Upload failed. Please try again.";
+            notifyError(result.error || "Upload failed. Please try again.");
         }
     } catch (error) {
         errorMsg.style.display = "block";
         document.getElementById("errorText").textContent = "Network error. Please check your connection and try again.";
+        notifyError("Network error. Please check your connection and try again.");
     } finally {
+        if (typeof window.hideLoading === "function") {
+            window.hideLoading();
+        }
         loadingMsg.style.display = "none";
         submitBtn.disabled = false;
         submitBtn.textContent = "Submit Contract";

@@ -104,6 +104,41 @@
             .card {
                 padding: 20px;
             }
+
+            h2 {
+                font-size: 20px;
+            }
+
+            h3 {
+                font-size: 18px;
+            }
+
+            [style*="grid-template-columns"] {
+                display: block !important;
+            }
+
+            [style*="grid-template-columns"] > * {
+                margin-bottom: 20px;
+            }
+
+            .btn {
+                width: 100%;
+                margin-bottom: 10px;
+            }
+
+            body {
+                font-size: 14px;
+            }
+
+            .hide-mobile {
+                display: none;
+            }
+        }
+
+        @media (max-width: 1024px) and (min-width: 769px) {
+            [style*="grid-template-columns: 3fr"] {
+                grid-template-columns: 2fr 1fr !important;
+            }
         }
     </style>
 
@@ -121,6 +156,7 @@
         {% block content %}{% endblock %}
     </div>
 
+    <script src="/static/js/main.js"></script>
     {% block extra_js %}{% endblock %}
 </body>
 </html>

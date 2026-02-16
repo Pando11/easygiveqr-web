@@ -5,16 +5,24 @@ Maverick is a Flask application for transaction coordination workflows:
 - S3 document storage
 - PostgreSQL transaction tracking
 - SMS notifications and auto-responses
+- Stripe payment processing
+- Cron-driven reminders and problem detection
 
-## Week 1 deliverables in this scaffold
+## Current deliverables in this scaffold
 
 - Project structure and deployment files (`Procfile`, `runtime.txt`)
 - Upload form UI (`templates/upload.html`)
 - Upload API endpoint (`POST /upload`)
 - Twilio SMS webhook (`POST /sms-webhook`)
+- Stripe payment page and processing endpoints (`/pay/...`)
+- TC login/dashboard stubs (`/tc/login`, `/tc`)
+- Reminder automation script (`send_reminders.py`)
+- Closing protocol script (`closing_protocol.py`)
+- Problem detection script (`check_problems.py`)
 - SQL schema (`schema.sql`)
 - Helper utilities for database, Twilio, and S3 (`utils/`)
 - Backup script (`backup_db.sh`)
+- Margaret training manual (`MARGARET_TRAINING_MANUAL.md`)
 
 ## Local setup
 
@@ -39,6 +47,7 @@ Maverick is a Flask application for transaction coordination workflows:
 6. Open:
    - Upload UI: <http://localhost:5000>
    - Health check: <http://localhost:5000/health>
+   - TC login: <http://localhost:5000/tc/login>
 
 ## Required environment variables
 
@@ -58,6 +67,7 @@ SECRET_KEY=generate-random-secret-key
 TC_USERNAME=margaret
 TC_PASSWORD=secure-hashed-password
 PAYPAL_EMAIL=pay@getmaverick.com
+PAYPAL_HANDLE=getmaverick
 VENMO_HANDLE=@GetMaverick
 HEIDI_PHONE=
 MARGARET_PHONE=
@@ -73,6 +83,14 @@ MARGARET_PHONE=
    ```
    https://<your-railway-domain>/sms-webhook
    ```
+
+## Suggested cron jobs (Railway)
+
+- Daily reminders (8am): `0 8 * * *` -> `python send_reminders.py`
+- Closing protocol morning (8am): `0 8 * * *` -> `python closing_protocol.py`
+- Closing protocol midday (10am): `0 10 * * *` -> `python closing_protocol.py`
+- Closing protocol evening (5pm): `0 17 * * *` -> `python closing_protocol.py`
+- Problem detection (every 6h): `0 */6 * * *` -> `python check_problems.py`
 
 ## Notes
 
