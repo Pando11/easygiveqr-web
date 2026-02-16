@@ -56,6 +56,8 @@ Maverick is a Flask application for transaction coordination workflows:
 
 ```env
 DATABASE_URL=postgresql://user:pass@host:port/dbname
+DATABASE_SSLMODE=
+DATABASE_CONNECT_TIMEOUT=8
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 TWILIO_PHONE_NUMBER=
@@ -78,6 +80,10 @@ VENMO_HANDLE=@GetMaverick
 HEIDI_PHONE=
 MARGARET_PHONE=
 ```
+
+Optional DB tuning:
+- `DATABASE_SSLMODE` (`require`, `prefer`, `disable`) to override SSL mode
+- `DATABASE_CONNECT_TIMEOUT` connection timeout seconds (default 8)
 
 ## Deploy to Railway
 
