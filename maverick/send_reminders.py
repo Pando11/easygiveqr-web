@@ -5,6 +5,7 @@ Runs daily at 8am via Railway cron
 Sends 4-stage reminders: 10d, 7d, 3d, 1d before each deadline.
 """
 
+import argparse
 import os
 import sys
 import traceback
@@ -17,6 +18,16 @@ load_dotenv()
 
 from utils.db import execute_query
 from utils.sms import send_reminder, send_sms
+
+DRY_RUN = False
+
+
+def notify_sms(to_number, message):
+    """Send SMS or print in dry-run mode."""
+    if DRY_RUN:
+        print(f"[DRY-RUN] SMS to {to_number}: {message[:160]}")
+        return "dry-run"
+    return send_sms(to_number, message)
 
 
 def send_deadline_reminders():
@@ -49,13 +60,23 @@ def send_deadline_reminders():
         print(f"Found {len(deadlines)} deadlines for {days_before}-day reminders")
 
         for deadline in deadlines:
-            success = send_reminder(
-                to_number=deadline["agent_phone"],
-                property_address=deadline["property_address"],
-                deadline_type=deadline["deadline_type"].replace("_", " ").title(),
-                deadline_date=deadline["deadline_date"].strftime("%m/%d/%Y"),
-                days_until=days_before,
-            )
+            if DRY_RUN:
+                print(
+                    "[DRY-RUN] Would send reminder:",
+                    deadline["agent_phone"],
+                    deadline["property_address"],
+                    deadline["deadline_type"],
+                    f"{days_before}d",
+                )
+                success = True
+            else:
+                success = send_reminder(
+                    to_number=deadline["agent_phone"],
+                    property_address=deadline["property_address"],
+                    deadline_type=deadline["deadline_type"].replace("_", " ").title(),
+                    deadline_date=deadline["deadline_date"].strftime("%m/%d/%Y"),
+                    days_until=days_before,
+                )
 
             if success:
                 update_query = f"""
@@ -63,7 +84,10 @@ def send_deadline_reminders():
                 SET {sent_flag} = TRUE, {sent_at_flag} = CURRENT_TIMESTAMP
                 WHERE id = %s
                 """
-                execute_query(update_query, (deadline["id"],))
+                if DRY_RUN:
+                    print(f"[DRY-RUN] Would update deadline reminder flags for {deadline['id']}")
+                else:
+                    execute_query(update_query, (deadline["id"],))
                 reminders_sent += 1
                 print(
                     f"Sent {days_before}d reminder for "
@@ -104,7 +128,7 @@ def send_critical_deadline_alerts():
 
     margaret_phone = os.getenv("MARGARET_PHONE")
     if margaret_phone:
-        send_sms(margaret_phone, message)
+        notify_sms(margaret_phone, message)
         print(
             f"Sent critical deadline alert to Margaret "
             f"({len(critical_deadlines)} deadlines)"
@@ -141,14 +165,19 @@ def check_overdue_deadlines():
 
     margaret_phone = os.getenv("MARGARET_PHONE")
     if margaret_phone:
-        send_sms(margaret_phone, message)
+        notify_sms(margaret_phone, message)
         print(f"Sent overdue alert to Margaret ({len(overdue)} deadlines)")
 
 
-def main():
+def main(dry_run=False):
     """Main reminder job."""
+    global DRY_RUN
+    DRY_RUN = dry_run
+
     print("\n" + "=" * 50)
     print("Maverick TC - Daily Reminders")
+    if DRY_RUN:
+        print("Mode: DRY-RUN (no SMS sent, no DB writes)")
     print(f"Running at: {date.today()}")
     print("=" * 50 + "\n")
 
@@ -166,8 +195,15 @@ def main():
         traceback.print_exc()
         heidi_phone = os.getenv("HEIDI_PHONE")
         if heidi_phone:
-            send_sms(heidi_phone, f"Maverick reminder job failed: {str(exc)[:100]}")
+            notify_sms(heidi_phone, f"Maverick reminder job failed: {str(exc)[:100]}")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run Maverick reminder automation.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Read and report what would happen without sending SMS or writing reminder flags.",
+    )
+    args = parser.parse_args()
+    main(dry_run=args.dry_run)

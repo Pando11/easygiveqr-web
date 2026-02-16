@@ -4,6 +4,7 @@ Maverick TC - Problem Detection System
 Runs every 6 hours to detect and flag issues.
 """
 
+import argparse
 import os
 import sys
 from datetime import date, timedelta
@@ -15,6 +16,16 @@ load_dotenv()
 
 from utils.db import execute_query
 from utils.sms import send_sms
+
+DRY_RUN = False
+
+
+def notify_sms(to_number, message):
+    """Send SMS or print in dry-run mode."""
+    if DRY_RUN:
+        print(f"[DRY-RUN] SMS to {to_number}: {message[:160]}")
+        return "dry-run"
+    return send_sms(to_number, message)
 
 
 def detect_missed_deadlines():
@@ -237,14 +248,19 @@ def alert_margaret(problems):
 
     margaret_phone = os.getenv("MARGARET_PHONE")
     if margaret_phone:
-        send_sms(margaret_phone, message)
+        notify_sms(margaret_phone, message)
         print(f"Sent problem alert to Margaret ({len(problems)} issues)")
 
 
-def main():
+def main(dry_run=False):
     """Main problem detection."""
+    global DRY_RUN
+    DRY_RUN = dry_run
+
     print("\n" + "=" * 50)
     print("Maverick TC - Problem Detection")
+    if DRY_RUN:
+        print("Mode: DRY-RUN (no SMS sent)")
     print(f"Running at: {date.today()}")
     print("=" * 50 + "\n")
 
@@ -274,4 +290,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run Maverick problem detection.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run checks and print alerts without sending SMS.",
+    )
+    args = parser.parse_args()
+    main(dry_run=args.dry_run)

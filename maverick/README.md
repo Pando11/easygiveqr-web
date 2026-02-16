@@ -92,6 +92,22 @@ MARGARET_PHONE=
 - Closing protocol evening (5pm): `0 17 * * *` -> `python closing_protocol.py`
 - Problem detection (every 6h): `0 */6 * * *` -> `python check_problems.py`
 
+## Week 7 launch testing (one command)
+
+Run the launch smoke harness:
+
+```bash
+python run_launch_checks.py
+```
+
+It validates:
+- Core Flask routes (`/health`, `/`, `/upload`, `/pay/...`)
+- Stripe and database env key readiness
+- `send_reminders.py --dry-run`
+- `check_problems.py --dry-run`
+
+Exit code is non-zero if any check fails.
+
 ## Notes
 
 - The `uploads/` folder is ignored and reserved for temporary local storage.
