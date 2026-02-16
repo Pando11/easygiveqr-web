@@ -1,0 +1,27 @@
+# MAVERICK TC - CURSOR AI RULES
+
+## Project Overview
+Maverick is a transaction coordination platform for Texas real estate agents.
+- Backend: Flask (Python)
+- Database: PostgreSQL
+- Storage: AWS S3
+- Payments: Stripe
+- SMS: Twilio
+- Deployment: Railway
+
+---
+
+## Code Style & Standards
+
+### Python
+- Follow PEP 8 style guide
+- Use type hints for function parameters
+- Use descriptive variable names (no single letters except in loops)
+- Keep functions under 50 lines when possible
+- Add docstrings for all functions
+
+### Imports
+- Group imports: standard library, third-party, local
+- Use absolute imports, not relative
+- Example:
+```python
