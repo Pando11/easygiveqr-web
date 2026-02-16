@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+
+{% block title %}Submit Contract - Maverick TC{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2 style="margin-bottom: 10px; color: #1e3a8a;">Submit Your Contract</h2>
+    <p style="color: #6b7280; margin-bottom: 30px;">Upload your executed contract and we'll get started immediately. Margaret will review within 2 hours.</p>
+
+    <form id="uploadForm" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="agent_name">Your Name *</label>
+            <input type="text" id="agent_name" name="agent_name" required>
+        </div>
+
+        <div class="form-group">
+            <label for="agent_phone">Phone Number *</label>
+            <input type="tel" id="agent_phone" name="agent_phone" placeholder="806-555-1234" required>
+        </div>
+
+        <div class="form-group">
+            <label for="agent_email">Email *</label>
+            <input type="email" id="agent_email" name="agent_email" required>
+        </div>
+
+        <div class="form-group">
+            <label for="property_address">Property Address *</label>
+            <textarea id="property_address" name="property_address" rows="2" placeholder="123 Main St, Lubbock, TX 79401" required></textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="contract_pdf">Upload Contract (PDF) *</label>
+            <div class="file-upload-area" id="dropZone">
+                <input type="file" id="contract_pdf" name="contract_pdf" accept=".pdf" required hidden>
+                <p>Drag & drop PDF here or <span style="color: #10b981; cursor: pointer;" onclick="document.getElementById('contract_pdf').click()">click to browse</span></p>
+                <p id="fileName" style="margin-top: 10px; color: #10b981; display: none;"></p>
+            </div>
+        </div>
+
+        <div class="form-group checkbox-group">
+            <label>
+                <input type="checkbox" id="rush_service" name="rush_service">
+                <span>Need within 24 hours? <strong>+$200</strong> (Total: $600)</span>
+            </label>
+        </div>
+
+        <div class="form-group">
+            <label for="referral_source">How did you hear about us? *</label>
+            <select id="referral_source" name="referral_source" required>
+                <option value="">Select one...</option>
+                <option value="referral">Referral from another agent</option>
+                <option value="broker">My broker</option>
+                <option value="facebook">Facebook</option>
+                <option value="google">Google Search</option>
+                <option value="other">Other</option>
+            </select>
+        </div>
+
+        <div class="form-group" id="referralNameGroup" style="display: none;">
+            <label for="referred_by">Referral agent name</label>
+            <input type="text" id="referred_by" name="referred_by" placeholder="Who referred you?">
+        </div>
+
+        <div id="loadingMessage" style="display: none; color: #10b981; margin-bottom: 20px;">
+            <p>Uploading contract...</p>
+        </div>
+
+        <div id="successMessage" style="display: none;" class="alert alert-success">
+            <p><strong>Contract received.</strong></p>
+            <p>Margaret will review within 2 hours. You'll receive a text shortly with your timeline.</p>
+        </div>
+
+        <div id="errorMessage" style="display: none;" class="alert alert-error">
+            <p id="errorText"></p>
+        </div>
+
+        <button type="submit" class="btn" id="submitBtn">Submit Contract</button>
+    </form>
+</div>
+
+<style>
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 500;
+    color: #374151;
+}
+
+.form-group input[type="text"],
+.form-group input[type="tel"],
+.form-group input[type="email"],
+.form-group textarea,
+.form-group select {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 16px;
+    font-family: inherit;
+}
+
+.form-group input:focus,
+.form-group textarea:focus,
+.form-group select:focus {
+    outline: none;
+    border-color: #10b981;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
+}
+
+.file-upload-area {
+    border: 2px dashed #d1d5db;
+    border-radius: 6px;
+    padding: 40px;
+    text-align: center;
+    background-color: #f9fafb;
+    cursor: pointer;
+    transition: border-color 0.2s;
+}
+
+.file-upload-area:hover {
+    border-color: #10b981;
+}
+
+.file-upload-area.drag-over {
+    border-color: #10b981;
+    background-color: #d1fae5;
+}
+
+.checkbox-group label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+}
+
+.checkbox-group input[type="checkbox"] {
+    margin-right: 10px;
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+}
+
+@media (max-width: 768px) {
+    .file-upload-area {
+        padding: 30px 20px;
+    }
+}
+</style>
+
+<script>
+// File upload handling
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("contract_pdf");
+const fileName = document.getElementById("fileName");
+
+// Click to upload
+dropZone.addEventListener("click", () => {
+    fileInput.click();
+});
+
+// File selected
+fileInput.addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        fileName.textContent = "PDF selected: " + file.name;
+        fileName.style.display = "block";
+    }
+});
+
+// Drag and drop
+dropZone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropZone.classList.add("drag-over");
+});
+
+dropZone.addEventListener("dragleave", () => {
+    dropZone.classList.remove("drag-over");
+});
+
+dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("drag-over");
+
+    const file = e.dataTransfer.files[0];
+    if (file && file.type === "application/pdf") {
+        fileInput.files = e.dataTransfer.files;
+        fileName.textContent = "PDF selected: " + file.name;
+        fileName.style.display = "block";
+    } else {
+        alert("Please upload a PDF file");
+    }
+});
+
+// Show/hide referral name field
+document.getElementById("referral_source").addEventListener("change", (e) => {
+    const referralGroup = document.getElementById("referralNameGroup");
+    const referredByField = document.getElementById("referred_by");
+    if (e.target.value === "referral") {
+        referralGroup.style.display = "block";
+        referredByField.required = true;
+    } else {
+        referralGroup.style.display = "none";
+        referredByField.required = false;
+        referredByField.value = "";
+    }
+});
+
+// Form submission
+document.getElementById("uploadForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+
+    const formData = new FormData(e.target);
+    const submitBtn = document.getElementById("submitBtn");
+    const loadingMsg = document.getElementById("loadingMessage");
+    const successMsg = document.getElementById("successMessage");
+    const errorMsg = document.getElementById("errorMessage");
+
+    // Hide previous messages
+    successMsg.style.display = "none";
+    errorMsg.style.display = "none";
+
+    // Show loading
+    loadingMsg.style.display = "block";
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Uploading...";
+
+    try {
+        const response = await fetch("/upload", {
+            method: "POST",
+            body: formData
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            successMsg.style.display = "block";
+            e.target.reset();
+            fileName.style.display = "none";
+            document.getElementById("referralNameGroup").style.display = "none";
+            successMsg.scrollIntoView({ behavior: "smooth" });
+        } else {
+            errorMsg.style.display = "block";
+            document.getElementById("errorText").textContent = result.error || "Upload failed. Please try again.";
+        }
+    } catch (error) {
+        errorMsg.style.display = "block";
+        document.getElementById("errorText").textContent = "Network error. Please check your connection and try again.";
+    } finally {
+        loadingMsg.style.display = "none";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Submit Contract";
+    }
+});
+</script>
+{% endblock %}
