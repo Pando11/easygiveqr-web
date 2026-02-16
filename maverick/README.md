@@ -112,6 +112,7 @@ Instruction pack:
 - `STRIPE_MINIONS_INSTRUCTIONS.md`
 - `minions/stripe_minions_context.example.json`
 - `STRIPE_DEV_SETUP.md`
+- `AGENT_EXECUTION_PLAYBOOK.md`
 
 Run all minions in dry-run mode:
 
