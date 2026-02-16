@@ -262,37 +262,45 @@
 
     <script>
         const stripeKey = "{{ stripe_publishable_key }}";
-        if (!stripeKey) {
-            document.getElementById("card-errors").textContent =
-                "Stripe is not configured yet. Please contact support.";
-            document.getElementById("submit-button").disabled = true;
-        }
-
-        const stripe = Stripe(stripeKey || "pk_test_placeholder");
-        const elements = stripe.elements();
-
-        const cardElement = elements.create("card", {
-            style: {
-                base: {
-                    fontSize: "16px",
-                    color: "#374151",
-                    "::placeholder": { color: "#9ca3af" }
-                }
-            }
-        });
-        cardElement.mount("#card-element");
-
-        cardElement.on("change", (event) => {
-            const displayError = document.getElementById("card-errors");
-            displayError.textContent = event.error ? event.error.message : "";
-        });
-
         const form = document.getElementById("payment-form");
         const submitButton = document.getElementById("submit-button");
         const spinner = document.getElementById("spinner");
+        const cardErrors = document.getElementById("card-errors");
+
+        if (!stripeKey) {
+            cardErrors.textContent = "Stripe is not configured yet. Please contact support.";
+            submitButton.disabled = true;
+            form.style.opacity = "0.6";
+        }
+
+        const stripe = stripeKey ? Stripe(stripeKey) : null;
+        const elements = stripe ? stripe.elements() : null;
+
+        const cardElement = elements
+            ? elements.create("card", {
+                style: {
+                    base: {
+                        fontSize: "16px",
+                        color: "#374151",
+                        "::placeholder": { color: "#9ca3af" }
+                    }
+                }
+            })
+            : null;
+
+        if (cardElement) {
+            cardElement.mount("#card-element");
+            cardElement.on("change", (event) => {
+                cardErrors.textContent = event.error ? event.error.message : "";
+            });
+        }
 
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
+            if (!stripe || !cardElement) {
+                cardErrors.textContent = "Stripe is not configured yet. Please contact support.";
+                return;
+            }
 
             submitButton.disabled = true;
             submitButton.textContent = "Processing...";
@@ -307,7 +315,7 @@
             });
 
             if (error) {
-                document.getElementById("card-errors").textContent = error.message;
+                cardErrors.textContent = error.message;
                 submitButton.disabled = false;
                 submitButton.textContent = "Pay ${{ payment.amount }}";
                 spinner.style.display = "none";
@@ -328,7 +336,7 @@
                         document.getElementById("paymentForm").style.display = "none";
                         document.getElementById("successMessage").style.display = "block";
                     } else {
-                        document.getElementById("card-errors").textContent =
+                        cardErrors.textContent =
                             data.error || "Payment failed. Please try again.";
                         submitButton.disabled = false;
                         submitButton.textContent = "Pay ${{ payment.amount }}";
@@ -336,7 +344,7 @@
                     }
                 })
                 .catch(() => {
-                    document.getElementById("card-errors").textContent =
+                    cardErrors.textContent =
                         "Network error. Please try again.";
                     submitButton.disabled = false;
                     submitButton.textContent = "Pay ${{ payment.amount }}";
