@@ -15,10 +15,13 @@ Maverick is a Flask application for transaction coordination workflows:
 - Upload API endpoint (`POST /upload`)
 - Twilio SMS webhook (`POST /sms-webhook`)
 - Stripe payment page and processing endpoints (`/pay/...`)
+- Stripe webhook endpoint (`POST /stripe/webhook`)
 - TC login/dashboard stubs (`/tc/login`, `/tc`)
 - Reminder automation script (`send_reminders.py`)
 - Closing protocol script (`closing_protocol.py`)
 - Problem detection script (`check_problems.py`)
+- Stripe minion scripts (`minions/`)
+- Stripe minion orchestrator (`run_stripe_minions.py`)
 - SQL schema (`schema.sql`)
 - Helper utilities for database, Twilio, and S3 (`utils/`)
 - Backup script (`backup_db.sh`)
@@ -63,6 +66,8 @@ AWS_S3_BUCKET_BACKUPS=maverick-backups
 AWS_REGION=us-east-1
 STRIPE_SECRET_KEY=
 STRIPE_PUBLISHABLE_KEY=
+STRIPE_WEBHOOK_SECRET=
+APP_BASE_URL=http://localhost:5000
 SECRET_KEY=generate-random-secret-key
 TC_USERNAME=margaret
 TC_PASSWORD=secure-hashed-password
@@ -83,6 +88,10 @@ MARGARET_PHONE=
    ```
    https://<your-railway-domain>/sms-webhook
    ```
+6. Configure Stripe webhook to:
+   ```
+   https://<your-railway-domain>/stripe/webhook
+   ```
 
 ## Suggested cron jobs (Railway)
 
@@ -91,6 +100,28 @@ MARGARET_PHONE=
 - Closing protocol midday (10am): `0 10 * * *` -> `python closing_protocol.py`
 - Closing protocol evening (5pm): `0 17 * * *` -> `python closing_protocol.py`
 - Problem detection (every 6h): `0 */6 * * *` -> `python check_problems.py`
+- Stripe minions (recommended):
+  - payment links: `0 */12 * * *` -> `python run_stripe_minions.py --minion payment-links`
+  - dunning: `0 */6 * * *` -> `python run_stripe_minions.py --minion dunning`
+  - reconciliation: `30 6 * * *` -> `python run_stripe_minions.py --minion reconciliation`
+
+## Stripe minions
+
+Instruction pack:
+- `STRIPE_MINIONS_INSTRUCTIONS.md`
+- `minions/stripe_minions_context.example.json`
+
+Run all minions in dry-run mode:
+
+```bash
+python run_stripe_minions.py --all --dry-run
+```
+
+Print the Stripe minion briefing payload:
+
+```bash
+python minions/briefing.py
+```
 
 ## Week 7 launch testing (one command)
 
@@ -105,6 +136,7 @@ It validates:
 - Stripe and database env key readiness
 - `send_reminders.py --dry-run`
 - `check_problems.py --dry-run`
+- `run_stripe_minions.py --all --dry-run`
 
 Exit code is non-zero if any check fails.
 

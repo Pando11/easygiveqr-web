@@ -1,0 +1,44 @@
+{
+  "project": "Maverick Transaction Coordinator",
+  "environment": "production",
+  "base_url": "https://maverick-production.up.railway.app",
+  "webhook_endpoint": "/stripe/webhook",
+  "stripe_events": [
+    "payment_intent.succeeded",
+    "payment_intent.payment_failed"
+  ],
+  "minions": [
+    {
+      "name": "payment-links",
+      "script": "minions/payment_link_minion.py",
+      "schedule": "0 */12 * * *",
+      "dry_run_first": true
+    },
+    {
+      "name": "dunning",
+      "script": "minions/dunning_minion.py",
+      "schedule": "0 */6 * * *",
+      "dry_run_first": true
+    },
+    {
+      "name": "reconciliation",
+      "script": "minions/reconciliation_minion.py",
+      "schedule": "30 6 * * *",
+      "dry_run_first": true
+    }
+  ],
+  "required_env": [
+    "STRIPE_SECRET_KEY",
+    "STRIPE_PUBLISHABLE_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    "APP_BASE_URL",
+    "DATABASE_URL",
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN",
+    "TWILIO_PHONE_NUMBER"
+  ],
+  "notes": [
+    "Use run_stripe_minions.py to orchestrate runs.",
+    "Enable auto-fix only after manual reconciliation review."
+  ]
+}

@@ -32,6 +32,8 @@ class Config:
     # Payments
     STRIPE_SECRET_KEY: str = os.getenv("STRIPE_SECRET_KEY", "")
     STRIPE_PUBLISHABLE_KEY: str = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+    STRIPE_WEBHOOK_SECRET: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    APP_BASE_URL: str = os.getenv("APP_BASE_URL", "http://localhost:5000")
     PAYPAL_EMAIL: str = os.getenv("PAYPAL_EMAIL", "pay@getmaverick.com")
     PAYPAL_HANDLE: str = os.getenv("PAYPAL_HANDLE", "getmaverick")
     VENMO_HANDLE: str = os.getenv("VENMO_HANDLE", "@GetMaverick")

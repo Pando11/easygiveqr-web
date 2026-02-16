@@ -41,6 +41,7 @@ def check_env_keys() -> list[CheckResult]:
     results: list[CheckResult] = []
     stripe_secret = os.getenv("STRIPE_SECRET_KEY", "").strip()
     stripe_publishable = os.getenv("STRIPE_PUBLISHABLE_KEY", "").strip()
+    stripe_webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
     database_url = os.getenv("DATABASE_URL", "").strip()
 
     if stripe_secret.startswith("sk_"):
@@ -63,6 +64,20 @@ def check_env_keys() -> list[CheckResult]:
         )
     else:
         results.append(_fail("env:STRIPE_PUBLISHABLE_KEY", "missing"))
+
+    if stripe_webhook_secret.startswith("whsec_"):
+        results.append(
+            _pass("env:STRIPE_WEBHOOK_SECRET", f"set ({stripe_webhook_secret[:8]}...)")
+        )
+    elif stripe_webhook_secret:
+        results.append(
+            _fail(
+                "env:STRIPE_WEBHOOK_SECRET",
+                "present but invalid format (expected whsec_*)",
+            )
+        )
+    else:
+        results.append(_fail("env:STRIPE_WEBHOOK_SECRET", "missing"))
 
     placeholder_markers = ("user:pass@host:port/dbname", "postgres:...@containers-")
     if not database_url:
@@ -142,11 +157,30 @@ def check_flask_routes(project_dir: Path) -> list[CheckResult]:
             )
         )
 
+    stripe_webhook_smoke = client.post("/stripe/webhook", data=b"{}", headers={})
+    if stripe_webhook_smoke.status_code in {400, 500}:
+        results.append(
+            _pass(
+                "flask:/stripe/webhook",
+                f"endpoint reachable (status={stripe_webhook_smoke.status_code})",
+            )
+        )
+    else:
+        results.append(
+            _fail(
+                "flask:/stripe/webhook",
+                f"unexpected status={stripe_webhook_smoke.status_code}",
+            )
+        )
+
     return results
 
 
-def run_worker_dry_run(script_name: str, project_dir: Path) -> CheckResult:
-    cmd = [sys.executable, script_name, "--dry-run"]
+def run_worker_dry_run(script_name: str, project_dir: Path, extra_args: list[str] | None = None) -> CheckResult:
+    cmd = [sys.executable, script_name]
+    if extra_args:
+        cmd.extend(extra_args)
+    cmd.append("--dry-run")
     env = os.environ.copy()
     if "user:pass@host:port/dbname" in env.get("DATABASE_URL", ""):
         env["DATABASE_URL"] = ""
@@ -198,6 +232,7 @@ def main() -> int:
     results.extend(check_flask_routes(project_dir))
     results.append(run_worker_dry_run("send_reminders.py", project_dir))
     results.append(run_worker_dry_run("check_problems.py", project_dir))
+    results.append(run_worker_dry_run("run_stripe_minions.py", project_dir, extra_args=["--all"]))
 
     print_results(results)
 

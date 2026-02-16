@@ -12,6 +12,7 @@ from werkzeug.utils import secure_filename
 
 from config import Config
 from utils.db import execute_insert, execute_query
+from utils.payments import calculate_payment_breakdown
 from utils.s3 import upload_contract
 from utils.sms import send_reminder, send_sms
 
@@ -368,33 +369,15 @@ def payment_page(transaction_id, payment_type):
     if payment_type == "closing" and txn["payment_closing_paid"]:
         return "This payment has already been received. Thank you!", 200
 
-    if txn["rush_service"]:
-        base_amount = 300.0 if payment_type == "upfront" else 300.0
-    else:
-        base_amount = 200.0
-
-    referral_credit = 0.0
-    if payment_type == "upfront" and txn["referred_by_agent"]:
-        credit_query = """
-        SELECT id, credit_amount FROM referrals
-        WHERE referred_agent_name = %s
-          AND credit_used = FALSE
-        ORDER BY created_at DESC
-        LIMIT 1
-        """
-        credit_rows = execute_query(credit_query, (txn["agent_name"],), fetch=True) or []
-        if credit_rows:
-            referral_credit = float(credit_rows[0]["credit_amount"])
-
-    final_amount = max(base_amount - referral_credit, 0.0)
+    breakdown = calculate_payment_breakdown(txn, payment_type)
     payment_data = {
         "transaction_id": transaction_id,
         "property_address": txn["property_address"],
         "payment_type": payment_type,
-        "original_amount": f"{base_amount:.2f}",
-        "referral_credit": f"{referral_credit:.2f}",
-        "amount": f"{final_amount:.2f}",
-        "amount_number": round(final_amount, 2),
+        "original_amount": f"{breakdown['original_amount']:.2f}",
+        "referral_credit": f"{breakdown['referral_credit']:.2f}",
+        "amount": f"{breakdown['amount']:.2f}",
+        "amount_number": round(float(breakdown["amount"]), 2),
     }
 
     venmo_handle = os.getenv("VENMO_HANDLE", "GetMaverick").lstrip("@")
@@ -512,6 +495,113 @@ def process_payment(transaction_id, payment_type):
     except Exception as exc:
         print(f"Payment error: {exc}")
         return jsonify({"success": False, "error": "Payment processing error"}), 500
+
+
+@app.route("/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    """Handle Stripe webhook events for payment state sync."""
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+    if not webhook_secret:
+        return jsonify({"received": False, "error": "Webhook secret not configured"}), 500
+
+    payload = request.get_data(as_text=False)
+    signature = request.headers.get("Stripe-Signature", "")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, signature, webhook_secret)
+    except ValueError:
+        return jsonify({"received": False, "error": "Invalid payload"}), 400
+    except stripe.error.SignatureVerificationError:
+        return jsonify({"received": False, "error": "Invalid signature"}), 400
+
+    event_type = event.get("type")
+    data_object = (event.get("data") or {}).get("object") or {}
+    metadata = data_object.get("metadata") or {}
+    transaction_id_raw = metadata.get("transaction_id")
+    payment_type = metadata.get("payment_type", "upfront")
+    if payment_type not in {"upfront", "closing"}:
+        payment_type = "upfront"
+
+    transaction_id = None
+    if transaction_id_raw:
+        try:
+            transaction_id = int(transaction_id_raw)
+        except ValueError:
+            transaction_id = None
+
+    if event_type == "payment_intent.succeeded" and transaction_id:
+        if payment_type == "upfront":
+            execute_query(
+                """
+                UPDATE transactions
+                SET payment_upfront_paid = TRUE,
+                    payment_upfront_date = COALESCE(payment_upfront_date, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (transaction_id,),
+            )
+        else:
+            execute_query(
+                """
+                UPDATE transactions
+                SET payment_closing_paid = TRUE,
+                    payment_closing_date = COALESCE(payment_closing_date, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (transaction_id,),
+            )
+
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'text', 'agent', 'system',
+                    %s, %s)
+            """,
+            (
+                transaction_id,
+                f"Stripe webhook confirmed {payment_type} payment",
+                f"event={event_type} intent={data_object.get('id', 'unknown')}",
+            ),
+        )
+
+    if event_type == "payment_intent.payment_failed" and transaction_id:
+        rows = execute_query(
+            """
+            SELECT id, property_address, agent_phone, status
+            FROM transactions
+            WHERE id = %s
+            """,
+            (transaction_id,),
+            fetch=True,
+        ) or []
+
+        if rows and rows[0]["status"] not in {"CANCELLED", "COMPLETED"}:
+            base_url = (os.getenv("APP_BASE_URL") or "http://localhost:5000").rstrip("/")
+            retry_link = f"{base_url}/pay/{transaction_id}/{payment_type}"
+            send_sms(
+                rows[0]["agent_phone"],
+                (
+                    f"We could not process your {payment_type} payment for "
+                    f"{rows[0]['property_address']}.\nRetry securely: {retry_link}\n- Maverick TC"
+                ),
+            )
+
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'text', 'agent', 'system',
+                    %s, %s)
+            """,
+            (
+                transaction_id,
+                f"Stripe webhook reported failed {payment_type} payment",
+                f"event={event_type} intent={data_object.get('id', 'unknown')}",
+            ),
+        )
+
+    return jsonify({"received": True})
 
 
 @app.route("/tc/reminder/<int:deadline_id>/send", methods=["POST"])
