@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+
+{% block title %}Margaret Login - Maverick TC{% endblock %}
+{% block subtitle %}Transaction Coordinator Access{% endblock %}
+
+{% block content %}
+<section class="login-shell">
+    <div class="card login-card">
+        <span class="eyebrow">Private Dashboard</span>
+        <h2>Margaret Login</h2>
+        <p class="login-text">
+            Sign in to review new contracts, manage active timelines, and close out completed files.
+        </p>
+
+        {% if error %}
+        <div class="alert alert-error">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('tc_login') }}" class="login-form" autocomplete="on">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input
+                    id="username"
+                    name="username"
+                    type="text"
+                    value="{{ username or '' }}"
+                    required
+                    autocomplete="username"
+                >
+            </div>
+
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input
+                    id="password"
+                    name="password"
+                    type="password"
+                    required
+                    autocomplete="current-password"
+                >
+            </div>
+
+            <label class="remember-row" for="remember_me">
+                <input
+                    id="remember_me"
+                    name="remember_me"
+                    type="checkbox"
+                    {% if remember_me %}checked{% endif %}
+                >
+                <span>Remember me</span>
+            </label>
+
+            <button type="submit" class="btn login-btn">Sign In</button>
+        </form>
+    </div>
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.login-shell {
+    min-height: 58vh;
+    display: grid;
+    place-items: center;
+}
+
+.login-card {
+    width: 100%;
+    max-width: 520px;
+    border: 1px solid #dbeafe;
+    box-shadow: 0 10px 32px rgba(30, 58, 138, 0.12);
+    background: linear-gradient(145deg, #ffffff, #f8fbff);
+}
+
+.eyebrow {
+    display: inline-block;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    color: #0369a1;
+    background: #e0f2fe;
+    border-radius: 999px;
+    padding: 6px 10px;
+    margin-bottom: 12px;
+}
+
+.login-card h2 {
+    color: #1e3a8a;
+    margin-bottom: 6px;
+}
+
+.login-text {
+    color: #334155;
+    margin-bottom: 16px;
+}
+
+.login-form .form-group {
+    margin-bottom: 14px;
+}
+
+.login-form label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.login-form input[type="text"],
+.login-form input[type="password"] {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    font-size: 16px;
+}
+
+.login-form input:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+.remember-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 6px 0 18px;
+    color: #334155;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.remember-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+}
+
+.login-btn {
+    width: 100%;
+    font-size: 17px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #2563eb, #10b981);
+}
+
+.login-btn:hover {
+    background: linear-gradient(135deg, #1d4ed8, #059669);
+}
+
+@media (max-width: 768px) {
+    .login-card {
+        padding: 22px;
+    }
+}
+</style>
+{% endblock %}

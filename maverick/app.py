@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import wraps
 
 import stripe
@@ -29,6 +29,9 @@ app = Flask(__name__)
 app.config.from_object(Config())
 app.secret_key = app.config["SECRET_KEY"]
 app.config["MAX_CONTENT_LENGTH"] = app.config.get("MAX_CONTENT_LENGTH", 16 * 1024 * 1024)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.permanent_session_lifetime = timedelta(days=14)
 
 ALLOWED_EXTENSIONS = set(app.config.get("ALLOWED_EXTENSIONS", {"pdf"}))
 MAX_FILE_SIZE = app.config["MAX_CONTENT_LENGTH"]
@@ -70,11 +73,70 @@ def login_required(view_func):
 
     @wraps(view_func)
     def wrapped(*args, **kwargs):
-        if not session.get("tc_authenticated"):
-            return redirect(url_for("tc_login"))
+        if not session.get("tc_logged_in"):
+            return redirect(url_for("tc_entry"))
         return view_func(*args, **kwargs)
 
     return wrapped
+
+
+def format_time_ago(value):
+    """Return a short relative time label for dashboard cards."""
+    if not value:
+        return "Unknown"
+
+    if isinstance(value, date) and not isinstance(value, datetime):
+        value = datetime.combine(value, datetime.min.time())
+    if not isinstance(value, datetime):
+        return "Unknown"
+
+    now = datetime.now(value.tzinfo) if value.tzinfo else datetime.now()
+    delta = now - value
+
+    total_seconds = max(int(delta.total_seconds()), 0)
+    if total_seconds < 60:
+        return "just now"
+
+    minutes = total_seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+
+    days_count = hours // 24
+    if days_count < 30:
+        return f"{days_count}d ago"
+
+    months = days_count // 30
+    return f"{months}mo ago"
+
+
+def calculate_days_until_closing(closing_date):
+    """Return days remaining until closing date."""
+    if not closing_date:
+        return None
+    return (closing_date - date.today()).days
+
+
+def format_next_deadline(deadline_type, deadline_date):
+    """Return formatted next-deadline label for the dashboard."""
+    if not deadline_type or not deadline_date:
+        return "No upcoming deadline"
+    pretty_type = deadline_type.replace("_", " ").title()
+    return f"{pretty_type} ({deadline_date.strftime('%b %d')})"
+
+
+def payment_status_text(upfront_paid, closing_paid):
+    """Return compact payment status label."""
+    if upfront_paid and closing_paid:
+        return "Paid in full"
+    if upfront_paid and not closing_paid:
+        return "Upfront paid"
+    if not upfront_paid and closing_paid:
+        return "Closing paid only"
+    return "Unpaid"
 
 
 @app.route("/")
@@ -89,126 +151,156 @@ def health():
     return jsonify({"ok": True, "service": "maverick-tc"})
 
 
+@app.route("/tc", methods=["GET"])
+def tc_entry():
+    """Margaret login page."""
+    if session.get("tc_logged_in"):
+        return redirect(url_for("tc_dashboard"))
+    return render_template("login.html", error=None, username="", remember_me=False)
+
+
 @app.route("/tc/login", methods=["GET", "POST"])
 def tc_login():
-    """Simple TC login page."""
-    if session.get("tc_authenticated"):
+    """Handle Margaret login submission."""
+    if request.method == "GET":
+        return redirect(url_for("tc_entry"))
+
+    if session.get("tc_logged_in"):
         return redirect(url_for("tc_dashboard"))
 
-    error = None
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        expected_username = os.getenv("TC_USERNAME", "margaret")
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    remember_me = request.form.get("remember_me") == "on"
+    expected_username = os.getenv("TC_USERNAME", "margaret")
 
-        if username == expected_username and _verify_tc_password(password):
-            session["tc_authenticated"] = True
-            session["tc_username"] = username
-            return redirect(url_for("tc_dashboard"))
-        error = "Invalid username or password."
+    if username == expected_username and _verify_tc_password(password):
+        session.clear()
+        session["tc_logged_in"] = True
+        session["tc_username"] = username
+        session.permanent = remember_me
+        return redirect(url_for("tc_dashboard"))
 
-    return f"""
-    <html>
-      <head>
-        <title>Maverick TC Login</title>
-        <style>
-          body {{ font-family: Arial, sans-serif; background: #f5f5f5; padding: 40px; }}
-          .card {{ max-width: 420px; margin: 0 auto; background: #fff; padding: 24px;
-                   border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-          input {{ width: 100%; padding: 10px; margin: 8px 0 14px; border: 1px solid #ccc; border-radius: 6px; }}
-          button {{ width: 100%; padding: 12px; border: none; border-radius: 6px;
-                    background: #10b981; color: #fff; cursor: pointer; }}
-          .error {{ color: #b91c1c; margin-bottom: 12px; }}
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h2>Margaret Dashboard Login</h2>
-          <p>Use your TC credentials to continue.</p>
-          {"<p class='error'>" + error + "</p>" if error else ""}
-          <form method="post">
-            <label>Username</label>
-            <input name="username" required />
-            <label>Password</label>
-            <input name="password" type="password" required />
-            <button type="submit">Sign in</button>
-          </form>
-        </div>
-      </body>
-    </html>
-    """
+    return (
+        render_template(
+            "login.html",
+            error="Invalid username or password.",
+            username=username,
+            remember_me=remember_me,
+        ),
+        401,
+    )
 
 
 @app.route("/tc/logout")
 def tc_logout():
+    """Clear session and return to login page."""
     session.clear()
-    return redirect(url_for("tc_login"))
+    return redirect(url_for("tc_entry"))
 
 
-@app.route("/tc")
+@app.route("/tc/dashboard")
 @login_required
 def tc_dashboard():
-    """Minimal transaction list dashboard."""
-    rows = execute_query(
+    """Render Margaret's main dashboard with status-grouped transactions."""
+    needs_review = execute_query(
         """
-        SELECT id, property_address, agent_name, status, closing_date,
-               payment_upfront_paid, payment_closing_paid
+        SELECT id, property_address, agent_name, agent_phone, created_at,
+               rush_service, referred_by_agent
         FROM transactions
-        ORDER BY created_at DESC
-        LIMIT 100
+        WHERE status = %s
+        ORDER BY created_at ASC
+        LIMIT %s
         """,
+        ("NEEDS_MARGARET_REVIEW", 50),
         fetch=True,
     ) or []
 
-    list_items = []
-    for txn in rows:
-        closing = txn["closing_date"].strftime("%Y-%m-%d") if txn["closing_date"] else "TBD"
-        list_items.append(
-            f"""
-            <tr>
-              <td>{txn['id']}</td>
-              <td>{txn['property_address']}</td>
-              <td>{txn['agent_name']}</td>
-              <td>{txn['status']}</td>
-              <td>{closing}</td>
-              <td>{"YES" if txn['payment_upfront_paid'] else "NO"}</td>
-              <td>{"YES" if txn['payment_closing_paid'] else "NO"}</td>
-              <td><a href="/tc/transaction/{txn['id']}">Open</a></td>
-            </tr>
-            """
+    active_transactions = execute_query(
+        """
+        SELECT t.id, t.property_address, t.agent_name, t.agent_phone, t.closing_date,
+               t.payment_upfront_paid, t.payment_closing_paid,
+               nd.deadline_type AS next_deadline_type,
+               nd.deadline_date AS next_deadline_date
+        FROM transactions t
+        LEFT JOIN LATERAL (
+            SELECT d.deadline_type, d.deadline_date
+            FROM deadlines d
+            WHERE d.transaction_id = t.id
+              AND d.completed = FALSE
+              AND d.deadline_date >= CURRENT_DATE
+            ORDER BY d.deadline_date ASC
+            LIMIT 1
+        ) nd ON TRUE
+        WHERE t.status = %s
+        ORDER BY COALESCE(t.closing_date, nd.deadline_date) ASC NULLS LAST, t.created_at DESC
+        LIMIT %s
+        """,
+        ("ACTIVE", 100),
+        fetch=True,
+    ) or []
+
+    completed_transactions = execute_query(
+        """
+        SELECT id, property_address, agent_name, closing_date, updated_at,
+               payment_upfront_paid, payment_closing_paid
+        FROM transactions
+        WHERE status = %s
+        ORDER BY COALESCE(closing_date, updated_at::date) DESC
+        LIMIT %s
+        """,
+        ("COMPLETED", 10),
+        fetch=True,
+    ) or []
+
+    for transaction in needs_review:
+        transaction["time_ago_uploaded"] = format_time_ago(transaction.get("created_at"))
+        transaction["has_rush"] = bool(transaction.get("rush_service"))
+        transaction["has_referral"] = bool(transaction.get("referred_by_agent"))
+
+    for transaction in active_transactions:
+        days_until = calculate_days_until_closing(transaction.get("closing_date"))
+        transaction["days_until_closing"] = days_until
+        if days_until is None:
+            transaction["days_until_label"] = "No closing date"
+        elif days_until < 0:
+            transaction["days_until_label"] = f"{abs(days_until)} days overdue"
+        elif days_until == 0:
+            transaction["days_until_label"] = "Closing today"
+        elif days_until == 1:
+            transaction["days_until_label"] = "1 day until closing"
+        else:
+            transaction["days_until_label"] = f"{days_until} days until closing"
+
+        transaction["next_deadline_label"] = format_next_deadline(
+            transaction.get("next_deadline_type"),
+            transaction.get("next_deadline_date"),
+        )
+        transaction["payment_summary"] = payment_status_text(
+            bool(transaction.get("payment_upfront_paid")),
+            bool(transaction.get("payment_closing_paid")),
         )
 
-    table_rows = "".join(list_items) or "<tr><td colspan='8'>No transactions yet.</td></tr>"
-    return f"""
-    <html>
-      <head>
-        <title>Maverick TC Dashboard</title>
-        <style>
-          body {{ font-family: Arial, sans-serif; margin: 24px; }}
-          table {{ border-collapse: collapse; width: 100%; }}
-          th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-          th {{ background: #f5f5f5; }}
-          .nav {{ margin-bottom: 20px; }}
-        </style>
-      </head>
-      <body>
-        <div class="nav">
-          <strong>Maverick TC Dashboard</strong> |
-          <a href="/tc/checklist">Daily checklist</a> |
-          <a href="/tc/logout">Logout</a>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th><th>Property</th><th>Agent</th><th>Status</th><th>Closing</th>
-              <th>Upfront Paid</th><th>Closing Paid</th><th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>{table_rows}</tbody>
-        </table>
-      </body>
-    </html>
-    """
+    for transaction in completed_transactions:
+        closed_on = transaction.get("closing_date")
+        if not closed_on and transaction.get("updated_at"):
+            closed_on = transaction["updated_at"].date()
+
+        transaction["closed_date_label"] = closed_on.strftime("%b %d, %Y") if closed_on else "Unknown"
+        transaction["payment_summary"] = payment_status_text(
+            bool(transaction.get("payment_upfront_paid")),
+            bool(transaction.get("payment_closing_paid")),
+        )
+
+    tc_name = (session.get("tc_username") or "margaret").capitalize()
+    current_date_label = datetime.now().strftime("%A, %B %d, %Y")
+    return render_template(
+        "tc_dashboard.html",
+        tc_name=tc_name,
+        current_date_label=current_date_label,
+        needs_review=needs_review,
+        active_transactions=active_transactions,
+        completed_transactions=completed_transactions,
+    )
 
 
 @app.route("/tc/checklist")
@@ -253,7 +345,7 @@ def tc_transaction(transaction_id):
     <html>
       <head><title>Transaction {txn['id']}</title></head>
       <body style="font-family: Arial, sans-serif; margin: 24px;">
-        <a href="/tc">Back to dashboard</a>
+        <a href="/tc/dashboard">Back to dashboard</a>
         <h2>{txn['property_address']}</h2>
         <p><strong>Agent:</strong> {txn['agent_name']} ({txn['agent_phone']})</p>
         <p><strong>Status:</strong> {txn['status']}</p>
