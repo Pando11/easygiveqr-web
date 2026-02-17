@@ -1,0 +1,442 @@
+{% extends "base.html" %}
+
+{% block title %}All Tasks - Maverick TC{% endblock %}
+{% block subtitle %}Task Management{% endblock %}
+
+{% block content %}
+<section class="card header-card">
+    <div>
+        <h2>All Tasks</h2>
+        {% if transaction_filter %}
+        <p class="subtle">Filtered to transaction #{{ transaction_filter }}</p>
+        {% endif %}
+    </div>
+    <div class="header-actions">
+        <label for="taskFilter">Filter</label>
+        <select id="taskFilter">
+            <option value="all" {% if selected_filter == "all" %}selected{% endif %}>All</option>
+            <option value="pending" {% if selected_filter == "pending" %}selected{% endif %}>Pending</option>
+            <option value="overdue" {% if selected_filter == "overdue" %}selected{% endif %}>Overdue</option>
+            <option value="completed" {% if selected_filter == "completed" %}selected{% endif %}>Completed</option>
+        </select>
+        <a href="/tc/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+<section class="tasks-section section-overdue" data-section="overdue">
+    <div class="section-title">
+        <h3>🚨 Overdue Tasks</h3>
+        <span class="count">{{ overdue_tasks|length }}</span>
+    </div>
+    {% if overdue_tasks %}
+    <div class="task-grid">
+        {% for task in overdue_tasks %}
+        <article class="task-card" data-task-id="{{ task.id }}" data-task-state="pending">
+            <div class="task-head">
+                <label class="toggle-row">
+                    <input type="checkbox" class="task-toggle" data-task-id="{{ task.id }}">
+                    <span>{{ task.task_description }}</span>
+                </label>
+                <button class="btn btn-small btn-secondary add-note-btn" data-task-id="{{ task.id }}">Add Note</button>
+            </div>
+            <p>
+                <a href="/tc/transaction/{{ task.transaction_id }}">{{ task.property_address }}</a>
+            </p>
+            <p class="danger-text">{{ task.days_overdue }} day{{ "" if task.days_overdue == 1 else "s" }} overdue</p>
+            <p class="task-notes {% if not task.notes %}hidden{% endif %}" id="task-note-{{ task.id }}">{{ task.notes or "" }}</p>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No overdue tasks right now.</div>
+    {% endif %}
+</section>
+
+<section class="tasks-section section-today" data-section="today">
+    <div class="section-title">
+        <h3>⚠️ Due Today</h3>
+        <span class="count">{{ due_today_tasks|length }}</span>
+    </div>
+    {% if due_today_tasks %}
+    <div class="task-grid">
+        {% for task in due_today_tasks %}
+        <article class="task-card" data-task-id="{{ task.id }}" data-task-state="pending">
+            <div class="task-head">
+                <label class="toggle-row">
+                    <input type="checkbox" class="task-toggle" data-task-id="{{ task.id }}">
+                    <span>{{ task.task_description }}</span>
+                </label>
+                <button class="btn btn-small btn-secondary add-note-btn" data-task-id="{{ task.id }}">Add Note</button>
+            </div>
+            <p>
+                <a href="/tc/transaction/{{ task.transaction_id }}">{{ task.property_address }}</a>
+            </p>
+            <p class="warn-text">Due today</p>
+            <p class="task-notes {% if not task.notes %}hidden{% endif %}" id="task-note-{{ task.id }}">{{ task.notes or "" }}</p>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No tasks due today.</div>
+    {% endif %}
+</section>
+
+<section class="tasks-section section-upcoming" data-section="upcoming">
+    <div class="section-title">
+        <h3>📋 Upcoming Tasks (Next 7 Days)</h3>
+        <span class="count">{{ upcoming_tasks|length }}</span>
+    </div>
+    {% if upcoming_tasks %}
+    <div class="task-grid">
+        {% for task in upcoming_tasks %}
+        <article class="task-card" data-task-id="{{ task.id }}" data-task-state="pending">
+            <div class="task-head">
+                <label class="toggle-row">
+                    <input type="checkbox" class="task-toggle" data-task-id="{{ task.id }}">
+                    <span>{{ task.task_description }}</span>
+                </label>
+                <button class="btn btn-small btn-secondary add-note-btn" data-task-id="{{ task.id }}">Add Note</button>
+            </div>
+            <p>
+                <a href="/tc/transaction/{{ task.transaction_id }}">{{ task.property_address }}</a>
+            </p>
+            <p class="subtle">
+                Due in {{ task.days_until }} day{{ "" if task.days_until == 1 else "s" }} ({{ task.due_label }})
+            </p>
+            <p class="task-notes {% if not task.notes %}hidden{% endif %}" id="task-note-{{ task.id }}">{{ task.notes or "" }}</p>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No upcoming tasks in the next 7 days.</div>
+    {% endif %}
+</section>
+
+<section class="tasks-section section-completed" data-section="completed">
+    <div class="section-title">
+        <h3>✅ Completed Tasks</h3>
+        <span class="count">{{ completed_tasks|length }}</span>
+    </div>
+    {% if completed_tasks %}
+    <div class="task-grid">
+        {% for task in completed_tasks %}
+        <article class="task-card is-completed" data-task-id="{{ task.id }}" data-task-state="completed">
+            <div class="task-head">
+                <label class="toggle-row">
+                    <input type="checkbox" class="task-toggle" data-task-id="{{ task.id }}" checked>
+                    <span>{{ task.task_description }}</span>
+                </label>
+                <button class="btn btn-small btn-secondary add-note-btn" data-task-id="{{ task.id }}">Add Note</button>
+            </div>
+            <p>
+                <a href="/tc/transaction/{{ task.transaction_id }}">{{ task.property_address }}</a>
+            </p>
+            <p class="subtle">Completed {{ task.completed_at_label or "recently" }}</p>
+            <p class="task-notes {% if not task.notes %}hidden{% endif %}" id="task-note-{{ task.id }}">{{ task.notes or "" }}</p>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No completed tasks found.</div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.header-card {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-end;
+}
+
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.header-actions label {
+    font-weight: 600;
+    color: #1e293b;
+}
+
+.header-actions select {
+    padding: 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.tasks-section {
+    background: #fff;
+    border-radius: 10px;
+    margin-bottom: 16px;
+    border: 1px solid #e2e8f0;
+    padding: 14px;
+}
+
+.section-overdue {
+    border-left: 6px solid #dc2626;
+}
+
+.section-today {
+    border-left: 6px solid #d97706;
+}
+
+.section-upcoming {
+    border-left: 6px solid #2563eb;
+}
+
+.section-completed {
+    border-left: 6px solid #16a34a;
+}
+
+.section-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.count {
+    background: #e2e8f0;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-weight: 700;
+    font-size: 13px;
+}
+
+.task-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.task-card {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 12px;
+    background: #f8fafc;
+    transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.task-card a {
+    color: #1d4ed8;
+    text-decoration: none;
+}
+
+.task-card a:hover {
+    text-decoration: underline;
+}
+
+.task-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.toggle-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+}
+
+.task-notes {
+    margin-top: 8px;
+    white-space: pre-line;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+    padding: 8px;
+    font-size: 13px;
+}
+
+.hidden {
+    display: none;
+}
+
+.danger-text {
+    color: #b91c1c;
+    font-weight: 700;
+}
+
+.warn-text {
+    color: #92400e;
+    font-weight: 700;
+}
+
+.is-completed {
+    opacity: 0.55;
+}
+
+.empty-state {
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    padding: 14px;
+    color: #64748b;
+    background: #f8fafc;
+}
+
+.btn-small {
+    padding: 8px 12px;
+    font-size: 13px;
+}
+
+@media (max-width: 1024px) {
+    .task-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    .header-card {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .header-actions {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .header-actions .btn {
+        width: 100%;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const filterSelect = document.getElementById("taskFilter");
+const sections = {
+    overdue: document.querySelector('[data-section="overdue"]'),
+    today: document.querySelector('[data-section="today"]'),
+    upcoming: document.querySelector('[data-section="upcoming"]'),
+    completed: document.querySelector('[data-section="completed"]')
+};
+
+function applyFilter(filterValue) {
+    const isCompletedOnly = filterValue === "completed";
+    const isOverdueOnly = filterValue === "overdue";
+
+    if (sections.overdue) {
+        sections.overdue.style.display = (filterValue === "all" || filterValue === "pending" || isOverdueOnly) ? "" : "none";
+    }
+    if (sections.today) {
+        sections.today.style.display = (filterValue === "all" || filterValue === "pending") ? "" : "none";
+    }
+    if (sections.upcoming) {
+        sections.upcoming.style.display = (filterValue === "all" || filterValue === "pending") ? "" : "none";
+    }
+    if (sections.completed) {
+        sections.completed.style.display = isCompletedOnly ? "" : "none";
+    }
+}
+
+async function toggleTask(taskId, completed, checkboxEl) {
+    try {
+        const response = await fetch(`/tc/task/${taskId}/toggle`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ completed })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || "Unable to update task.");
+        }
+
+        const card = document.querySelector(`[data-task-id="${taskId}"]`);
+        if (card) {
+            card.dataset.taskState = completed ? "completed" : "pending";
+            card.classList.toggle("is-completed", completed);
+            if (completed && filterSelect.value !== "completed") {
+                setTimeout(() => {
+                    card.style.opacity = "0";
+                    setTimeout(() => {
+                        card.style.display = "none";
+                    }, 250);
+                }, 100);
+            } else {
+                card.style.display = "";
+                card.style.opacity = "";
+            }
+        }
+
+        if (window.showSuccess) {
+            window.showSuccess(completed ? "Task completed." : "Task marked pending.");
+        }
+    } catch (error) {
+        checkboxEl.checked = !completed;
+        if (window.showError) {
+            window.showError(error.message || "Failed to toggle task.");
+        }
+    }
+}
+
+async function addTaskNote(taskId) {
+    const noteText = window.prompt("Add note to this task:");
+    if (!noteText || !noteText.trim()) {
+        return;
+    }
+    try {
+        const response = await fetch(`/tc/task/${taskId}/note`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ note: noteText.trim() })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || "Unable to save note.");
+        }
+
+        const noteElement = document.getElementById(`task-note-${taskId}`);
+        if (noteElement) {
+            noteElement.textContent = data.notes || noteText.trim();
+            noteElement.classList.remove("hidden");
+        }
+        if (window.showSuccess) {
+            window.showSuccess("Task note saved.");
+        }
+    } catch (error) {
+        if (window.showError) {
+            window.showError(error.message || "Failed to save note.");
+        }
+    }
+}
+
+document.querySelectorAll(".task-toggle").forEach((checkbox) => {
+    checkbox.addEventListener("change", (event) => {
+        const taskId = event.target.dataset.taskId;
+        toggleTask(taskId, event.target.checked, event.target);
+    });
+});
+
+document.querySelectorAll(".add-note-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+        addTaskNote(button.dataset.taskId);
+    });
+});
+
+if (filterSelect) {
+    applyFilter(filterSelect.value);
+    filterSelect.addEventListener("change", (event) => {
+        applyFilter(event.target.value);
+    });
+}
+</script>
+{% endblock %}

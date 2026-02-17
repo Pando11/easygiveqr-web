@@ -149,7 +149,7 @@
             {% else %}
             <div class="empty-box">No tasks created yet.</div>
             {% endif %}
-            <a class="text-link" href="#tasks">View all {{ task_total }} tasks</a>
+            <a class="text-link" href="/tc/tasks?transaction_id={{ transaction.id }}">View all {{ task_total }} tasks</a>
         </article>
 
         <article class="card" id="documents">

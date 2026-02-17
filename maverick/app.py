@@ -99,6 +99,9 @@ TASK_BLUEPRINTS = (
     ("Archive all documents", "post_closing", "closing", 3, "medium"),
 )
 
+LENDER_DEADLINE_TYPES = {"financing_approval"}
+TITLE_DEADLINE_TYPES = {"title_commitment", "buyer_title_objection", "closing"}
+
 
 def normalize_phone(phone_number):
     """Normalize input to E.164-ish +1 format for US numbers."""
@@ -231,6 +234,25 @@ def parse_optional_date(raw_value: str | None):
         return None
 
 
+def parse_bool_value(raw_value, default=False):
+    """Convert mixed boolean form/JSON input to bool."""
+    if raw_value is None:
+        return default
+    if isinstance(raw_value, bool):
+        return raw_value
+    return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_optional_int(raw_value):
+    """Convert optional input to int or None."""
+    if raw_value in (None, ""):
+        return None
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+
 def file_extension(filename):
     """Return lower-cased extension for a filename."""
     if not filename or "." not in filename:
@@ -249,6 +271,24 @@ def document_due_status(target_date, is_complete):
     if target_date == date.today():
         return "today"
     return "pending"
+
+
+def deadline_contact_party(deadline_type):
+    """Infer the best call contact type for a deadline."""
+    if deadline_type in LENDER_DEADLINE_TYPES:
+        return "lender"
+    if deadline_type in TITLE_DEADLINE_TYPES:
+        return "title"
+    return "agent"
+
+
+def build_call_script(contact_party, deadline_label, property_address):
+    """Return guided call script text for daily checklist."""
+    if contact_party == "lender":
+        return f"Hi, checking on loan status for {property_address}. Any update on {deadline_label}?"
+    if contact_party == "title":
+        return f"Checking status of {deadline_label} for {property_address}. Anything needed from us today?"
+    return f"Checking on {deadline_label} for {property_address}. Do you need help completing this item?"
 
 
 def build_deadline_dates(
@@ -582,24 +622,362 @@ def tc_dashboard():
     )
 
 
+@app.route("/tc/tasks")
+@login_required
+def tc_tasks():
+    """Render the full task management workspace."""
+    selected_filter = (request.args.get("filter") or "all").strip().lower()
+    if selected_filter not in {"all", "pending", "overdue", "completed"}:
+        selected_filter = "all"
+    transaction_filter = parse_optional_int(request.args.get("transaction_id"))
+
+    try:
+        today = date.today()
+        upcoming_horizon = today + timedelta(days=7)
+        transaction_clause = " AND t.id = %s" if transaction_filter is not None else ""
+
+        overdue_params = [today]
+        if transaction_filter is not None:
+            overdue_params.append(transaction_filter)
+        overdue_tasks = execute_query(
+            f"""
+            SELECT tk.id, tk.task_description, tk.task_category, tk.notes, tk.due_date,
+                   tk.completed, tk.status, t.id AS transaction_id, t.property_address
+            FROM tasks tk
+            JOIN transactions t ON t.id = tk.transaction_id
+            WHERE tk.completed = FALSE
+              AND COALESCE(tk.status, 'pending') <> 'completed'
+              AND tk.due_date IS NOT NULL
+              AND tk.due_date < %s
+              AND t.status = 'ACTIVE'
+              {transaction_clause}
+            ORDER BY tk.due_date ASC, tk.display_order ASC NULLS LAST
+            """,
+            tuple(overdue_params),
+            fetch=True,
+        ) or []
+
+        due_today_params = [today]
+        if transaction_filter is not None:
+            due_today_params.append(transaction_filter)
+        due_today_tasks = execute_query(
+            f"""
+            SELECT tk.id, tk.task_description, tk.task_category, tk.notes, tk.due_date,
+                   tk.completed, tk.status, t.id AS transaction_id, t.property_address
+            FROM tasks tk
+            JOIN transactions t ON t.id = tk.transaction_id
+            WHERE tk.completed = FALSE
+              AND COALESCE(tk.status, 'pending') <> 'completed'
+              AND tk.due_date = %s
+              AND t.status = 'ACTIVE'
+              {transaction_clause}
+            ORDER BY tk.display_order ASC NULLS LAST, tk.id ASC
+            """,
+            tuple(due_today_params),
+            fetch=True,
+        ) or []
+
+        upcoming_params = [today, upcoming_horizon]
+        if transaction_filter is not None:
+            upcoming_params.append(transaction_filter)
+        upcoming_tasks = execute_query(
+            f"""
+            SELECT tk.id, tk.task_description, tk.task_category, tk.notes, tk.due_date,
+                   tk.completed, tk.status, t.id AS transaction_id, t.property_address
+            FROM tasks tk
+            JOIN transactions t ON t.id = tk.transaction_id
+            WHERE tk.completed = FALSE
+              AND COALESCE(tk.status, 'pending') <> 'completed'
+              AND tk.due_date > %s
+              AND tk.due_date <= %s
+              AND t.status = 'ACTIVE'
+              {transaction_clause}
+            ORDER BY tk.due_date ASC, tk.display_order ASC NULLS LAST
+            """,
+            tuple(upcoming_params),
+            fetch=True,
+        ) or []
+
+        completed_params: list[Any] = []
+        if transaction_filter is not None:
+            completed_params.append(transaction_filter)
+        completed_tasks = execute_query(
+            f"""
+            SELECT tk.id, tk.task_description, tk.task_category, tk.notes, tk.due_date,
+                   tk.completed, tk.status, tk.completed_at, t.id AS transaction_id, t.property_address
+            FROM tasks tk
+            JOIN transactions t ON t.id = tk.transaction_id
+            WHERE (tk.completed = TRUE OR tk.status = 'completed')
+              {transaction_clause}
+            ORDER BY COALESCE(tk.completed_at, tk.due_date) DESC NULLS LAST
+            LIMIT 60
+            """,
+            tuple(completed_params),
+            fetch=True,
+        ) or []
+
+        for task in overdue_tasks:
+            task["days_overdue"] = (today - task["due_date"]).days if task.get("due_date") else 0
+            task["due_label"] = format_date_label(task.get("due_date"))
+
+        for task in due_today_tasks:
+            task["due_label"] = format_date_label(task.get("due_date"))
+
+        for task in upcoming_tasks:
+            task["days_until"] = (task["due_date"] - today).days if task.get("due_date") else None
+            task["due_label"] = format_date_label(task.get("due_date"))
+
+        for task in completed_tasks:
+            completed_at = task.get("completed_at")
+            task["completed_at_label"] = completed_at.strftime("%b %d, %Y %I:%M %p") if completed_at else ""
+            task["due_label"] = format_date_label(task.get("due_date"))
+
+        return render_template(
+            "tc_tasks.html",
+            selected_filter=selected_filter,
+            transaction_filter=transaction_filter,
+            overdue_tasks=overdue_tasks,
+            due_today_tasks=due_today_tasks,
+            upcoming_tasks=upcoming_tasks,
+            completed_tasks=completed_tasks,
+        )
+    except Exception as exc:
+        print(f"Task view error: {exc}")
+        return "Unable to load tasks right now.", 500
+
+
+@app.route("/tc/task/<int:task_id>/toggle", methods=["POST"])
+@login_required
+def toggle_task(task_id):
+    """Toggle task completion state."""
+    try:
+        payload = request.get_json(silent=True) or request.form
+        completed = parse_bool_value(payload.get("completed"), default=False)
+        completed_by = session.get("tc_username", "margaret") if completed else None
+        status_value = "completed" if completed else "pending"
+
+        rows = execute_query(
+            """
+            UPDATE tasks
+            SET completed = %s,
+                status = %s,
+                completed_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END,
+                completed_by = %s
+            WHERE id = %s
+            RETURNING id, transaction_id, completed, status
+            """,
+            (completed, status_value, completed, completed_by, task_id),
+            fetch=True,
+        ) or []
+        if not rows:
+            return jsonify({"success": False, "error": "Task not found"}), 404
+
+        return jsonify(
+            {
+                "success": True,
+                "task_id": task_id,
+                "completed": bool(rows[0]["completed"]),
+                "status": rows[0]["status"],
+            }
+        )
+    except Exception as exc:
+        print(f"Task toggle error: {exc}")
+        return jsonify({"success": False, "error": "Unable to update task"}), 500
+
+
+@app.route("/tc/task/<int:task_id>/note", methods=["POST"])
+@login_required
+def add_task_note(task_id):
+    """Append a note to an existing task."""
+    try:
+        payload = request.get_json(silent=True) or request.form
+        note_text = (payload.get("note") or "").strip()
+        if not note_text:
+            return jsonify({"success": False, "error": "Note cannot be empty"}), 400
+        if len(note_text) > 1200:
+            return jsonify({"success": False, "error": "Note is too long"}), 400
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        note_entry = f"[{timestamp}] {note_text}"
+        rows = execute_query(
+            """
+            UPDATE tasks
+            SET notes = CASE
+                WHEN COALESCE(notes, '') = '' THEN %s
+                ELSE notes || E'\n' || %s
+            END
+            WHERE id = %s
+            RETURNING id, notes
+            """,
+            (note_entry, note_entry, task_id),
+            fetch=True,
+        ) or []
+        if not rows:
+            return jsonify({"success": False, "error": "Task not found"}), 404
+
+        return jsonify({"success": True, "task_id": task_id, "notes": rows[0]["notes"]})
+    except Exception as exc:
+        print(f"Task note error: {exc}")
+        return jsonify({"success": False, "error": "Unable to save note"}), 500
+
+
+@app.route("/tc/call/<int:deadline_id>/toggle", methods=["POST"])
+@login_required
+def toggle_call_made(deadline_id):
+    """Mark whether Margaret completed a required call."""
+    try:
+        payload = request.get_json(silent=True) or request.form
+        call_made = parse_bool_value(payload.get("made"), default=True)
+        rows = execute_query(
+            """
+            UPDATE deadlines
+            SET margaret_called_agent = %s,
+                margaret_call_date = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END
+            WHERE id = %s
+            RETURNING id, margaret_called_agent
+            """,
+            (call_made, call_made, deadline_id),
+            fetch=True,
+        ) or []
+        if not rows:
+            return jsonify({"success": False, "error": "Deadline not found"}), 404
+        return jsonify({"success": True, "deadline_id": deadline_id, "made": bool(rows[0]["margaret_called_agent"])})
+    except Exception as exc:
+        print(f"Call toggle error: {exc}")
+        return jsonify({"success": False, "error": "Unable to update call status"}), 500
+
+
+@app.route("/tc/daily-checklist")
 @app.route("/tc/checklist")
 @login_required
 def tc_daily_checklist():
-    """Simple daily checklist page with manual reminder actions."""
-    deadlines = execute_query(
-        """
-        SELECT d.id, d.deadline_type, d.deadline_date, d.completed,
-               t.property_address, t.agent_name
-        FROM deadlines d
-        JOIN transactions t ON t.id = d.transaction_id
-        WHERE t.status = 'ACTIVE'
-          AND d.completed = FALSE
-        ORDER BY d.deadline_date ASC
-        LIMIT 100
-        """,
-        fetch=True,
-    ) or []
-    return render_template("tc_daily_checklist.html", deadlines=deadlines, today=date.today())
+    """Render an auto-generated checklist for today's critical work."""
+    try:
+        today = date.today()
+        call_window_start = today - timedelta(days=1)
+        call_window_end = today + timedelta(days=3)
+
+        calls_to_make = execute_query(
+            """
+            SELECT d.id, d.deadline_type, d.deadline_date, d.margaret_called_agent,
+                   t.id AS transaction_id, t.property_address, t.agent_phone,
+                   t.lender_phone, t.title_officer_phone
+            FROM deadlines d
+            JOIN transactions t ON t.id = d.transaction_id
+            WHERE t.status = 'ACTIVE'
+              AND d.completed = FALSE
+              AND d.is_critical = TRUE
+              AND d.deadline_date >= %s
+              AND d.deadline_date <= %s
+            ORDER BY d.deadline_date ASC
+            """,
+            (call_window_start, call_window_end),
+            fetch=True,
+        ) or []
+
+        for call_item in calls_to_make:
+            contact_type = deadline_contact_party(call_item.get("deadline_type"))
+            deadline_label = (call_item.get("deadline_type") or "").replace("_", " ").title()
+            if contact_type == "lender":
+                contact_phone = call_item.get("lender_phone") or call_item.get("agent_phone")
+            elif contact_type == "title":
+                contact_phone = call_item.get("title_officer_phone") or call_item.get("agent_phone")
+            else:
+                contact_phone = call_item.get("agent_phone")
+
+            days_away = (call_item["deadline_date"] - today).days if call_item.get("deadline_date") else None
+            call_item["days_away"] = days_away
+            call_item["days_label"] = "Today" if days_away == 0 else f"{days_away}d"
+            call_item["deadline_label"] = deadline_label
+            call_item["contact_type"] = contact_type
+            call_item["contact_phone"] = contact_phone
+            call_item["call_script"] = build_call_script(
+                contact_type,
+                deadline_label,
+                call_item.get("property_address") or "this property",
+            )
+
+        overdue_tasks = execute_query(
+            """
+            SELECT tk.id, tk.task_description, tk.notes, tk.due_date,
+                   t.id AS transaction_id, t.property_address
+            FROM tasks tk
+            JOIN transactions t ON t.id = tk.transaction_id
+            WHERE t.status = 'ACTIVE'
+              AND tk.completed = FALSE
+              AND COALESCE(tk.status, 'pending') <> 'completed'
+              AND tk.due_date < %s
+            ORDER BY tk.due_date ASC, tk.display_order ASC NULLS LAST
+            """,
+            (today,),
+            fetch=True,
+        ) or []
+        for task in overdue_tasks:
+            task["days_overdue"] = (today - task["due_date"]).days if task.get("due_date") else 0
+
+        due_today_tasks = execute_query(
+            """
+            SELECT tk.id, tk.task_description, tk.notes, tk.due_date,
+                   t.id AS transaction_id, t.property_address
+            FROM tasks tk
+            JOIN transactions t ON t.id = tk.transaction_id
+            WHERE t.status = 'ACTIVE'
+              AND tk.completed = FALSE
+              AND COALESCE(tk.status, 'pending') <> 'completed'
+              AND tk.due_date = %s
+            ORDER BY tk.display_order ASC NULLS LAST, tk.id ASC
+            """,
+            (today,),
+            fetch=True,
+        ) or []
+
+        reminders_to_send = execute_query(
+            """
+            SELECT d.id, d.deadline_type, d.deadline_date,
+                   t.id AS transaction_id, t.property_address, t.agent_phone
+            FROM deadlines d
+            JOIN transactions t ON t.id = d.transaction_id
+            WHERE t.status = 'ACTIVE'
+              AND d.completed = FALSE
+              AND (
+                    (d.deadline_date = %s AND d.reminder_1d_sent = FALSE)
+                 OR (d.deadline_date = %s AND d.reminder_3d_sent = FALSE)
+                 OR (d.deadline_date = %s AND d.reminder_7d_sent = FALSE)
+                 OR (d.deadline_date = %s AND d.reminder_10d_sent = FALSE)
+              )
+            ORDER BY d.deadline_date ASC
+            """,
+            (
+                today + timedelta(days=1),
+                today + timedelta(days=3),
+                today + timedelta(days=7),
+                today + timedelta(days=10),
+            ),
+            fetch=True,
+        ) or []
+        for deadline in reminders_to_send:
+            deadline["days_until"] = (deadline["deadline_date"] - today).days if deadline.get("deadline_date") else None
+            deadline["deadline_label"] = (deadline.get("deadline_type") or "").replace("_", " ").title()
+
+        summary = {
+            "total_items": len(overdue_tasks) + len(due_today_tasks) + len(calls_to_make) + len(reminders_to_send),
+            "overdue_count": len(overdue_tasks),
+            "due_today_count": len(due_today_tasks),
+            "calls_count": len(calls_to_make),
+        }
+
+        return render_template(
+            "tc_daily_checklist.html",
+            current_date_label=today.strftime("%A, %B %d, %Y"),
+            summary=summary,
+            calls_to_make=calls_to_make,
+            overdue_tasks=overdue_tasks,
+            due_today_tasks=due_today_tasks,
+            reminders_to_send=reminders_to_send,
+        )
+    except Exception as exc:
+        print(f"Daily checklist error: {exc}")
+        return "Unable to load daily checklist right now.", 500
 
 
 @app.route("/tc/transaction/<int:transaction_id>")
@@ -1556,44 +1934,72 @@ def stripe_webhook():
 @login_required
 def send_reminder_now(deadline_id):
     """Manually send reminder for a deadline."""
-    query = """
-    SELECT d.deadline_type, d.deadline_date,
-           t.property_address, t.agent_phone
-    FROM deadlines d
-    JOIN transactions t ON d.transaction_id = t.id
-    WHERE d.id = %s
-    """
-    rows = execute_query(query, (deadline_id,), fetch=True) or []
-    if not rows:
-        return jsonify({"success": False, "error": "Deadline not found"}), 404
+    try:
+        rows = execute_query(
+            """
+            SELECT d.deadline_type, d.deadline_date, t.property_address, t.agent_phone
+            FROM deadlines d
+            JOIN transactions t ON d.transaction_id = t.id
+            WHERE d.id = %s
+            """,
+            (deadline_id,),
+            fetch=True,
+        ) or []
+        if not rows:
+            return jsonify({"success": False, "error": "Deadline not found"}), 404
 
-    deadline = rows[0]
-    days_until = (deadline["deadline_date"] - date.today()).days
-    success = send_reminder(
-        to_number=deadline["agent_phone"],
-        property_address=deadline["property_address"],
-        deadline_type=deadline["deadline_type"].replace("_", " ").title(),
-        deadline_date=deadline["deadline_date"].strftime("%m/%d/%Y"),
-        days_until=days_until,
-    )
+        deadline = rows[0]
+        if not deadline.get("deadline_date"):
+            return jsonify({"success": False, "error": "Deadline date is missing"}), 400
 
-    if not success:
-        return jsonify({"success": False, "error": "Failed to send SMS"}), 500
+        days_until = (deadline["deadline_date"] - date.today()).days
+        sent_sid = send_reminder(
+            to_number=deadline["agent_phone"],
+            property_address=deadline["property_address"],
+            deadline_type=deadline["deadline_type"].replace("_", " ").title(),
+            deadline_date=deadline["deadline_date"].strftime("%m/%d/%Y"),
+            days_until=days_until,
+        )
+        if not sent_sid:
+            return jsonify({"success": False, "error": "Failed to send SMS"}), 500
 
-    if days_until >= 10:
-        sent_flag, sent_at_flag = "reminder_10d_sent", "reminder_10d_sent_at"
-    elif days_until >= 7:
-        sent_flag, sent_at_flag = "reminder_7d_sent", "reminder_7d_sent_at"
-    elif days_until >= 3:
-        sent_flag, sent_at_flag = "reminder_3d_sent", "reminder_3d_sent_at"
-    else:
-        sent_flag, sent_at_flag = "reminder_1d_sent", "reminder_1d_sent_at"
+        if days_until >= 10:
+            update_query = """
+            UPDATE deadlines
+            SET reminder_10d_sent = TRUE,
+                reminder_10d_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """
+        elif days_until >= 7:
+            update_query = """
+            UPDATE deadlines
+            SET reminder_7d_sent = TRUE,
+                reminder_7d_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """
+        elif days_until >= 3:
+            update_query = """
+            UPDATE deadlines
+            SET reminder_3d_sent = TRUE,
+                reminder_3d_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """
+        else:
+            update_query = """
+            UPDATE deadlines
+            SET reminder_1d_sent = TRUE,
+                reminder_1d_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """
 
-    execute_query(
-        f"UPDATE deadlines SET {sent_flag} = TRUE, {sent_at_flag} = CURRENT_TIMESTAMP WHERE id = %s",
-        (deadline_id,),
-    )
-    return jsonify({"success": True})
+        updated = execute_query(update_query, (deadline_id,))
+        if not updated:
+            return jsonify({"success": False, "error": "Failed to update reminder log"}), 500
+
+        return jsonify({"success": True, "message_sid": sent_sid})
+    except Exception as exc:
+        print(f"Reminder send error: {exc}")
+        return jsonify({"success": False, "error": "Unable to send reminder right now"}), 500
 
 
 @app.route("/tc/transaction/<int:transaction_id>/mark-complete", methods=["GET", "POST"])
