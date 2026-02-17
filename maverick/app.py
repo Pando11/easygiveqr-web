@@ -467,7 +467,7 @@ def index():
 @app.route("/health")
 def health():
     """Basic health check for Railway and uptime monitors."""
-    return jsonify({"ok": True, "service": "maverick-tc"})
+    return jsonify({"status": "ok", "timestamp": datetime.utcnow().isoformat() + "Z"})
 
 
 @app.route("/tc", methods=["GET"])
@@ -2199,12 +2199,28 @@ def sms_webhook():
 
 @app.errorhandler(404)
 def not_found(_exc):
-    return "Page not found", 404
+    return (
+        render_template(
+            "error_page.html",
+            status_code=404,
+            title="Page Not Found",
+            message="The page you requested does not exist.",
+        ),
+        404,
+    )
 
 
 @app.errorhandler(500)
 def server_error(_exc):
-    return "Server error", 500
+    return (
+        render_template(
+            "error_page.html",
+            status_code=500,
+            title="Server Error",
+            message="Something went wrong. Please try again in a moment.",
+        ),
+        500,
+    )
 
 
 if __name__ == "__main__":

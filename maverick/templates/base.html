@@ -2,107 +2,200 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Maverick TC{% endblock %}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="description" content="Maverick Transaction Coordinator platform">
+    <title>{% block title %}Maverick Transaction Coordinator{% endblock %}</title>
 
     <style>
-        /* Clean, professional styling */
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
 
+        :root {
+            --maverick-navy: #1e3a8a;
+            --maverick-navy-dark: #172554;
+            --maverick-green: #10b981;
+            --maverick-green-dark: #059669;
+            --maverick-gray: #6b7280;
+            --maverick-gray-dark: #4b5563;
+            --maverick-bg: #f5f8fc;
+            --maverick-text: #1f2937;
+            --maverick-border: #dbe3ee;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             line-height: 1.6;
-            color: #333;
-            background-color: #f5f5f5;
+            color: var(--maverick-text);
+            background: var(--maverick-bg);
+            min-height: 100vh;
         }
 
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            padding: 20px;
+            padding: 24px;
         }
 
         .header {
-            background-color: #1e3a8a;
-            color: white;
-            padding: 20px 0;
-            margin-bottom: 30px;
+            background: linear-gradient(135deg, var(--maverick-navy), var(--maverick-navy-dark));
+            color: #ffffff;
+            padding: 20px 0 22px;
+            margin-bottom: 26px;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.18);
         }
 
         .header h1 {
-            font-size: 24px;
+            font-size: 26px;
             font-weight: 600;
+            letter-spacing: 0.2px;
         }
 
         .header p {
             font-size: 14px;
             opacity: 0.9;
-            margin-top: 5px;
+            margin-top: 6px;
         }
 
         .card {
-            background: white;
-            border-radius: 8px;
+            background: #ffffff;
+            border-radius: 10px;
             padding: 30px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--maverick-border);
+            box-shadow: 0 6px 22px rgba(15, 23, 42, 0.06);
             margin-bottom: 20px;
         }
 
         .btn {
             display: inline-block;
             padding: 12px 24px;
-            background-color: #10b981;
-            color: white;
+            background-color: var(--maverick-green);
+            color: #ffffff;
             text-decoration: none;
-            border-radius: 6px;
+            border-radius: 8px;
             border: none;
             cursor: pointer;
             font-size: 16px;
-            font-weight: 500;
-            transition: background-color 0.2s;
+            font-weight: 600;
+            transition: background-color 0.2s ease, transform 0.2s ease;
         }
 
         .btn:hover {
-            background-color: #059669;
+            background-color: var(--maverick-green-dark);
+            transform: translateY(-1px);
+        }
+
+        .btn:disabled {
+            background-color: #94a3b8;
+            cursor: not-allowed;
+            transform: none;
         }
 
         .btn-secondary {
-            background-color: #6b7280;
+            background-color: var(--maverick-gray);
         }
 
         .btn-secondary:hover {
-            background-color: #4b5563;
+            background-color: var(--maverick-gray-dark);
         }
 
         .alert {
             padding: 15px;
-            border-radius: 6px;
+            border-radius: 8px;
             margin-bottom: 20px;
+            border: 1px solid transparent;
         }
 
         .alert-success {
             background-color: #d1fae5;
             color: #065f46;
-            border: 1px solid #10b981;
+            border-color: #10b981;
         }
 
         .alert-error {
             background-color: #fee2e2;
             color: #991b1b;
-            border: 1px solid #ef4444;
+            border-color: #ef4444;
+        }
+
+        .alert-warning {
+            background-color: #fffbeb;
+            color: #92400e;
+            border-color: #f59e0b;
+        }
+
+        input,
+        select,
+        textarea {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+            background: #ffffff;
+            color: #0f172a;
+        }
+
+        input:focus,
+        select:focus,
+        textarea:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.16);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .badge-red {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .badge-yellow {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge-green {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .loading-spinner {
+            width: 20px;
+            height: 20px;
+            border-radius: 999px;
+            border: 2px solid rgba(255, 255, 255, 0.45);
+            border-top-color: #ffffff;
+            animation: maverick-spin 1s linear infinite;
+        }
+
+        @keyframes maverick-spin {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
         }
 
         @media (max-width: 768px) {
             .container {
-                padding: 10px;
+                padding: 12px;
             }
 
             .card {
-                padding: 20px;
+                padding: 20px 16px;
             }
 
             h2 {
@@ -133,11 +226,19 @@
             .hide-mobile {
                 display: none;
             }
+
+            .header h1 {
+                font-size: 22px;
+            }
         }
 
         @media (max-width: 1024px) and (min-width: 769px) {
             [style*="grid-template-columns: 3fr"] {
                 grid-template-columns: 2fr 1fr !important;
+            }
+
+            .container {
+                padding: 18px;
             }
         }
     </style>
