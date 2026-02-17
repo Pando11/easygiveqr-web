@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-Maverick TC - Automated Reminder System
-Runs daily at 8am via Railway cron
-Sends 4-stage reminders: 10d, 7d, 3d, 1d before each deadline.
+Maverick reminder automation.
+
+Schedule:
+  - Railway cron daily at 8:00 AM
+
+Responsibilities:
+  - Send 10/7/3/1-day reminder texts for active deadlines
+  - Alert Margaret about critical deadlines tomorrow
+  - Alert Margaret about overdue deadlines
+  - Alert Heidi if the job fails
 """
 
 import argparse
 import os
 import sys
 import traceback
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from dotenv import load_dotenv
 
@@ -21,181 +28,234 @@ from utils.sms import send_reminder, send_sms
 
 DRY_RUN = False
 
+REMINDER_STAGES = (
+    {
+        "days_before": 10,
+        "name": "10-day",
+        "where_clause": "d.reminder_10d_sent = FALSE",
+        "update_query": """
+            UPDATE deadlines
+            SET reminder_10d_sent = TRUE,
+                reminder_10d_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """,
+    },
+    {
+        "days_before": 7,
+        "name": "7-day",
+        "where_clause": "d.reminder_7d_sent = FALSE",
+        "update_query": """
+            UPDATE deadlines
+            SET reminder_7d_sent = TRUE,
+                reminder_7d_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """,
+    },
+    {
+        "days_before": 3,
+        "name": "3-day",
+        "where_clause": "d.reminder_3d_sent = FALSE",
+        "update_query": """
+            UPDATE deadlines
+            SET reminder_3d_sent = TRUE,
+                reminder_3d_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """,
+    },
+    {
+        "days_before": 1,
+        "name": "1-day",
+        "where_clause": "d.reminder_1d_sent = FALSE",
+        "update_query": """
+            UPDATE deadlines
+            SET reminder_1d_sent = TRUE,
+                reminder_1d_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """,
+    },
+)
+
+
+def log(message):
+    """Print timestamped logs for cron visibility."""
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}")
+
 
 def notify_sms(to_number, message):
     """Send SMS or print in dry-run mode."""
     if DRY_RUN:
-        print(f"[DRY-RUN] SMS to {to_number}: {message[:160]}")
+        log(f"[DRY-RUN] SMS to {to_number}: {message[:220]}")
         return "dry-run"
     return send_sms(to_number, message)
 
 
-def send_deadline_reminders():
-    """Send reminders for upcoming deadlines."""
-    today = date.today()
-
-    reminder_stages = [
-        (10, "reminder_10d_sent", "reminder_10d_sent_at"),
-        (7, "reminder_7d_sent", "reminder_7d_sent_at"),
-        (3, "reminder_3d_sent", "reminder_3d_sent_at"),
-        (1, "reminder_1d_sent", "reminder_1d_sent_at"),
-    ]
-
-    reminders_sent = 0
-
-    for days_before, sent_flag, sent_at_flag in reminder_stages:
-        target_date = today + timedelta(days=days_before)
-        query = f"""
-        SELECT d.id, d.deadline_type, d.deadline_date, d.description,
-               t.id as transaction_id, t.property_address, t.agent_name, t.agent_phone
+def fetch_stage_deadlines(target_date, where_clause):
+    """Fetch active, incomplete deadlines for one reminder stage."""
+    return execute_query(
+        f"""
+        SELECT d.id, d.deadline_type, d.deadline_date, d.is_critical,
+               t.id AS transaction_id, t.property_address, t.agent_name, t.agent_phone
         FROM deadlines d
-        JOIN transactions t ON d.transaction_id = t.id
+        JOIN transactions t ON t.id = d.transaction_id
         WHERE d.deadline_date = %s
           AND d.completed = FALSE
-          AND d.{sent_flag} = FALSE
+          AND {where_clause}
           AND t.status = 'ACTIVE'
-        """
+        ORDER BY t.property_address ASC
+        """,
+        (target_date,),
+        fetch=True,
+    ) or []
 
-        deadlines = execute_query(query, (target_date,), fetch=True) or []
-        print(f"Found {len(deadlines)} deadlines for {days_before}-day reminders")
+
+def send_stage_reminders():
+    """Send 10/7/3/1 day reminder messages."""
+    today = date.today()
+    total_sent = 0
+
+    for stage in REMINDER_STAGES:
+        target_date = today + timedelta(days=stage["days_before"])
+        deadlines = fetch_stage_deadlines(target_date, stage["where_clause"])
+        log(f"{stage['name']} stage: {len(deadlines)} candidate deadlines")
 
         for deadline in deadlines:
             if DRY_RUN:
-                print(
-                    "[DRY-RUN] Would send reminder:",
-                    deadline["agent_phone"],
-                    deadline["property_address"],
-                    deadline["deadline_type"],
-                    f"{days_before}d",
+                sid = "dry-run"
+                log(
+                    f"[DRY-RUN] Would send {stage['name']} reminder "
+                    f"to {deadline['agent_phone']} for {deadline['property_address']}"
                 )
-                success = True
             else:
-                success = send_reminder(
+                sid = send_reminder(
                     to_number=deadline["agent_phone"],
                     property_address=deadline["property_address"],
                     deadline_type=deadline["deadline_type"].replace("_", " ").title(),
                     deadline_date=deadline["deadline_date"].strftime("%m/%d/%Y"),
-                    days_until=days_before,
+                    days_until=stage["days_before"],
                 )
+            if not sid:
+                log(
+                    f"Failed {stage['name']} reminder for "
+                    f"deadline_id={deadline['id']} property={deadline['property_address']}"
+                )
+                continue
 
-            if success:
-                update_query = f"""
-                UPDATE deadlines
-                SET {sent_flag} = TRUE, {sent_at_flag} = CURRENT_TIMESTAMP
-                WHERE id = %s
-                """
-                if DRY_RUN:
-                    print(f"[DRY-RUN] Would update deadline reminder flags for {deadline['id']}")
-                else:
-                    execute_query(update_query, (deadline["id"],))
-                reminders_sent += 1
-                print(
-                    f"Sent {days_before}d reminder for "
-                    f"{deadline['property_address']} - {deadline['deadline_type']}"
-                )
+            if DRY_RUN:
+                log(f"[DRY-RUN] Would set reminder flag for deadline_id={deadline['id']}")
             else:
-                print(f"Failed to send reminder for deadline {deadline['id']}")
+                updated = execute_query(stage["update_query"], (deadline["id"],))
+                if not updated:
+                    log(f"Warning: failed to update reminder flags for deadline_id={deadline['id']}")
+                    continue
 
-    return reminders_sent
+            total_sent += 1
+            log(
+                f"Sent {stage['name']} reminder: "
+                f"property={deadline['property_address']} type={deadline['deadline_type']} sid={sid}"
+            )
+
+    return total_sent
 
 
-def send_critical_deadline_alerts():
-    """Send alerts to Margaret for critical deadlines within 24 hours."""
+def send_critical_deadline_alert_to_margaret():
+    """Send one summary SMS for tomorrow's critical deadlines."""
+    margaret_phone = os.getenv("MARGARET_PHONE")
+    if not margaret_phone:
+        log("MARGARET_PHONE missing - skipping critical deadline alert.")
+        return
+
     tomorrow = date.today() + timedelta(days=1)
-    query = """
-    SELECT d.id, d.deadline_type, d.deadline_date,
-           t.property_address, t.agent_name, t.agent_phone
-    FROM deadlines d
-    JOIN transactions t ON d.transaction_id = t.id
-    WHERE d.deadline_date = %s
-      AND d.is_critical = TRUE
-      AND d.completed = FALSE
-      AND d.margaret_called_agent = FALSE
-      AND t.status = 'ACTIVE'
-    """
-
-    critical_deadlines = execute_query(query, (tomorrow,), fetch=True) or []
-    if not critical_deadlines:
+    critical = execute_query(
+        """
+        SELECT d.id, d.deadline_type, d.deadline_date, t.property_address
+        FROM deadlines d
+        JOIN transactions t ON t.id = d.transaction_id
+        WHERE d.deadline_date = %s
+          AND d.completed = FALSE
+          AND d.is_critical = TRUE
+          AND t.status = 'ACTIVE'
+        ORDER BY t.property_address ASC
+        """,
+        (tomorrow,),
+        fetch=True,
+    ) or []
+    if not critical:
+        log("No critical deadlines tomorrow.")
         return
 
-    message = f"CRITICAL DEADLINES TOMORROW ({len(critical_deadlines)}):\n\n"
-    for deadline in critical_deadlines[:5]:
-        deadline_type = deadline["deadline_type"].replace("_", " ").title()
-        message += f"- {deadline['property_address']}: {deadline_type}\n"
-    if len(critical_deadlines) > 5:
-        message += f"\n+ {len(critical_deadlines) - 5} more. Check dashboard."
-    message += "\nCall agents today to confirm."
+    message_lines = [f"Critical deadlines tomorrow ({len(critical)}):"]
+    for item in critical[:6]:
+        deadline_label = item["deadline_type"].replace("_", " ").title()
+        message_lines.append(f"- {item['property_address']}: {deadline_label}")
+    if len(critical) > 6:
+        message_lines.append(f"+ {len(critical) - 6} more in dashboard")
+    message_lines.append("- Maverick TC")
 
+    sid = notify_sms(margaret_phone, "\n".join(message_lines))
+    log(f"Sent critical summary to Margaret sid={sid}")
+
+
+def send_overdue_deadline_alert_to_margaret():
+    """Send one summary SMS for overdue incomplete deadlines."""
     margaret_phone = os.getenv("MARGARET_PHONE")
-    if margaret_phone:
-        notify_sms(margaret_phone, message)
-        print(
-            f"Sent critical deadline alert to Margaret "
-            f"({len(critical_deadlines)} deadlines)"
-        )
+    if not margaret_phone:
+        log("MARGARET_PHONE missing - skipping overdue alert.")
+        return
 
-
-def check_overdue_deadlines():
-    """Check for overdue deadlines and alert Margaret."""
     today = date.today()
-    query = """
-    SELECT d.id, d.deadline_type, d.deadline_date,
-           t.id as transaction_id, t.property_address, t.agent_name
-    FROM deadlines d
-    JOIN transactions t ON d.transaction_id = t.id
-    WHERE d.deadline_date < %s
-      AND d.completed = FALSE
-      AND t.status = 'ACTIVE'
-    """
-
-    overdue = execute_query(query, (today,), fetch=True) or []
+    overdue = execute_query(
+        """
+        SELECT d.id, d.deadline_type, d.deadline_date, t.property_address
+        FROM deadlines d
+        JOIN transactions t ON t.id = d.transaction_id
+        WHERE d.deadline_date < %s
+          AND d.completed = FALSE
+          AND t.status = 'ACTIVE'
+        ORDER BY d.deadline_date ASC
+        """,
+        (today,),
+        fetch=True,
+    ) or []
     if not overdue:
+        log("No overdue deadlines.")
         return
 
-    message = f"OVERDUE DEADLINES ({len(overdue)}):\n\n"
-    for deadline in overdue[:5]:
-        days_overdue = (today - deadline["deadline_date"]).days
-        deadline_type = deadline["deadline_type"].replace("_", " ").title()
-        message += (
-            f"- {deadline['property_address']}: {deadline_type} "
-            f"({days_overdue}d overdue)\n"
-        )
-    if len(overdue) > 5:
-        message += f"\n+ {len(overdue) - 5} more overdue items."
+    message_lines = [f"Overdue deadlines ({len(overdue)}):"]
+    for item in overdue[:6]:
+        days_overdue = (today - item["deadline_date"]).days
+        deadline_label = item["deadline_type"].replace("_", " ").title()
+        message_lines.append(f"- {item['property_address']}: {deadline_label} ({days_overdue}d)")
+    if len(overdue) > 6:
+        message_lines.append(f"+ {len(overdue) - 6} more in dashboard")
+    message_lines.append("- Maverick TC")
 
-    margaret_phone = os.getenv("MARGARET_PHONE")
-    if margaret_phone:
-        notify_sms(margaret_phone, message)
-        print(f"Sent overdue alert to Margaret ({len(overdue)} deadlines)")
+    sid = notify_sms(margaret_phone, "\n".join(message_lines))
+    log(f"Sent overdue summary to Margaret sid={sid}")
 
 
 def main(dry_run=False):
-    """Main reminder job."""
+    """Run the full reminder job."""
     global DRY_RUN
     DRY_RUN = dry_run
 
-    print("\n" + "=" * 50)
-    print("Maverick TC - Daily Reminders")
+    log("Starting reminder job")
     if DRY_RUN:
-        print("Mode: DRY-RUN (no SMS sent, no DB writes)")
-    print(f"Running at: {date.today()}")
-    print("=" * 50 + "\n")
+        log("Mode: DRY-RUN (no SMS and no DB writes)")
 
     try:
-        reminders_sent = send_deadline_reminders()
-        print(f"\nTotal reminders sent to agents: {reminders_sent}")
-        send_critical_deadline_alerts()
-        check_overdue_deadlines()
-
-        print("\n" + "=" * 50)
-        print("Reminder job completed successfully")
-        print("=" * 50 + "\n")
+        reminders_sent = send_stage_reminders()
+        log(f"Total reminder texts sent: {reminders_sent}")
+        send_critical_deadline_alert_to_margaret()
+        send_overdue_deadline_alert_to_margaret()
+        log("Reminder job completed successfully")
     except Exception as exc:
-        print(f"\nERROR in reminder job: {exc}")
+        log(f"ERROR: reminder job failed: {exc}")
         traceback.print_exc()
+
         heidi_phone = os.getenv("HEIDI_PHONE")
         if heidi_phone:
-            notify_sms(heidi_phone, f"Maverick reminder job failed: {str(exc)[:100]}")
+            notify_sms(heidi_phone, f"Maverick reminder job failed: {str(exc)[:140]}")
+        raise
 
 
 if __name__ == "__main__":
@@ -203,7 +263,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Read and report what would happen without sending SMS or writing reminder flags.",
+        help="Simulate reminder job without SMS sends or DB writes.",
     )
-    args = parser.parse_args()
-    main(dry_run=args.dry_run)
+    cli_args = parser.parse_args()
+    main(dry_run=cli_args.dry_run)

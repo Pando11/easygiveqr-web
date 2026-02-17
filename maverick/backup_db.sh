@@ -1,69 +1,78 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-# Maverick Database Backup Script
-# Intended for daily scheduled execution
+# Maverick nightly database backup
+# Suggested cron: 0 2 * * * /workspace/maverick/backup_db.sh
 
-send_backup_notification() {
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+send_heidi_sms() {
   local body="$1"
-  if [[ -n "${TWILIO_ACCOUNT_SID:-}" && -n "${TWILIO_AUTH_TOKEN:-}" && -n "${TWILIO_PHONE_NUMBER:-}" && -n "${HEIDI_PHONE:-}" ]]; then
-    curl -sS -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json" \
-      --data-urlencode "Body=${body}" \
-      --data-urlencode "From=${TWILIO_PHONE_NUMBER}" \
-      --data-urlencode "To=${HEIDI_PHONE}" \
-      -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" >/dev/null || true
-  else
-    echo "Twilio backup notification skipped: missing credentials/phone variables."
+  if [[ -z "${TWILIO_ACCOUNT_SID:-}" || -z "${TWILIO_AUTH_TOKEN:-}" || -z "${TWILIO_PHONE_NUMBER:-}" || -z "${HEIDI_PHONE:-}" ]]; then
+    log "Skipping Heidi SMS (Twilio credentials or HEIDI_PHONE missing)."
+    return 0
+  fi
+
+  curl -sS -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json" \
+    --data-urlencode "Body=${body}" \
+    --data-urlencode "From=${TWILIO_PHONE_NUMBER}" \
+    --data-urlencode "To=${HEIDI_PHONE}" \
+    -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" >/dev/null || true
+}
+
+cleanup() {
+  if [[ -n "${BACKUP_FILE:-}" && -f "${BACKUP_FILE}" ]]; then
+    rm -f "${BACKUP_FILE}"
   fi
 }
 
-on_exit() {
-  local exit_code="$1"
-  if [[ "${exit_code}" -eq 0 ]]; then
-    send_backup_notification "Maverick backup completed successfully at $(date)"
-  else
-    send_backup_notification "Maverick backup FAILED at $(date)"
-  fi
+on_error() {
+  local line_no="$1"
+  log "Backup failed at line ${line_no}."
+  send_heidi_sms "Maverick backup FAILED on $(hostname) at $(date '+%Y-%m-%d %H:%M:%S')."
 }
-trap 'on_exit $?' EXIT
 
-echo "Starting Maverick backup..."
-
-DATE=$(date +%Y-%m-%d)
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="/tmp/maverick_db_${TIMESTAMP}.sql"
+trap cleanup EXIT
+trap 'on_error $LINENO' ERR
 
 if [[ -z "${DATABASE_URL:-}" ]]; then
-  echo "DATABASE_URL is not set."
+  log "DATABASE_URL is not set."
   exit 1
 fi
 
 if [[ -z "${AWS_S3_BUCKET_BACKUPS:-}" ]]; then
-  echo "AWS_S3_BUCKET_BACKUPS is not set."
+  log "AWS_S3_BUCKET_BACKUPS is not set."
   exit 1
 fi
 
-echo "Backing up database..."
-pg_dump "${DATABASE_URL}" > "${BACKUP_FILE}"
+TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
+BACKUP_FILE="/tmp/maverick_db_${TIMESTAMP}.sql"
+BACKUP_KEY="database/maverick_db_${TIMESTAMP}.sql"
 
-echo "Uploading to S3..."
-aws s3 cp "${BACKUP_FILE}" "s3://${AWS_S3_BUCKET_BACKUPS}/database/${DATE}.sql"
+log "Starting PostgreSQL dump."
+pg_dump "${DATABASE_URL}" --no-owner --no-privileges > "${BACKUP_FILE}"
 
-echo "Cleaning local backup..."
-rm -f "${BACKUP_FILE}"
+log "Uploading backup to s3://${AWS_S3_BUCKET_BACKUPS}/${BACKUP_KEY}"
+aws s3 cp "${BACKUP_FILE}" "s3://${AWS_S3_BUCKET_BACKUPS}/${BACKUP_KEY}"
 
-echo "Cleaning backups older than 30 days..."
-aws s3 ls "s3://${AWS_S3_BUCKET_BACKUPS}/database/" | while read -r line; do
-  create_date=$(echo "${line}" | awk '{print $1" "$2}')
-  create_epoch=$(date -d "${create_date}" +%s || true)
-  cutoff_epoch=$(date --date="30 days ago" +%s)
-  if [[ -n "${create_epoch}" && "${create_epoch}" -lt "${cutoff_epoch}" ]]; then
-    file_name=$(echo "${line}" | awk '{print $4}')
-    if [[ -n "${file_name}" ]]; then
-      aws s3 rm "s3://${AWS_S3_BUCKET_BACKUPS}/database/${file_name}"
-      echo "Deleted old backup: ${file_name}"
-    fi
-  fi
-done
+log "Applying retention policy: keep latest 30 backups."
+mapfile -t BACKUP_KEYS < <(
+  aws s3 ls "s3://${AWS_S3_BUCKET_BACKUPS}/database/" \
+    | awk '{print $4}' \
+    | rg '^maverick_db_.*\.sql$' \
+    | sort -r
+)
 
-echo "Backup complete."
+if (( ${#BACKUP_KEYS[@]} > 30 )); then
+  for ((i=30; i<${#BACKUP_KEYS[@]}; i++)); do
+    old_key="${BACKUP_KEYS[$i]}"
+    [[ -z "${old_key}" ]] && continue
+    aws s3 rm "s3://${AWS_S3_BUCKET_BACKUPS}/database/${old_key}"
+    log "Deleted old backup: ${old_key}"
+  done
+fi
+
+log "Backup completed successfully."
+send_heidi_sms "Maverick backup success on $(hostname) at $(date '+%Y-%m-%d %H:%M:%S')."

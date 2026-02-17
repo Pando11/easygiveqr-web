@@ -1676,34 +1676,52 @@ Margaret will review within 2 hours. You'll receive your timeline shortly.
 
 @app.route("/pay/<int:transaction_id>/<payment_type>")
 def payment_page(transaction_id, payment_type):
-    """Payment page for agent."""
+    """Render secure agent payment page."""
     if payment_type not in {"upfront", "closing"}:
         return "Invalid payment type", 400
 
-    query = """
-    SELECT property_address, agent_name, rush_service, referred_by_agent,
-           payment_upfront_paid, payment_closing_paid
-    FROM transactions WHERE id = %s
-    """
-    rows = execute_query(query, (transaction_id,), fetch=True) or []
+    rows = execute_query(
+        """
+        SELECT id, property_address, agent_name, agent_phone, rush_service, referred_by_agent, status,
+               payment_upfront_paid, payment_closing_paid
+        FROM transactions
+        WHERE id = %s
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
     if not rows:
         return "Transaction not found", 404
-    txn = rows[0]
 
-    if payment_type == "upfront" and txn["payment_upfront_paid"]:
-        return "This payment has already been received. Thank you!", 200
-    if payment_type == "closing" and txn["payment_closing_paid"]:
-        return "This payment has already been received. Thank you!", 200
+    transaction = rows[0]
+    if transaction.get("status") == "CANCELLED":
+        return "This transaction has been cancelled.", 400
 
-    breakdown = calculate_payment_breakdown(txn, payment_type)
+    if payment_type == "upfront" and transaction["payment_upfront_paid"]:
+        return (
+            "<h2>Payment already received</h2>"
+            "<p>Thank you! Your upfront payment has already been recorded.</p>",
+            200,
+        )
+    if payment_type == "closing" and transaction["payment_closing_paid"]:
+        return (
+            "<h2>Payment already received</h2>"
+            "<p>Thank you! Your closing payment has already been recorded.</p>",
+            200,
+        )
+
+    breakdown = calculate_payment_breakdown(transaction, payment_type)
+    payment_type_label = "Upfront" if payment_type == "upfront" else "Closing"
     payment_data = {
         "transaction_id": transaction_id,
-        "property_address": txn["property_address"],
+        "property_address": transaction["property_address"],
         "payment_type": payment_type,
+        "payment_type_label": payment_type_label,
         "original_amount": f"{breakdown['original_amount']:.2f}",
         "referral_credit": f"{breakdown['referral_credit']:.2f}",
         "amount": f"{breakdown['amount']:.2f}",
         "amount_number": round(float(breakdown["amount"]), 2),
+        "has_referral_credit": float(breakdown["referral_credit"]) > 0,
     }
 
     venmo_handle = os.getenv("VENMO_HANDLE", "GetMaverick").lstrip("@")
@@ -1721,11 +1739,32 @@ def payment_page(transaction_id, payment_type):
 
 @app.route("/pay/<int:transaction_id>/<payment_type>/process", methods=["POST"])
 def process_payment(transaction_id, payment_type):
-    """Process Stripe payment."""
+    """Process a card payment through Stripe."""
     if payment_type not in {"upfront", "closing"}:
         return jsonify({"success": False, "error": "Invalid payment type"}), 400
     if not stripe.api_key:
         return jsonify({"success": False, "error": "Stripe is not configured"}), 500
+
+    transaction_rows = execute_query(
+        """
+        SELECT id, property_address, agent_name, agent_phone, rush_service, referred_by_agent, status,
+               payment_upfront_paid, payment_closing_paid
+        FROM transactions
+        WHERE id = %s
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if not transaction_rows:
+        return jsonify({"success": False, "error": "Transaction not found"}), 404
+
+    transaction = transaction_rows[0]
+    if transaction.get("status") == "CANCELLED":
+        return jsonify({"success": False, "error": "This transaction has been cancelled"}), 400
+    if payment_type == "upfront" and transaction.get("payment_upfront_paid"):
+        return jsonify({"success": False, "error": "Upfront payment is already recorded"}), 409
+    if payment_type == "closing" and transaction.get("payment_closing_paid"):
+        return jsonify({"success": False, "error": "Closing payment is already recorded"}), 409
 
     payload = request.get_json(silent=True) or {}
     payment_method_id = payload.get("payment_method_id")
@@ -1739,83 +1778,81 @@ def process_payment(transaction_id, payment_type):
     if not payment_method_id or amount <= 0:
         return jsonify({"success": False, "error": "Missing payment data"}), 400
 
+    breakdown = calculate_payment_breakdown(transaction, payment_type)
+    expected_amount = round(float(breakdown["amount"]), 2)
+    if abs(amount - expected_amount) > 0.01:
+        return jsonify({"success": False, "error": "Payment amount mismatch. Refresh and try again."}), 400
+
     try:
         intent = stripe.PaymentIntent.create(
-            amount=int(round(amount * 100)),
+            amount=int(round(expected_amount * 100)),
             currency="usd",
             payment_method=payment_method_id,
             confirm=True,
             automatic_payment_methods={"enabled": True, "allow_redirects": "never"},
             description=f"Maverick TC - Transaction #{transaction_id} - {payment_type}",
-            metadata={"transaction_id": str(transaction_id), "payment_type": payment_type},
+            metadata={
+                "transaction_id": str(transaction_id),
+                "payment_type": payment_type,
+                "property_address": transaction.get("property_address", ""),
+            },
         )
 
         if intent.status != "succeeded":
             return jsonify({"success": False, "error": "Payment not completed"}), 400
 
         if payment_type == "upfront":
-            update_query = """
-            UPDATE transactions
-            SET payment_upfront_paid = TRUE,
-                payment_upfront_date = %s,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-            """
-        else:
-            update_query = """
-            UPDATE transactions
-            SET payment_closing_paid = TRUE,
-                payment_closing_date = %s,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-            """
-        execute_query(update_query, (datetime.now(), transaction_id))
-
-        if payment_type == "upfront":
-            agent_rows = execute_query(
-                "SELECT agent_name, referred_by_agent FROM transactions WHERE id = %s",
+            updated = execute_query(
+                """
+                UPDATE transactions
+                SET payment_upfront_paid = TRUE,
+                    payment_upfront_date = COALESCE(payment_upfront_date, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
                 (transaction_id,),
-                fetch=True,
-            ) or []
-            if agent_rows and agent_rows[0]["referred_by_agent"]:
-                credit_rows = execute_query(
-                    """
-                    SELECT id
-                    FROM referrals
-                    WHERE referred_agent_name = %s
-                      AND credit_used = FALSE
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    """,
-                    (agent_rows[0]["agent_name"],),
-                    fetch=True,
-                ) or []
-                if credit_rows:
-                    execute_query(
-                        """
-                        UPDATE referrals
-                        SET credit_used = TRUE,
-                            credit_used_on_transaction_id = %s,
-                            credit_used_date = %s
-                        WHERE id = %s
-                        """,
-                        (transaction_id, datetime.now(), credit_rows[0]["id"]),
-                    )
-
-        phone_rows = execute_query(
-            "SELECT agent_phone FROM transactions WHERE id = %s",
-            (transaction_id,),
-            fetch=True,
-        ) or []
-        if phone_rows:
-            send_sms(
-                phone_rows[0]["agent_phone"],
-                f"Payment received (${amount:.2f}). Thank you. - Maverick TC",
             )
+            if not updated:
+                return jsonify({"success": False, "error": "Failed to record payment"}), 500
+            mark_referral_credit_used_if_needed(transaction_id, transaction.get("agent_name"))
+        else:
+            updated = execute_query(
+                """
+                UPDATE transactions
+                SET payment_closing_paid = TRUE,
+                    payment_closing_date = COALESCE(payment_closing_date, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (transaction_id,),
+            )
+            if not updated:
+                return jsonify({"success": False, "error": "Failed to record payment"}), 500
+
+        if transaction.get("agent_phone"):
+            send_sms(
+                transaction["agent_phone"],
+                (
+                    f"Payment received (${expected_amount:.2f}) for {payment_type}. "
+                    "Thank you. - Maverick TC"
+                ),
+            )
+
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'text', 'agent', 'system', %s, %s)
+            """,
+            (
+                transaction_id,
+                f"Payment processed via Stripe ({payment_type})",
+                f"intent={intent.id} amount={expected_amount:.2f}",
+            ),
+        )
 
         return jsonify({"success": True, "payment_intent_id": intent.id})
     except stripe.error.CardError as exc:
-        return jsonify({"success": False, "error": exc.user_message or "Card error"}), 400
+        return jsonify({"success": False, "error": exc.user_message or "Card was declined"}), 400
     except stripe.error.StripeError as exc:
         return jsonify({"success": False, "error": exc.user_message or "Payment processing error"}), 400
     except Exception as exc:
