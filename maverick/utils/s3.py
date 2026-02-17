@@ -76,13 +76,14 @@ def upload_document(file, transaction_id, document_type, filename):
         return None
 
 
-def get_presigned_url(s3_key, expiration=3600):
+def get_presigned_url(s3_key, expiration=3600, download_filename=None):
     """
     Generate presigned URL for document download.
 
     Args:
         s3_key: S3 object key
         expiration: URL expiration in seconds (default 1 hour)
+        download_filename: Optional attachment filename for forced download
 
     Returns: Presigned URL
     """
@@ -91,9 +92,13 @@ def get_presigned_url(s3_key, expiration=3600):
             print("Presigned URL error: AWS_S3_BUCKET_DOCUMENTS is not configured")
             return None
 
+        params = {"Bucket": DOCUMENTS_BUCKET, "Key": s3_key}
+        if download_filename:
+            params["ResponseContentDisposition"] = f'attachment; filename="{download_filename}"'
+
         url = _get_s3_client().generate_presigned_url(
             "get_object",
-            Params={"Bucket": DOCUMENTS_BUCKET, "Key": s3_key},
+            Params=params,
             ExpiresIn=expiration,
         )
         return url

@@ -2,6 +2,7 @@ import os
 import re
 from datetime import date, datetime, timedelta
 from functools import wraps
+from typing import Any
 
 import stripe
 from dotenv import load_dotenv
@@ -13,8 +14,8 @@ from werkzeug.utils import secure_filename
 from config import Config
 from utils.db import execute_insert, execute_query
 from utils.payments import calculate_payment_breakdown
-from utils.s3 import upload_contract
-from utils.sms import send_reminder, send_sms
+from utils.s3 import get_presigned_url, log_document_access, upload_contract, upload_document
+from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 
 load_dotenv()
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
@@ -35,6 +36,68 @@ app.permanent_session_lifetime = timedelta(days=14)
 
 ALLOWED_EXTENSIONS = set(app.config.get("ALLOWED_EXTENSIONS", {"pdf"}))
 MAX_FILE_SIZE = app.config["MAX_CONTENT_LENGTH"]
+ALLOWED_DOCUMENT_EXTENSIONS = {"pdf", "jpg", "jpeg", "png"}
+
+REQUIRED_DOCUMENT_TYPES = {
+    "contract",
+    "earnest_receipt",
+    "option_receipt",
+    "seller_disclosure",
+    "inspection_report",
+    "appraisal",
+    "title_commitment",
+    "loan_approval",
+    "insurance_binder",
+    "settlement_statement",
+}
+
+DEADLINE_BLUEPRINTS = (
+    ("effective_date", "Contract effective date", False),
+    ("option_fee", "Option fee due", True),
+    ("earnest_money", "Earnest money due", True),
+    ("seller_disclosure", "Seller disclosure due", False),
+    ("survey", "Survey due", False),
+    ("option_period_end", "Option period end", True),
+    ("hoa_docs", "HOA documents due", False),
+    ("buyer_hoa_review", "Buyer HOA review end", False),
+    ("title_commitment", "Title commitment due", False),
+    ("financing_approval", "Financing approval", True),
+    ("buyer_title_objection", "Buyer title objection end", False),
+    ("closing", "Closing date", True),
+)
+
+TASK_BLUEPRINTS = (
+    ("Review contract for completeness", "contract_setup", "effective", 0, "high"),
+    ("Verify earnest money receipt", "contract_setup", "effective", 1, "high"),
+    ("Verify option fee receipt", "contract_setup", "effective", 1, "high"),
+    ("Send introduction email to all parties", "contract_setup", "effective", 2, "medium"),
+    ("Call lender to confirm pre-approval", "coordination", "effective", 3, "high"),
+    ("Schedule home inspection", "coordination", "effective", 4, "high"),
+    ("Order HOA documents if applicable", "coordination", "effective", 5, "medium"),
+    ("Request survey from seller", "coordination", "effective", 6, "medium"),
+    ("Coordinate appraiser property access", "coordination", "effective", 7, "medium"),
+    ("Follow up on seller disclosure", "coordination", "effective", 9, "medium"),
+    ("Get inspection report", "documents", "effective", 8, "high"),
+    ("Get survey", "documents", "effective", 10, "medium"),
+    ("Get HOA documents", "documents", "effective", 11, "medium"),
+    ("Verify appraisal completed", "documents", "effective", 14, "medium"),
+    ("Get title commitment", "documents", "effective", 18, "medium"),
+    ("Get loan approval letter", "documents", "effective", 20, "high"),
+    ("Verify all repairs completed", "pre_closing", "effective", 21, "high"),
+    ("Get repair receipts", "pre_closing", "effective", 22, "medium"),
+    ("Order home warranty if in contract", "pre_closing", "effective", 23, "low"),
+    ("Verify insurance binder received by lender", "pre_closing", "effective", 24, "high"),
+    ("Get final CD from lender", "pre_closing", "effective", 26, "high"),
+    ("Send utilities transfer reminder", "pre_closing", "effective", 27, "low"),
+    ("Coordinate final walk-through", "closing", "closing", -2, "high"),
+    ("Confirm closing time with all parties", "closing", "closing", -1, "high"),
+    ("Verify wire instructions sent to buyer", "closing", "closing", -1, "high"),
+    ("Confirm keys available", "closing", "closing", 0, "medium"),
+    ("Verify all closing documents ready", "closing", "closing", 0, "high"),
+    ("Get final settlement statement", "post_closing", "closing", 1, "high"),
+    ("Verify commission disbursed", "post_closing", "closing", 2, "high"),
+    ("Archive all documents", "post_closing", "closing", 3, "medium"),
+)
 
 
 def normalize_phone(phone_number):
@@ -137,6 +200,222 @@ def payment_status_text(upfront_paid, closing_paid):
     if not upfront_paid and closing_paid:
         return "Closing paid only"
     return "Unpaid"
+
+
+def format_date_label(value):
+    """Return a user-friendly date label."""
+    if not value:
+        return "Not set"
+    return value.strftime("%b %d, %Y")
+
+
+def parse_required_date(raw_value: str, field_label: str):
+    """Parse required YYYY-MM-DD date fields from forms."""
+    value = (raw_value or "").strip()
+    if not value:
+        raise ValueError(f"{field_label} is required.")
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"{field_label} must be a valid date.") from exc
+
+
+def parse_optional_date(raw_value: str | None):
+    """Parse optional YYYY-MM-DD date values."""
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def file_extension(filename):
+    """Return lower-cased extension for a filename."""
+    if not filename or "." not in filename:
+        return ""
+    return filename.rsplit(".", 1)[1].lower()
+
+
+def document_due_status(target_date, is_complete):
+    """Return status class for tasks/deadlines."""
+    if is_complete:
+        return "complete"
+    if not target_date:
+        return "pending"
+    if target_date < date.today():
+        return "overdue"
+    if target_date == date.today():
+        return "today"
+    return "pending"
+
+
+def build_deadline_dates(
+    effective_date_value,
+    earnest_due_date_value,
+    option_period_end_value,
+    financing_approval_value,
+    closing_date_value,
+):
+    """Build all deadline dates from approval inputs."""
+    return {
+        "effective_date": effective_date_value,
+        "option_fee": effective_date_value + timedelta(days=3),
+        "earnest_money": earnest_due_date_value,
+        "seller_disclosure": effective_date_value + timedelta(days=7),
+        "survey": effective_date_value + timedelta(days=10),
+        "option_period_end": option_period_end_value,
+        "hoa_docs": effective_date_value + timedelta(days=10),
+        "buyer_hoa_review": option_period_end_value + timedelta(days=2),
+        "title_commitment": effective_date_value + timedelta(days=20),
+        "financing_approval": financing_approval_value,
+        "buyer_title_objection": financing_approval_value + timedelta(days=2),
+        "closing": closing_date_value,
+    }
+
+
+def create_deadlines(transaction_id, deadline_dates):
+    """Create or replace deadlines for a transaction."""
+    execute_query("DELETE FROM deadlines WHERE transaction_id = %s", (transaction_id,))
+
+    values_sql = []
+    params: list[Any] = []
+    for deadline_type, description, is_critical in DEADLINE_BLUEPRINTS:
+        deadline_date = deadline_dates.get(deadline_type)
+        if not deadline_date:
+            continue
+        values_sql.append("(%s, %s, %s, %s, %s)")
+        params.extend([transaction_id, deadline_type, deadline_date, description, is_critical])
+
+    if not values_sql:
+        return True
+
+    insert_query = f"""
+    INSERT INTO deadlines (
+        transaction_id, deadline_type, deadline_date, description, is_critical
+    ) VALUES {", ".join(values_sql)}
+    """
+    return bool(execute_query(insert_query, tuple(params)))
+
+
+def create_tasks(transaction_id, effective_date_value, closing_date_value):
+    """Create or replace the 30-task checklist for a transaction."""
+    execute_query("DELETE FROM tasks WHERE transaction_id = %s", (transaction_id,))
+
+    values_sql = []
+    params: list[Any] = []
+    for order, (description, category, anchor, offset_days, priority) in enumerate(TASK_BLUEPRINTS, start=1):
+        anchor_date = effective_date_value if anchor == "effective" else closing_date_value
+        due_date = anchor_date + timedelta(days=offset_days)
+        values_sql.append("(%s, %s, %s, %s, %s, %s)")
+        params.extend([transaction_id, description, category, due_date, priority, order])
+
+    insert_query = f"""
+    INSERT INTO tasks (
+        transaction_id, task_description, task_category, due_date, priority, display_order
+    ) VALUES {", ".join(values_sql)}
+    """
+    return bool(execute_query(insert_query, tuple(params)))
+
+
+def maybe_create_referral(transaction):
+    """Create referral credit tracking for referred transactions."""
+    referred_by_agent = (transaction.get("referred_by_agent") or "").strip()
+    if not referred_by_agent:
+        return
+
+    exists = execute_query(
+        "SELECT id FROM referrals WHERE referred_transaction_id = %s LIMIT 1",
+        (transaction["id"],),
+        fetch=True,
+    ) or []
+    if exists:
+        return
+
+    referrer_phone_rows = execute_query(
+        """
+        SELECT agent_phone
+        FROM transactions
+        WHERE LOWER(agent_name) = LOWER(%s)
+          AND agent_phone IS NOT NULL
+          AND agent_phone <> ''
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (referred_by_agent,),
+        fetch=True,
+    ) or []
+    referrer_phone = referrer_phone_rows[0]["agent_phone"] if referrer_phone_rows else None
+
+    execute_query(
+        """
+        INSERT INTO referrals (
+            referrer_agent_name,
+            referrer_agent_phone,
+            referred_agent_name,
+            referred_transaction_id,
+            credit_amount
+        ) VALUES (%s, %s, %s, %s, %s)
+        """,
+        (
+            referred_by_agent,
+            referrer_phone,
+            transaction.get("agent_name"),
+            transaction["id"],
+            50.00,
+        ),
+    )
+
+
+def mark_referral_credit_used_if_needed(transaction_id, agent_name):
+    """Mark the newest unused referral credit as used on upfront payment."""
+    credit_rows = execute_query(
+        """
+        SELECT id
+        FROM referrals
+        WHERE referred_agent_name = %s
+          AND credit_used = FALSE
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (agent_name,),
+        fetch=True,
+    ) or []
+    if not credit_rows:
+        return
+
+    execute_query(
+        """
+        UPDATE referrals
+        SET credit_used = TRUE,
+            credit_used_on_transaction_id = %s,
+            credit_used_date = %s
+        WHERE id = %s
+        """,
+        (transaction_id, datetime.now(), credit_rows[0]["id"]),
+    )
+
+
+def get_transaction_or_none(transaction_id):
+    """Fetch one transaction for TC routes."""
+    rows = execute_query(
+        """
+        SELECT id, agent_name, agent_phone, agent_email, property_address,
+               contract_pdf_url, contract_s3_key, status, rush_service, referred_by_agent,
+               effective_date, option_fee_due_date, earnest_due_date, seller_disclosure_due_date,
+               survey_due_date, option_period_end_date, hoa_docs_due_date, buyer_hoa_review_end_date,
+               title_commitment_due_date, financing_approval_date, buyer_title_objection_end_date,
+               closing_date, buyer_name, buyer_phone, seller_name, seller_phone,
+               lender_name, title_company, payment_upfront_paid, payment_upfront_date,
+               payment_closing_paid, payment_closing_date, created_at, updated_at
+        FROM transactions
+        WHERE id = %s
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
 
 
 @app.route("/")
@@ -326,40 +605,611 @@ def tc_daily_checklist():
 @app.route("/tc/transaction/<int:transaction_id>")
 @login_required
 def tc_transaction(transaction_id):
-    txn_rows = execute_query(
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+
+    status = (transaction.get("status") or "").upper()
+    mode = "review" if status == "NEEDS_MARGARET_REVIEW" else "active"
+    if status == "COMPLETED":
+        mode = "completed"
+    if status == "CANCELLED":
+        mode = "completed"
+
+    transaction["has_contract_pdf"] = bool(transaction.get("contract_s3_key"))
+    transaction["upload_time_ago"] = format_time_ago(transaction.get("created_at"))
+    transaction["uploaded_at_label"] = (
+        transaction["created_at"].strftime("%b %d, %Y %I:%M %p") if transaction.get("created_at") else "Unknown"
+    )
+
+    date_fields = (
+        "effective_date",
+        "earnest_due_date",
+        "option_period_end_date",
+        "financing_approval_date",
+        "closing_date",
+    )
+    for field_name in date_fields:
+        value = transaction.get(field_name)
+        transaction[f"{field_name}_input"] = value.isoformat() if value else ""
+
+    documents = execute_query(
         """
-        SELECT id, property_address, agent_name, agent_phone, status, closing_date,
-               payment_upfront_paid, payment_closing_paid
-        FROM transactions
-        WHERE id = %s
+        SELECT id, document_type, filename, file_size, uploaded_by, uploaded_at
+        FROM documents
+        WHERE transaction_id = %s
+        ORDER BY uploaded_at DESC
         """,
         (transaction_id,),
         fetch=True,
     ) or []
-    if not txn_rows:
+    for document in documents:
+        document["uploaded_at_label"] = (
+            document["uploaded_at"].strftime("%b %d, %Y %I:%M %p") if document.get("uploaded_at") else "Unknown"
+        )
+
+    uploaded_document_types = {doc["document_type"] for doc in documents}
+    missing_document_types = sorted(REQUIRED_DOCUMENT_TYPES - uploaded_document_types)
+
+    timeline = execute_query(
+        """
+        SELECT id, deadline_type, deadline_date, completed
+        FROM deadlines
+        WHERE transaction_id = %s
+        ORDER BY deadline_date ASC, id ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    for deadline in timeline:
+        deadline["status_class"] = document_due_status(deadline.get("deadline_date"), bool(deadline.get("completed")))
+        deadline["deadline_label"] = format_date_label(deadline.get("deadline_date"))
+        deadline["name_label"] = (deadline.get("deadline_type") or "").replace("_", " ").title()
+
+    task_preview = []
+    task_total = 0
+    if status == "ACTIVE":
+        task_preview = execute_query(
+            """
+            SELECT id, task_description, task_category, due_date, completed, status, priority
+            FROM tasks
+            WHERE transaction_id = %s
+            ORDER BY completed ASC, due_date ASC NULLS LAST, display_order ASC NULLS LAST
+            LIMIT 10
+            """,
+            (transaction_id,),
+            fetch=True,
+        ) or []
+        task_count_rows = execute_query(
+            "SELECT COUNT(*) AS total FROM tasks WHERE transaction_id = %s",
+            (transaction_id,),
+            fetch=True,
+        ) or []
+        task_total = int(task_count_rows[0]["total"]) if task_count_rows else len(task_preview)
+
+        for task in task_preview:
+            is_complete = bool(task.get("completed")) or task.get("status") == "completed"
+            task["status_class"] = document_due_status(task.get("due_date"), is_complete)
+            task["due_label"] = format_date_label(task.get("due_date"))
+            task["category_label"] = (task.get("task_category") or "").replace("_", " ").title()
+
+    communication_limit = 100 if mode == "completed" else 5
+    communications = execute_query(
+        """
+        SELECT id, communication_type, contact_party, contact_name, summary, outcome, created_at
+        FROM communications
+        WHERE transaction_id = %s
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (transaction_id, communication_limit),
+        fetch=True,
+    ) or []
+    for entry in communications:
+        entry["created_at_label"] = entry["created_at"].strftime("%b %d, %Y %I:%M %p") if entry.get("created_at") else ""
+        entry["type_label"] = (entry.get("communication_type") or "").replace("_", " ").title()
+        entry["party_label"] = (entry.get("contact_party") or "").replace("_", " ").title()
+
+    upfront_breakdown = calculate_payment_breakdown(transaction, "upfront")
+    closing_breakdown = calculate_payment_breakdown(transaction, "closing")
+    outstanding_amount = 0.0
+    if not transaction.get("payment_upfront_paid"):
+        outstanding_amount += float(upfront_breakdown["amount"])
+    if not transaction.get("payment_closing_paid"):
+        outstanding_amount += float(closing_breakdown["amount"])
+
+    payment_context = {
+        "upfront_amount": float(upfront_breakdown["amount"]),
+        "closing_amount": float(closing_breakdown["amount"]),
+        "outstanding_amount": round(outstanding_amount, 2),
+    }
+
+    return render_template(
+        "tc_transaction_detail.html",
+        transaction=transaction,
+        mode=mode,
+        status=status,
+        documents=documents,
+        missing_document_types=missing_document_types,
+        timeline=timeline,
+        task_preview=task_preview,
+        task_total=task_total,
+        communications=communications,
+        payment_context=payment_context,
+    )
+
+
+@app.route("/tc/view-pdf/<int:transaction_id>")
+@login_required
+def view_transaction_pdf(transaction_id):
+    """View the contract PDF in-browser via a presigned URL."""
+    rows = execute_query(
+        "SELECT contract_s3_key FROM transactions WHERE id = %s",
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if not rows or not rows[0]["contract_s3_key"]:
+        return "Contract PDF not found", 404
+
+    url = get_presigned_url(rows[0]["contract_s3_key"], expiration=1800)
+    if not url:
+        return "Unable to generate secure PDF link", 500
+    return redirect(url)
+
+
+@app.route("/tc/download-pdf/<int:transaction_id>")
+@login_required
+def download_transaction_pdf(transaction_id):
+    """Download the contract PDF via a presigned URL."""
+    rows = execute_query(
+        "SELECT contract_s3_key, contract_pdf_url FROM transactions WHERE id = %s",
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if not rows or not rows[0]["contract_s3_key"]:
+        return "Contract PDF not found", 404
+
+    filename = rows[0]["contract_pdf_url"] or f"contract_{transaction_id}.pdf"
+    url = get_presigned_url(
+        rows[0]["contract_s3_key"],
+        expiration=1800,
+        download_filename=filename,
+    )
+    if not url:
+        return "Unable to generate secure download link", 500
+    return redirect(url)
+
+
+@app.route("/tc/transaction/<int:transaction_id>/approve", methods=["POST"])
+@login_required
+def approve_transaction(transaction_id):
+    """Approve a reviewed transaction and activate full workflow artifacts."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+    if transaction.get("status") in {"COMPLETED", "CANCELLED"}:
+        return "This transaction cannot be approved.", 400
+
+    try:
+        effective_date_value = parse_required_date(request.form.get("effective_date"), "Effective date")
+        earnest_due_date_value = parse_required_date(request.form.get("earnest_due_date"), "Earnest money due")
+        option_period_end_value = parse_required_date(request.form.get("option_period_end_date"), "Option period end")
+        financing_approval_value = parse_required_date(
+            request.form.get("financing_approval_date"), "Financing approval"
+        )
+        closing_date_value = parse_required_date(request.form.get("closing_date"), "Closing date")
+    except ValueError as exc:
+        return str(exc), 400
+
+    buyer_name = request.form.get("buyer_name", "").strip()
+    buyer_phone = normalize_phone(request.form.get("buyer_phone", "").strip())
+    seller_name = request.form.get("seller_name", "").strip()
+    seller_phone = normalize_phone(request.form.get("seller_phone", "").strip())
+    lender_name = request.form.get("lender_name", "").strip()
+    title_company = request.form.get("title_company", "").strip()
+
+    if not buyer_name:
+        return "Buyer name is required.", 400
+    if not seller_name:
+        return "Seller name is required.", 400
+    if not title_company:
+        return "Title company is required.", 400
+    if closing_date_value < effective_date_value:
+        return "Closing date cannot be before effective date.", 400
+
+    deadline_dates = build_deadline_dates(
+        effective_date_value=effective_date_value,
+        earnest_due_date_value=earnest_due_date_value,
+        option_period_end_value=option_period_end_value,
+        financing_approval_value=financing_approval_value,
+        closing_date_value=closing_date_value,
+    )
+
+    updated = execute_query(
+        """
+        UPDATE transactions
+        SET effective_date = %s,
+            option_fee_due_date = %s,
+            earnest_due_date = %s,
+            seller_disclosure_due_date = %s,
+            survey_due_date = %s,
+            option_period_end_date = %s,
+            hoa_docs_due_date = %s,
+            buyer_hoa_review_end_date = %s,
+            title_commitment_due_date = %s,
+            financing_approval_date = %s,
+            buyer_title_objection_end_date = %s,
+            closing_date = %s,
+            buyer_name = %s,
+            buyer_phone = %s,
+            seller_name = %s,
+            seller_phone = %s,
+            lender_name = %s,
+            title_company = %s,
+            status = 'ACTIVE',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (
+            effective_date_value,
+            deadline_dates["option_fee"],
+            earnest_due_date_value,
+            deadline_dates["seller_disclosure"],
+            deadline_dates["survey"],
+            option_period_end_value,
+            deadline_dates["hoa_docs"],
+            deadline_dates["buyer_hoa_review"],
+            deadline_dates["title_commitment"],
+            financing_approval_value,
+            deadline_dates["buyer_title_objection"],
+            closing_date_value,
+            buyer_name,
+            buyer_phone,
+            seller_name,
+            seller_phone,
+            lender_name,
+            title_company,
+            transaction_id,
+        ),
+    )
+    if not updated:
+        return "Failed to activate transaction.", 500
+
+    if not create_deadlines(transaction_id, deadline_dates):
+        return "Failed to create deadlines.", 500
+    if not create_tasks(transaction_id, effective_date_value, closing_date_value):
+        return "Failed to create tasks.", 500
+
+    transaction["id"] = transaction_id
+    maybe_create_referral(transaction)
+
+    timeline_dates = {
+        "earnest": earnest_due_date_value.strftime("%m/%d/%Y"),
+        "option_end": option_period_end_value.strftime("%m/%d/%Y"),
+        "financing": financing_approval_value.strftime("%m/%d/%Y"),
+        "closing": closing_date_value.strftime("%m/%d/%Y"),
+    }
+    timeline_sid = send_timeline_approved(
+        transaction.get("agent_phone"),
+        transaction.get("property_address"),
+        timeline_dates,
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'text', 'agent', 'system', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Timeline approved and sent to agent",
+            f"message_sid={timeline_sid or 'failed'}",
+        ),
+    )
+
+    if not transaction.get("payment_upfront_paid"):
+        upfront_breakdown = calculate_payment_breakdown(transaction, "upfront")
+        payment_sid = send_payment_link(
+            transaction.get("agent_phone"),
+            transaction_id,
+            round(float(upfront_breakdown["amount"]), 2),
+            "upfront",
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'text', 'agent', 'system', %s, %s)
+            """,
+            (
+                transaction_id,
+                "Upfront payment link sent",
+                f"message_sid={payment_sid or 'failed'} amount={upfront_breakdown['amount']}",
+            ),
+        )
+
+    return redirect(url_for("tc_dashboard"))
+
+
+@app.route("/tc/transaction/<int:transaction_id>/upload-document", methods=["POST"])
+@login_required
+def upload_transaction_document(transaction_id):
+    """Upload a transaction document to S3 and track it in DB."""
+    if not get_transaction_or_none(transaction_id):
         return "Transaction not found", 404
 
-    txn = txn_rows[0]
-    closing = txn["closing_date"].strftime("%Y-%m-%d") if txn["closing_date"] else "TBD"
-    return f"""
-    <html>
-      <head><title>Transaction {txn['id']}</title></head>
-      <body style="font-family: Arial, sans-serif; margin: 24px;">
-        <a href="/tc/dashboard">Back to dashboard</a>
-        <h2>{txn['property_address']}</h2>
-        <p><strong>Agent:</strong> {txn['agent_name']} ({txn['agent_phone']})</p>
-        <p><strong>Status:</strong> {txn['status']}</p>
-        <p><strong>Closing date:</strong> {closing}</p>
-        <p><strong>Upfront paid:</strong> {"YES" if txn['payment_upfront_paid'] else "NO"}</p>
-        <p><strong>Closing paid:</strong> {"YES" if txn['payment_closing_paid'] else "NO"}</p>
-        <p>
-          <a href="/pay/{txn['id']}/upfront">Upfront payment page</a> |
-          <a href="/pay/{txn['id']}/closing">Closing payment page</a>
-        </p>
-        <p><a href="/tc/transaction/{txn['id']}/mark-complete">Mark complete</a></p>
-      </body>
-    </html>
-    """
+    if "document_file" not in request.files:
+        return "No file uploaded.", 400
+    file = request.files["document_file"]
+    if not file or not file.filename:
+        return "Please select a document file.", 400
+
+    safe_filename = secure_filename(file.filename)
+    extension = file_extension(safe_filename)
+    if extension not in ALLOWED_DOCUMENT_EXTENSIONS:
+        return "Invalid file type. Allowed: PDF, JPG, JPEG, PNG.", 400
+
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    if file_size > MAX_FILE_SIZE:
+        return "File exceeds 16MB upload limit.", 400
+    file.seek(0)
+
+    document_type = (request.form.get("document_type") or "other").strip().lower()
+    if not document_type:
+        document_type = "other"
+
+    s3_key = upload_document(file, transaction_id, document_type, safe_filename)
+    if not s3_key:
+        return "Failed to upload document.", 500
+
+    document_id = execute_insert(
+        """
+        INSERT INTO documents (
+            transaction_id, document_type, filename, s3_key, file_size, uploaded_by, uploaded_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            transaction_id,
+            document_type,
+            safe_filename,
+            s3_key,
+            file_size,
+            session.get("tc_username", "margaret"),
+        ),
+    )
+    if not document_id:
+        return "Failed to save document record.", 500
+
+    log_document_access(
+        document_id=document_id,
+        user_name=session.get("tc_username", "margaret"),
+        user_type="tc",
+        action="upload",
+        ip_address=request.remote_addr or "",
+    )
+    return redirect(f"{url_for('tc_transaction', transaction_id=transaction_id)}#documents")
+
+
+@app.route("/tc/document/<int:document_id>/view")
+@login_required
+def view_document(document_id):
+    """View a transaction document using a presigned URL."""
+    rows = execute_query(
+        "SELECT id, transaction_id, s3_key, filename FROM documents WHERE id = %s",
+        (document_id,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return "Document not found", 404
+
+    document = rows[0]
+    url = get_presigned_url(document["s3_key"], expiration=1800)
+    if not url:
+        return "Failed to create secure document URL", 500
+
+    log_document_access(
+        document_id=document_id,
+        user_name=session.get("tc_username", "margaret"),
+        user_type="tc",
+        action="view",
+        ip_address=request.remote_addr or "",
+    )
+    return redirect(url)
+
+
+@app.route("/tc/document/<int:document_id>/download")
+@login_required
+def download_document(document_id):
+    """Download a transaction document using a presigned URL."""
+    rows = execute_query(
+        "SELECT id, transaction_id, s3_key, filename FROM documents WHERE id = %s",
+        (document_id,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return "Document not found", 404
+
+    document = rows[0]
+    url = get_presigned_url(
+        document["s3_key"],
+        expiration=1800,
+        download_filename=document.get("filename") or f"document_{document_id}",
+    )
+    if not url:
+        return "Failed to create secure document URL", 500
+
+    log_document_access(
+        document_id=document_id,
+        user_name=session.get("tc_username", "margaret"),
+        user_type="tc",
+        action="download",
+        ip_address=request.remote_addr or "",
+    )
+    return redirect(url)
+
+
+@app.route("/tc/transaction/<int:transaction_id>/log-communication", methods=["POST"])
+@login_required
+def log_transaction_communication(transaction_id):
+    """Log call/email/text communication for a transaction."""
+    if not get_transaction_or_none(transaction_id):
+        return "Transaction not found", 404
+
+    communication_type = (request.form.get("communication_type") or "").strip().lower()
+    contact_party = (request.form.get("contact_party") or "").strip().lower()
+    contact_name = request.form.get("contact_name", "").strip()
+    summary = request.form.get("summary", "").strip()
+    outcome = request.form.get("outcome", "").strip()
+    follow_up_date = parse_optional_date(request.form.get("follow_up_date"))
+    follow_up_needed = bool(follow_up_date)
+
+    if not communication_type:
+        return "Communication type is required.", 400
+    if not contact_party:
+        return "Contact party is required.", 400
+    if not summary:
+        return "Summary is required.", 400
+
+    execute_query(
+        """
+        INSERT INTO communications (
+            transaction_id, communication_type, contact_party, contact_name,
+            summary, outcome, follow_up_needed, follow_up_date, logged_by
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            transaction_id,
+            communication_type,
+            contact_party,
+            contact_name or None,
+            summary,
+            outcome or None,
+            follow_up_needed,
+            follow_up_date,
+            session.get("tc_username", "margaret"),
+        ),
+    )
+    return redirect(f"{url_for('tc_transaction', transaction_id=transaction_id)}#communications")
+
+
+@app.route("/tc/transaction/<int:transaction_id>/mark-payment", methods=["POST"])
+@login_required
+def mark_transaction_payment(transaction_id):
+    """Mark payment as received manually from TC dashboard."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+
+    payment_type = (request.form.get("payment_type") or "").strip().lower()
+    if payment_type not in {"upfront", "closing"}:
+        return "Invalid payment type.", 400
+
+    if payment_type == "upfront":
+        execute_query(
+            """
+            UPDATE transactions
+            SET payment_upfront_paid = TRUE,
+                payment_upfront_date = COALESCE(payment_upfront_date, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (transaction_id,),
+        )
+        mark_referral_credit_used_if_needed(transaction_id, transaction.get("agent_name"))
+        amount_marked = calculate_payment_breakdown(transaction, "upfront")["amount"]
+    else:
+        execute_query(
+            """
+            UPDATE transactions
+            SET payment_closing_paid = TRUE,
+                payment_closing_date = COALESCE(payment_closing_date, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (transaction_id,),
+        )
+        amount_marked = calculate_payment_breakdown(transaction, "closing")["amount"]
+
+    send_sms(
+        transaction.get("agent_phone"),
+        f"Payment marked received (${float(amount_marked):.2f}) for {payment_type}. - Maverick TC",
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'text', 'agent', 'system', %s, %s)
+        """,
+        (
+            transaction_id,
+            f"{payment_type.title()} payment marked paid manually",
+            f"amount={float(amount_marked):.2f}",
+        ),
+    )
+    return redirect(f"{url_for('tc_transaction', transaction_id=transaction_id)}#payments")
+
+
+@app.route("/tc/transaction/<int:transaction_id>/send-referrer-thanks", methods=["POST"])
+@login_required
+def send_referrer_thanks(transaction_id):
+    """Send referral thank-you SMS to the referring agent."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+
+    referrer_name = (transaction.get("referred_by_agent") or "").strip()
+    if not referrer_name:
+        return "No referral is associated with this transaction.", 400
+
+    referral_rows = execute_query(
+        """
+        SELECT referrer_agent_phone
+        FROM referrals
+        WHERE referred_transaction_id = %s
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    referrer_phone = referral_rows[0]["referrer_agent_phone"] if referral_rows else None
+
+    if not referrer_phone:
+        fallback_rows = execute_query(
+            """
+            SELECT agent_phone
+            FROM transactions
+            WHERE LOWER(agent_name) = LOWER(%s)
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (referrer_name,),
+            fetch=True,
+        ) or []
+        referrer_phone = fallback_rows[0]["agent_phone"] if fallback_rows else None
+
+    if not referrer_phone:
+        return "Could not find referrer phone number.", 400
+
+    sid = send_sms(
+        referrer_phone,
+        (
+            f"Thanks for referring {transaction.get('agent_name')} to Maverick TC. "
+            "We appreciate your trust and partnership. - Maverick TC"
+        ),
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'text', 'agent', %s, %s, %s)
+        """,
+        (
+            transaction_id,
+            referrer_name,
+            "Referral thank-you text sent to referrer",
+            f"message_sid={sid or 'failed'}",
+        ),
+    )
+    return redirect(f"{url_for('tc_transaction', transaction_id=transaction_id)}#review-details")
 
 
 @app.route("/upload", methods=["POST"])
