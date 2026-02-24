@@ -50,7 +50,7 @@ def test_s3_connection() -> Tuple[bool, str]:
         return False, f"Missing env vars: {', '.join(missing)}"
 
     bucket = os.getenv("AWS_S3_BUCKET_DOCUMENTS", "")
-    region = os.getenv("AWS_REGION", "us-east-2")
+    region = os.getenv("AWS_REGION")
     key = f"integration-tests/test_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.txt"
     body = b"Maverick integration test file."
 
