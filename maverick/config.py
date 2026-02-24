@@ -25,7 +25,7 @@ class Config:
     # AWS
     AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "")
     AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
-    AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
+    AWS_REGION: str = os.getenv("AWS_REGION", "us-east-2")
     AWS_S3_BUCKET_DOCUMENTS: str = os.getenv("AWS_S3_BUCKET_DOCUMENTS", "")
     AWS_S3_BUCKET_BACKUPS: str = os.getenv("AWS_S3_BUCKET_BACKUPS", "")
 
