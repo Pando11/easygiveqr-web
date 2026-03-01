@@ -6,6 +6,10 @@ Use these schedules and commands in Railway Cron.
 - Schedule: `0 8 * * *`
 - Command: `python send_reminders.py`
 
+## Predictive Alerts
+- Schedule: `0 6 * * *`
+- Command: `python predictive_alerts.py`
+
 ## Closing Protocol Morning
 - Schedule: `0 8 * * *`
 - Command: `python closing_protocol.py`

@@ -226,6 +226,15 @@ CREATE TABLE document_access_logs (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE predictive_alerts (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    alert_date DATE NOT NULL,
+    reason TEXT NOT NULL,
+    resolved_date DATE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -241,3 +250,5 @@ CREATE INDEX idx_documents_type ON documents(document_type);
 CREATE INDEX idx_communications_transaction ON communications(transaction_id);
 CREATE INDEX idx_access_logs_document ON document_access_logs(document_id);
 CREATE INDEX idx_access_logs_timestamp ON document_access_logs(timestamp);
+CREATE UNIQUE INDEX idx_predictive_alerts_txn_alert_date ON predictive_alerts(transaction_id, alert_date);
+CREATE INDEX idx_predictive_alerts_open ON predictive_alerts(transaction_id, resolved_date);
