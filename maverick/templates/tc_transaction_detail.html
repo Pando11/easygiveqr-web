@@ -679,6 +679,31 @@
             <p class="hint-text">Recipients: {{ timeline_recipients_label }}</p>
         </article>
 
+        <article class="card" id="closing-checklist">
+            <h3>Dynamic Closing Checklist</h3>
+            {% if closing_checklist %}
+            <p><strong>Status:</strong> {{ closing_checklist.status_label }}</p>
+            <p class="hint-text">Generated: {{ closing_checklist.generated_at_label }}</p>
+            <p class="hint-text">Auto-send deadline: {{ closing_checklist.auto_send_after_label }}</p>
+            <p class="hint-text">Items: {{ closing_checklist.summary.item_count or 0 }}</p>
+            {% if closing_checklist_pdf_url %}
+            <p>
+                <a class="text-link" href="{{ closing_checklist_pdf_url }}" target="_blank" rel="noopener">
+                    View Closing Checklist PDF
+                </a>
+            </p>
+            {% endif %}
+            <a class="btn btn-secondary action-btn" href="{{ url_for('tc_closing_checklist_detail', checklist_id=closing_checklist.id) }}">
+                Review / Edit Checklist
+            </a>
+            {% else %}
+            <p class="hint-text">Checklist not generated yet. Maverick auto-generates this 3 days before closing.</p>
+            {% endif %}
+            <form method="post" action="{{ url_for('generate_transaction_closing_checklist', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Generate Dynamic Checklist</button>
+            </form>
+        </article>
+
         <article class="card" id="payments">
             <h3>Payments</h3>
             <div class="payment-row">

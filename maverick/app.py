@@ -52,6 +52,25 @@ from utils.bulk_messaging import (
     queue_bulk_message_job,
     save_bulk_message_template,
 )
+from utils.closing_checklist import (
+    add_closing_checklist_item,
+    approve_and_send_closing_checklist,
+    auto_send_unreviewed_closing_checklists,
+    ensure_closing_checklist_tables,
+    fetch_closing_checklist,
+    fetch_closing_checklist_by_access_token,
+    fetch_closing_checklist_by_transaction,
+    fetch_closing_checklist_items,
+    fetch_closing_checklist_recipients,
+    fetch_closing_checklists_for_tc,
+    generate_closing_checklist,
+    generate_due_closing_checklists,
+    mark_closing_checklist_recipient_viewed,
+    regenerate_closing_checklist_pdf,
+    remove_closing_checklist_item,
+    send_closing_checklist,
+    toggle_closing_checklist_item,
+)
 from utils.db import execute_insert, execute_query
 from utils.email import send_email, send_html_email
 from utils.payments import calculate_payment_breakdown
@@ -5693,6 +5712,46 @@ def parse_optional_int(raw_value):
         return None
 
 
+def closing_checklist_status_label(status_value):
+    """Readable status text for closing checklist rows."""
+    status_text = (status_value or "").strip().replace("_", " ")
+    return status_text.title() if status_text else "Pending Review"
+
+
+def build_closing_checklist_sections(item_rows):
+    """Group checklist items into ordered section blocks for templates."""
+    grouped = {}
+    section_order = []
+    for item in item_rows or []:
+        section = (item.get("section_title") or "General").strip()
+        if section not in grouped:
+            grouped[section] = []
+            section_order.append(section)
+        grouped[section].append(item)
+
+    blocks = []
+    for section in section_order:
+        blocks.append(
+            {
+                "section_title": section,
+                "items": grouped[section],
+            }
+        )
+    return blocks
+
+
+def closing_checklist_public_url(access_token):
+    """Build external URL for public checklist recipient link."""
+    if not access_token:
+        return ""
+    base_url = (os.getenv("APP_BASE_URL") or "").strip().rstrip("/")
+    if base_url:
+        return f"{base_url}/closing-checklist/{access_token}"
+    if has_request_context():
+        return url_for("public_closing_checklist", access_token=access_token, _external=True)
+    return f"/closing-checklist/{access_token}"
+
+
 def file_extension(filename):
     """Return lower-cased extension for a filename."""
     if not filename or "." not in filename:
@@ -7393,6 +7452,271 @@ def tc_status_updates():
     )
 
 
+@app.route("/tc/closing-checklists", methods=["GET", "POST"])
+@login_required
+def tc_closing_checklists():
+    """Queue, review, and auto-send dynamic closing checklists."""
+    ensure_closing_checklist_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        if action == "refresh_due":
+            summary = generate_due_closing_checklists(days_before=3)
+            notice = (
+                "Closing checklist trigger completed: "
+                f"candidates={summary.get('candidate_count', 0)} "
+                f"generated={summary.get('generated', 0)} "
+                f"skipped_existing={summary.get('skipped_existing', 0)} "
+                f"failed={summary.get('failed', 0)}"
+            )
+            notice_type = "success" if summary.get("failed", 0) == 0 else "warning"
+        elif action == "auto_send_now":
+            summary = auto_send_unreviewed_closing_checklists()
+            notice = (
+                "Auto-send run completed: "
+                f"candidates={summary.get('candidate_count', 0)} "
+                f"auto_sent={summary.get('auto_sent', 0)} "
+                f"failed={summary.get('failed', 0)}"
+            )
+            notice_type = "success" if summary.get("failed", 0) == 0 else "warning"
+        else:
+            notice = "Unknown closing checklist action."
+            notice_type = "warning"
+        return redirect(url_for("tc_closing_checklists", notice=notice, notice_type=notice_type))
+
+    checklists = fetch_closing_checklists_for_tc(limit=120)
+    for row in checklists:
+        row["status_label"] = closing_checklist_status_label(row.get("status"))
+        row["closing_date_label"] = format_date_label(row.get("closing_date"))
+        row["generated_at_label"] = format_timestamp_label(row.get("generated_at"))
+        row["auto_send_after_label"] = format_timestamp_label(row.get("auto_send_after"))
+        row["item_count"] = int((row.get("summary") or {}).get("item_count") or 0)
+
+    return render_template(
+        "tc_closing_checklists.html",
+        notice=notice,
+        notice_type=notice_type,
+        checklists=checklists,
+    )
+
+
+@app.route("/tc/transaction/<int:transaction_id>/generate-closing-checklist", methods=["POST"])
+@login_required
+def generate_transaction_closing_checklist(transaction_id):
+    """Generate one dynamic closing checklist for a transaction."""
+    ensure_closing_checklist_tables()
+    result = generate_closing_checklist(
+        transaction_id=transaction_id,
+        trigger_source="manual_tc_action",
+    )
+    if not result.get("success"):
+        return redirect(
+            url_for(
+                "tc_transaction",
+                transaction_id=transaction_id,
+                doc_notice=f"Could not generate closing checklist: {result.get('error', 'unknown error')}",
+                doc_notice_type="error",
+            )
+        )
+    checklist_id = result["checklist"]["id"]
+    return redirect(
+        url_for(
+            "tc_closing_checklist_detail",
+            checklist_id=checklist_id,
+            notice="Dynamic closing checklist generated.",
+            notice_type="success",
+        )
+    )
+
+
+@app.route("/tc/closing-checklist/<int:checklist_id>", methods=["GET", "POST"])
+@login_required
+def tc_closing_checklist_detail(checklist_id):
+    """Review and edit dynamic closing checklist before party distribution."""
+    ensure_closing_checklist_tables()
+    checklist = fetch_closing_checklist(checklist_id)
+    if not checklist:
+        return "Closing checklist not found.", 404
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        notice = "Checklist updated."
+        notice_type = "success"
+
+        if action == "add_item":
+            section_title = (request.form.get("section_title") or "CUSTOM ITEMS").strip()
+            item_text = (request.form.get("item_text") or "").strip()
+            if not item_text:
+                notice = "Item text is required."
+                notice_type = "warning"
+            else:
+                add_closing_checklist_item(checklist_id, section_title=section_title, item_text=item_text, source_type="margaret")
+                regenerate_closing_checklist_pdf(checklist_id)
+                notice = "Checklist item added."
+        elif action == "remove_item":
+            item_id = parse_optional_int(request.form.get("item_id"))
+            if not item_id:
+                notice = "Invalid checklist item."
+                notice_type = "warning"
+            else:
+                remove_closing_checklist_item(checklist_id, item_id=item_id)
+                regenerate_closing_checklist_pdf(checklist_id)
+                notice = "Checklist item removed."
+        elif action == "toggle_item":
+            item_id = parse_optional_int(request.form.get("item_id"))
+            completed = parse_bool_value(request.form.get("completed"), default=False)
+            if not item_id:
+                notice = "Invalid checklist item."
+                notice_type = "warning"
+            else:
+                toggle_closing_checklist_item(
+                    checklist_id=checklist_id,
+                    item_id=item_id,
+                    completed=completed,
+                    actor_role="tc",
+                    actor_name=session.get("tc_username", "margaret"),
+                )
+                regenerate_closing_checklist_pdf(checklist_id)
+                notice = "Checklist item status updated."
+        elif action == "regenerate_pdf":
+            result = regenerate_closing_checklist_pdf(checklist_id)
+            notice = "Checklist PDF regenerated." if result else "Unable to regenerate checklist PDF."
+            notice_type = "success" if result else "warning"
+        elif action == "approve_send":
+            result = approve_and_send_closing_checklist(
+                checklist_id=checklist_id,
+                approved_by=session.get("tc_username", "margaret"),
+            )
+            if result.get("success"):
+                delivery = result.get("delivery") or {}
+                notice = (
+                    "Checklist approved and sent. "
+                    f"Emails: {delivery.get('sent_email_count', 0)} | SMS: {delivery.get('sent_sms_count', 0)}"
+                )
+                notice_type = "success"
+            else:
+                notice = f"Could not send checklist: {result.get('error', 'unknown error')}"
+                notice_type = "error"
+        elif action == "resend_now":
+            result = send_closing_checklist(
+                checklist_id=checklist_id,
+                actor=session.get("tc_username", "margaret"),
+                auto=False,
+            )
+            if result.get("success"):
+                delivery = result.get("delivery") or {}
+                notice = (
+                    "Checklist resent. "
+                    f"Emails: {delivery.get('sent_email_count', 0)} | SMS: {delivery.get('sent_sms_count', 0)}"
+                )
+                notice_type = "success"
+            else:
+                notice = f"Could not resend checklist: {result.get('error', 'unknown error')}"
+                notice_type = "error"
+        else:
+            notice = "Unknown checklist action."
+            notice_type = "warning"
+
+        return redirect(
+            url_for(
+                "tc_closing_checklist_detail",
+                checklist_id=checklist_id,
+                notice=notice,
+                notice_type=notice_type,
+            )
+        )
+
+    checklist = fetch_closing_checklist(checklist_id)
+    transaction = get_transaction_or_none(checklist["transaction_id"])
+    if not transaction:
+        return "Transaction not found.", 404
+    items = fetch_closing_checklist_items(checklist_id)
+    recipients = fetch_closing_checklist_recipients(checklist_id)
+    for recipient in recipients:
+        recipient["checklist_url"] = closing_checklist_public_url(recipient.get("access_token"))
+        recipient["party_role_label"] = (recipient.get("party_role") or "party").replace("_", " ").title()
+
+    checklist_pdf_url = ""
+    if checklist.get("pdf_s3_key"):
+        checklist_pdf_url = get_presigned_url(checklist["pdf_s3_key"], expiration=60 * 60 * 24 * 7) or ""
+
+    for item in items:
+        item["source_label"] = (item.get("source_type") or "base").replace("_", " ").title()
+        item["completed_label"] = "Completed" if item.get("completed") else "Open"
+        item["completed_at_label"] = format_timestamp_label(item.get("completed_at"))
+
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    return render_template(
+        "tc_closing_checklist_detail.html",
+        notice=notice,
+        notice_type=notice_type,
+        checklist=checklist,
+        checklist_status_label=closing_checklist_status_label(checklist.get("status")),
+        checklist_pdf_url=checklist_pdf_url,
+        checklist_sections=build_closing_checklist_sections(items),
+        recipients=recipients,
+        transaction=transaction,
+    )
+
+
+@app.route("/closing-checklist/<access_token>")
+def public_closing_checklist(access_token):
+    """Public interactive checklist view for recipients."""
+    ensure_closing_checklist_tables()
+    payload = fetch_closing_checklist_by_access_token(access_token)
+    if not payload:
+        return "Checklist link is invalid or expired.", 404
+    mark_closing_checklist_recipient_viewed(payload["recipient_id"])
+
+    items = fetch_closing_checklist_items(payload["checklist_id"])
+    for item in items:
+        item["completed_label"] = "Completed" if item.get("completed") else "Open"
+
+    checklist_pdf_url = ""
+    if payload.get("pdf_s3_key"):
+        checklist_pdf_url = get_presigned_url(payload["pdf_s3_key"], expiration=60 * 60 * 24 * 7) or ""
+
+    return render_template(
+        "closing_checklist_party.html",
+        checklist=payload,
+        checklist_status_label=closing_checklist_status_label(payload.get("status")),
+        checklist_sections=build_closing_checklist_sections(items),
+        checklist_pdf_url=checklist_pdf_url,
+    )
+
+
+@app.route("/closing-checklist/<access_token>/item/<int:item_id>/toggle", methods=["POST"])
+def toggle_public_closing_checklist_item(access_token, item_id):
+    """Toggle one checklist item from the public recipient checklist page."""
+    ensure_closing_checklist_tables()
+    payload = fetch_closing_checklist_by_access_token(access_token)
+    if not payload:
+        return jsonify({"success": False, "error": "Invalid checklist link"}), 404
+
+    request_json = request.get_json(silent=True) or {}
+    if request_json:
+        completed = parse_bool_value(request_json.get("completed"), default=False)
+    else:
+        completed = parse_bool_value(request.form.get("completed"), default=False)
+
+    toggle_closing_checklist_item(
+        checklist_id=payload["checklist_id"],
+        item_id=item_id,
+        completed=completed,
+        actor_role=payload.get("party_role") or "party",
+        actor_name=payload.get("recipient_name") or "Checklist Party",
+    )
+    return jsonify({"success": True, "completed": completed})
+
+
 @app.route("/tc/task-completion/run", methods=["POST"])
 @login_required
 def run_task_completion_now():
@@ -8520,6 +8844,17 @@ def tc_transaction(transaction_id):
     timeline_last_sent_ago = format_time_ago(timeline_last_sent) if timeline_last_sent else ""
     timeline_recipients_label = format_timeline_recipients_label(timeline_packet.get("sent_recipients"))
 
+    ensure_closing_checklist_tables()
+    closing_checklist = fetch_closing_checklist_by_transaction(transaction_id) or {}
+    closing_checklist_pdf_url = ""
+    if closing_checklist.get("pdf_s3_key"):
+        closing_checklist_pdf_url = get_presigned_url(closing_checklist["pdf_s3_key"], expiration=60 * 60 * 24 * 7) or ""
+    if closing_checklist:
+        closing_checklist["status_label"] = closing_checklist_status_label(closing_checklist.get("status"))
+        closing_checklist["generated_at_label"] = format_timestamp_label(closing_checklist.get("generated_at"))
+        closing_checklist["auto_send_after_label"] = format_timestamp_label(closing_checklist.get("auto_send_after"))
+        closing_checklist["summary"] = closing_checklist.get("summary") or {}
+
     task_preview = []
     task_total = 0
     if status == "ACTIVE":
@@ -8614,6 +8949,8 @@ def tc_transaction(transaction_id):
         timeline_last_sent_label=timeline_last_sent_label,
         timeline_last_sent_ago=timeline_last_sent_ago,
         timeline_recipients_label=timeline_recipients_label,
+        closing_checklist=closing_checklist,
+        closing_checklist_pdf_url=closing_checklist_pdf_url,
         task_preview=task_preview,
         task_total=task_total,
         communications=communications,

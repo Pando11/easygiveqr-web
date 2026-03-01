@@ -778,6 +778,66 @@ CREATE TABLE agent_status_update_messages (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE closing_checklists (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+    status VARCHAR(30) DEFAULT 'pending_review',
+    trigger_date DATE,
+    auto_send_after TIMESTAMP,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reviewed_by VARCHAR(100),
+    reviewed_at TIMESTAMP,
+    approved_by VARCHAR(100),
+    approved_at TIMESTAMP,
+    sent_at TIMESTAMP,
+    sent_disclaimer BOOLEAN DEFAULT FALSE,
+    pdf_s3_key VARCHAR(500),
+    pdf_filename VARCHAR(255),
+    summary JSONB DEFAULT '{}'::jsonb,
+    notes TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE closing_checklist_items (
+    id SERIAL PRIMARY KEY,
+    checklist_id INT REFERENCES closing_checklists(id) ON DELETE CASCADE,
+    section_title VARCHAR(200),
+    item_text TEXT NOT NULL,
+    source_type VARCHAR(40) DEFAULT 'base',
+    required BOOLEAN DEFAULT TRUE,
+    sort_order INT DEFAULT 0,
+    completed BOOLEAN DEFAULT FALSE,
+    completed_by_role VARCHAR(40),
+    completed_by_name VARCHAR(120),
+    completed_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE closing_checklist_recipients (
+    id SERIAL PRIMARY KEY,
+    checklist_id INT REFERENCES closing_checklists(id) ON DELETE CASCADE,
+    party_role VARCHAR(30) NOT NULL,
+    recipient_name VARCHAR(255),
+    recipient_email VARCHAR(255),
+    recipient_phone VARCHAR(25),
+    access_token UUID UNIQUE NOT NULL,
+    email_sent_at TIMESTAMP,
+    sms_sent_at TIMESTAMP,
+    last_viewed_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE closing_lender_requirements (
+    id SERIAL PRIMARY KEY,
+    lender_name VARCHAR(255) UNIQUE NOT NULL,
+    requirements JSONB DEFAULT '[]'::jsonb,
+    active BOOLEAN DEFAULT TRUE,
+    updated_by VARCHAR(100),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -850,3 +910,7 @@ CREATE INDEX idx_agent_status_update_runs_started ON agent_status_update_runs(st
 CREATE INDEX idx_agent_status_update_runs_week_key ON agent_status_update_runs(schedule_week_key, run_kind, preview_only);
 CREATE INDEX idx_agent_status_update_messages_run ON agent_status_update_messages(run_id, status, sent_at DESC);
 CREATE INDEX idx_agent_status_update_messages_sent ON agent_status_update_messages(sent_at DESC, status);
+CREATE INDEX idx_closing_checklists_status ON closing_checklists(status, auto_send_after, generated_at DESC);
+CREATE INDEX idx_closing_checklist_items_checklist ON closing_checklist_items(checklist_id, section_title, sort_order, id);
+CREATE INDEX idx_closing_checklist_recipients_checklist ON closing_checklist_recipients(checklist_id, party_role, recipient_email);
+CREATE INDEX idx_closing_lender_requirements_active ON closing_lender_requirements(active, lender_name);

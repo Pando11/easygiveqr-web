@@ -50,6 +50,14 @@ Use these schedules and commands in Railway Cron.
   - one-send-per-week guard for scheduled runs
   - per-transaction agent update emails with progress + urgent items
 
+## Dynamic Closing Checklists
+- Schedule: `0 * * * *`
+- Command: `cd maverick && python3 automation/closing_checklists.py`
+- Includes:
+  - generates checklist exactly 3 days before closing for active transactions
+  - prepares PDF + interactive checklist recipient links
+  - auto-sends with disclaimer after 24 hours if Margaret has not approved
+
 ## Auto Task Completion
 - Schedule: `*/15 * * * *`
 - Command: `cd maverick && python3 automation/task_auto_completion.py`

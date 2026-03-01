@@ -25,7 +25,8 @@ Core capabilities:
 - Twilio voice-note capture with transcription, auto task actions, and communication-log playback
 - Smart document classification + renaming before S3 save, with Margaret correction learning loop
 - Automated weekly agent status updates (preview/edit/send controls, schedule choice, opt-out list)
-- Automation scripts for reminders, closing protocol, problem detection, task auto-completion, and nightly backups
+- Dynamic closing checklist generator (3-day trigger, Margaret review, 24-hour auto-send fallback, PDF + interactive + SMS)
+- Automation scripts for reminders, closing protocol, problem detection, task auto-completion, closing checklists, and nightly backups
 
 ## Local setup instructions
 
@@ -212,6 +213,32 @@ Maverick can send weekly progress emails to agents for each active transaction:
   - per-agent opt-out list
   - manual "send now" trigger
   - call/text reduction tracking (estimated "questions answered" metric)
+
+## Dynamic Closing Checklists
+
+Maverick can generate a transaction-specific closing checklist exactly 3 days before closing:
+
+- TC queue route: `GET|POST /tc/closing-checklists`
+- Transaction trigger route: `POST /tc/transaction/<transaction_id>/generate-closing-checklist`
+- Review/edit/send route: `GET|POST /tc/closing-checklist/<checklist_id>`
+- Public interactive route: `GET /closing-checklist/<access_token>`
+- Scheduler script: `python3 automation/closing_checklists.py` (hourly recommended)
+
+Generation behavior:
+- starts from a base checklist template
+- customizes buyer cash-to-close estimate
+- adds repair verification section when repair addendum content is detected
+- adds HOA special-assessment item when analysis indicates one
+- appends lender-specific requirement section
+- appends contract special-provision checklist items when extracted
+
+Distribution behavior:
+- Margaret can add/remove/toggle items before approval
+- approved checklist sends to parties in multi-format:
+  - printable PDF link
+  - interactive checklist link in Maverick (checkboxes shared across parties)
+  - SMS mini-version summary
+- if not reviewed within 24 hours, it auto-sends with a disclaimer
 
 ## Timeline Packet + Vendor Outreach Automation
 

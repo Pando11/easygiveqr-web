@@ -229,6 +229,52 @@ Form `action` options:
   - incomplete agent-action tasks
   - days to closing + health label + progress bar
 
+## Dynamic Closing Checklist Generator
+
+### TC checklist queue + manual trigger
+- `GET|POST /tc/closing-checklists`
+- Form actions:
+  - `refresh_due` (run the 3-day trigger immediately)
+  - `auto_send_now` (process pending 24-hour auto-send items immediately)
+
+### Transaction-level checklist generation
+- `POST /tc/transaction/<transaction_id>/generate-closing-checklist`
+- Behavior:
+  - builds checklist from base template
+  - customizes buyer cash-to-close estimate
+  - adds repair/HOA/lender/special-provision sections when detected
+  - creates PDF and recipient access links
+  - places checklist in `pending_review` for Margaret
+
+### Margaret review/edit/send
+- `GET|POST /tc/closing-checklist/<checklist_id>`
+- Form actions:
+  - `add_item`
+  - `remove_item`
+  - `toggle_item`
+  - `regenerate_pdf`
+  - `approve_send`
+  - `resend_now`
+
+### Public interactive checklist (tokenized)
+- `GET /closing-checklist/<access_token>`
+- `POST /closing-checklist/<access_token>/item/<item_id>/toggle`
+- Behavior:
+  - recipients can check/uncheck items in Maverick
+  - updates shared checklist state for all participants
+  - tracks recipient last-viewed timestamp
+
+### Scheduled automation script
+- `python3 automation/closing_checklists.py`
+- Recommended cron schedule: hourly (`0 * * * *`)
+- Runtime behavior:
+  - generates checklists for active transactions closing in exactly 3 days
+  - auto-sends checklists when unreviewed for 24 hours (with disclaimer)
+  - sends multi-format output:
+    - email update + interactive checklist link
+    - printable PDF link
+    - SMS mini-version summary
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values
