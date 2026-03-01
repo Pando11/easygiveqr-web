@@ -324,21 +324,24 @@ def _parse_with_claude(transcript_text):
     )
 
     client = Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=model,
-        max_tokens=900,
-        temperature=0,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "text", "text": f"Transcript:\n{transcript_text}"},
-                ],
-            }
-        ],
-    )
-    payload = _extract_json_block(_extract_response_text(response))
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=900,
+            temperature=0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": f"Transcript:\n{transcript_text}"},
+                    ],
+                }
+            ],
+        )
+        payload = _extract_json_block(_extract_response_text(response))
+    except Exception:
+        payload = None
     if not isinstance(payload, dict):
         return None
     payload["parser"] = "claude"
@@ -809,6 +812,18 @@ def queue_voice_note_processing(voice_note_id, transcription_text=None, transcri
 def _process_voice_note_worker(voice_note_id, transcription_text=None, transcription_source=None):
     try:
         _process_voice_note(voice_note_id, transcription_text=transcription_text, transcription_source=transcription_source)
+    except Exception as exc:
+        _update_voice_note_row(
+            voice_note_id,
+            status="error",
+            review_required=True,
+            error_message=f"Voice note processing error: {str(exc)[:300]}",
+            processed=True,
+        )
+        _notify_margaret(
+            f"Voice note processing error for note #{voice_note_id}. "
+            f"{str(exc)[:180]}"
+        )
     finally:
         with _VOICE_NOTE_PROCESSING_LOCK:
             _VOICE_NOTE_PROCESSING_ACTIVE.discard(voice_note_id)
