@@ -43,7 +43,19 @@
             <p><strong>Agent:</strong> {{ transaction.agent_name }}</p>
             <p><strong>Phone:</strong> <a href="tel:{{ transaction.agent_phone }}">{{ transaction.agent_phone }}</a></p>
             <p><strong>Email:</strong> <a href="mailto:{{ transaction.agent_email }}">{{ transaction.agent_email }}</a></p>
+            <p><strong>Lender Email:</strong> {{ transaction.lender_email or "Not provided" }}</p>
+            <p><strong>Title Company Email:</strong> {{ transaction.title_officer_email or "Not provided" }}</p>
             <p><strong>Upload Time:</strong> {{ transaction.uploaded_at_label }}</p>
+            <div class="email-status-grid">
+                <div class="email-status-item state-{{ email_status.lender.state }}">
+                    <strong>Lender Notification</strong>
+                    <p>{{ email_status.lender.label }}</p>
+                </div>
+                <div class="email-status-item state-{{ email_status.title.state }}">
+                    <strong>Title Notification</strong>
+                    <p>{{ email_status.title.label }}</p>
+                </div>
+            </div>
             <div class="badge-row">
                 {% if transaction.rush_service %}
                 <span class="tag tag-rush">Rush Service</span>
@@ -184,8 +196,16 @@
                         <input type="text" id="lender_name" name="lender_name" value="{{ transaction.lender_name or '' }}">
                     </div>
                     <div class="form-group">
+                        <label for="lender_email">Lender Email</label>
+                        <input type="email" id="lender_email" name="lender_email" value="{{ transaction.lender_email or '' }}">
+                    </div>
+                    <div class="form-group">
                         <label for="title_company">Title Company *</label>
                         <input type="text" id="title_company" name="title_company" value="{{ transaction.title_company or '' }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="title_company_email">Title Company Email</label>
+                        <input type="email" id="title_company_email" name="title_company_email" value="{{ transaction.title_officer_email or '' }}">
                     </div>
                 </div>
             </div>
@@ -379,6 +399,22 @@
             <p class="outstanding">Outstanding: ${{ "%.2f"|format(payment_context.outstanding_amount) }}</p>
         </article>
 
+        <article class="card" id="email-status">
+            <h3>Email Notifications</h3>
+            <div class="email-status-grid">
+                <div class="email-status-item state-{{ email_status.lender.state }}">
+                    <strong>Lender</strong>
+                    <p>{{ email_status.lender.label }}</p>
+                    <small>{{ transaction.lender_email or "No lender email on file" }}</small>
+                </div>
+                <div class="email-status-item state-{{ email_status.title.state }}">
+                    <strong>Title Company</strong>
+                    <p>{{ email_status.title.label }}</p>
+                    <small>{{ transaction.title_officer_email or "No title company email on file" }}</small>
+                </div>
+            </div>
+        </article>
+
         <article class="card actions-card">
             <h3>Actions</h3>
             <a class="btn action-btn" href="{{ url_for('mark_transaction_complete', transaction_id=transaction.id) }}">
@@ -400,7 +436,9 @@
             <p><strong>Buyer:</strong> {{ transaction.buyer_name or "Not set" }}</p>
             <p><strong>Seller:</strong> {{ transaction.seller_name or "Not set" }}</p>
             <p><strong>Lender:</strong> {{ transaction.lender_name or "Not set" }}</p>
+            <p><strong>Lender Email:</strong> {{ transaction.lender_email or "Not set" }}</p>
             <p><strong>Title Company:</strong> {{ transaction.title_company or "Not set" }}</p>
+            <p><strong>Title Email:</strong> {{ transaction.title_officer_email or "Not set" }}</p>
         </div>
         <div>
             <p><strong>Effective:</strong> {{ transaction.effective_date|default("Not set", true) }}</p>
@@ -408,6 +446,16 @@
             <p><strong>Upfront Payment:</strong> {{ "Paid" if transaction.payment_upfront_paid else "Pending" }}</p>
             <p><strong>Closing Payment:</strong> {{ "Paid" if transaction.payment_closing_paid else "Pending" }}</p>
             <p><strong>Total Outstanding:</strong> ${{ "%.2f"|format(payment_context.outstanding_amount) }}</p>
+        </div>
+    </div>
+    <div class="email-status-grid">
+        <div class="email-status-item state-{{ email_status.lender.state }}">
+            <strong>Lender Notification</strong>
+            <p>{{ email_status.lender.label }}</p>
+        </div>
+        <div class="email-status-item state-{{ email_status.title.state }}">
+            <strong>Title Notification</strong>
+            <p>{{ email_status.title.label }}</p>
         </div>
     </div>
 </section>
@@ -558,6 +606,49 @@
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
+}
+
+.email-status-grid {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.email-status-item {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: #f8fafc;
+}
+
+.email-status-item p {
+    margin: 4px 0 0;
+    font-size: 13px;
+}
+
+.email-status-item small {
+    color: #64748b;
+}
+
+.email-status-item.state-sent {
+    background: #f0fdf4;
+    border-color: #86efac;
+}
+
+.email-status-item.state-pending {
+    background: #fffbeb;
+    border-color: #fcd34d;
+}
+
+.email-status-item.state-failed {
+    background: #fff1f2;
+    border-color: #fda4af;
+}
+
+.email-status-item.state-missing {
+    background: #f8fafc;
+    border-color: #cbd5e1;
 }
 
 .tag {
@@ -800,7 +891,8 @@
     }
 
     .grid-2,
-    .upload-row {
+    .upload-row,
+    .email-status-grid {
         grid-template-columns: 1fr;
     }
 }

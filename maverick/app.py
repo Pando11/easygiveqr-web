@@ -15,6 +15,7 @@ from werkzeug.utils import secure_filename
 
 from config import Config
 from utils.db import execute_insert, execute_query
+from utils.email import send_html_email
 from utils.payments import calculate_payment_breakdown
 from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
@@ -138,6 +139,7 @@ DATE_PARSE_FORMATS = (
     "%B %d %Y",
     "%b %d %Y",
 )
+EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 def normalize_address(value):
@@ -444,6 +446,75 @@ def normalize_phone(phone_number):
     if phone_number and phone_number.startswith("+"):
         return phone_number
     return f"+{digits}" if digits else ""
+
+
+def normalize_email(raw_value):
+    """Normalize email value for storage and delivery."""
+    return (raw_value or "").strip().lower()
+
+
+def is_email_valid(raw_value):
+    """Basic email format validation for notification recipients."""
+    email_value = normalize_email(raw_value)
+    if not email_value:
+        return False
+    return bool(EMAIL_PATTERN.match(email_value))
+
+
+def format_timestamp_label(value):
+    """Return timestamp labels for status cards."""
+    if not value:
+        return ""
+    return value.strftime("%b %d, %Y %I:%M %p")
+
+
+def get_email_notification_status(transaction_id, lender_email, title_email):
+    """Build lender/title email status indicators from communications log."""
+    rows = execute_query(
+        """
+        SELECT
+            MAX(CASE WHEN summary = 'Lender notification email sent' THEN created_at END) AS lender_sent_at,
+            MAX(CASE WHEN summary = 'Title notification email sent' THEN created_at END) AS title_sent_at,
+            MAX(CASE WHEN summary = 'Lender notification email failed' THEN created_at END) AS lender_failed_at,
+            MAX(CASE WHEN summary = 'Title notification email failed' THEN created_at END) AS title_failed_at
+        FROM communications
+        WHERE transaction_id = %s
+          AND communication_type = 'email'
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    row = rows[0] if rows else {}
+
+    def status_for(recipient_email, sent_at, failed_at):
+        if not recipient_email:
+            return {
+                "state": "missing",
+                "label": "No email on file",
+                "sent_at_label": "",
+            }
+        if sent_at:
+            return {
+                "state": "sent",
+                "label": f"Sent {format_timestamp_label(sent_at)}",
+                "sent_at_label": format_timestamp_label(sent_at),
+            }
+        if failed_at:
+            return {
+                "state": "failed",
+                "label": "Failed to send (see communications log)",
+                "sent_at_label": "",
+            }
+        return {
+            "state": "pending",
+            "label": "Pending send",
+            "sent_at_label": "",
+        }
+
+    return {
+        "lender": status_for(lender_email, row.get("lender_sent_at"), row.get("lender_failed_at")),
+        "title": status_for(title_email, row.get("title_sent_at"), row.get("title_failed_at")),
+    }
 
 
 def send_sms_async(to_number, message):
@@ -790,7 +861,8 @@ def get_transaction_or_none(transaction_id):
                survey_due_date, option_period_end_date, hoa_docs_due_date, buyer_hoa_review_end_date,
                title_commitment_due_date, financing_approval_date, buyer_title_objection_end_date,
                closing_date, buyer_name, buyer_phone, seller_name, seller_phone,
-               lender_name, title_company, payment_upfront_paid, payment_upfront_date,
+               lender_name, lender_email, title_company, title_officer_email,
+               payment_upfront_paid, payment_upfront_date,
                payment_closing_paid, payment_closing_date, created_at, updated_at
         FROM transactions
         WHERE id = %s
@@ -1445,6 +1517,11 @@ def tc_transaction(transaction_id):
             transaction.get("property_address") or "",
         ),
     }
+    email_status = get_email_notification_status(
+        transaction_id=transaction_id,
+        lender_email=normalize_email(transaction.get("lender_email")),
+        title_email=normalize_email(transaction.get("title_officer_email")),
+    )
 
     documents = execute_query(
         """
@@ -1550,6 +1627,7 @@ def tc_transaction(transaction_id):
         communications=communications,
         payment_context=payment_context,
         extracted_data=extracted_context,
+        email_status=email_status,
     )
 
 
@@ -1759,10 +1837,16 @@ def approve_transaction(transaction_id):
     buyer_phone = normalize_phone(request.form.get("buyer_phone", "").strip())
     seller_phone = normalize_phone(request.form.get("seller_phone", "").strip())
     lender_name = request.form.get("lender_name", "").strip()
+    lender_email = normalize_email(request.form.get("lender_email"))
     title_company = request.form.get("title_company", "").strip()
+    title_company_email = normalize_email(request.form.get("title_company_email"))
 
     if not title_company:
         return "Title company is required.", 400
+    if lender_email and not is_email_valid(lender_email):
+        return "Lender email must be a valid address.", 400
+    if title_company_email and not is_email_valid(title_company_email):
+        return "Title company email must be a valid address.", 400
     if closing_date_value < effective_date_value:
         return "Closing date cannot be before effective date.", 400
 
@@ -1794,7 +1878,9 @@ def approve_transaction(transaction_id):
             seller_name = %s,
             seller_phone = %s,
             lender_name = %s,
+            lender_email = %s,
             title_company = %s,
+            title_officer_email = %s,
             status = 'ACTIVE',
             updated_at = CURRENT_TIMESTAMP
         WHERE id = %s
@@ -1817,7 +1903,9 @@ def approve_transaction(transaction_id):
             seller_name,
             seller_phone,
             lender_name,
+            lender_email or None,
             title_company,
+            title_company_email or None,
             transaction_id,
         ),
     )
@@ -1854,6 +1942,60 @@ def approve_transaction(transaction_id):
             f"message_sid={timeline_sid or 'failed'}",
         ),
     )
+
+    email_context = {
+        "transaction_id": transaction_id,
+        "property_address": transaction.get("property_address"),
+        "agent_name": transaction.get("agent_name"),
+        "buyer_name": buyer_name,
+        "seller_name": seller_name,
+        "lender_name": lender_name or "Lender",
+        "title_company": title_company,
+        "effective_date": effective_date_value.strftime("%b %d, %Y"),
+        "earnest_due_date": earnest_due_date_value.strftime("%b %d, %Y"),
+        "option_period_end_date": option_period_end_value.strftime("%b %d, %Y"),
+        "financing_approval_date": financing_approval_value.strftime("%b %d, %Y"),
+        "closing_date": closing_date_value.strftime("%b %d, %Y"),
+    }
+    if lender_email:
+        lender_html = render_template("emails/lender_notification.html", data=email_context)
+        lender_message_id = send_html_email(
+            to_email=lender_email,
+            subject=f"Maverick TC - Lender Coordination - {transaction.get('property_address')}",
+            html_body=lender_html,
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'email', 'lender', %s, %s, %s)
+            """,
+            (
+                transaction_id,
+                lender_name or "Lender",
+                "Lender notification email sent" if lender_message_id else "Lender notification email failed",
+                f"to={lender_email} message_id={lender_message_id or 'failed'}",
+            ),
+        )
+
+    if title_company_email:
+        title_html = render_template("emails/title_notification.html", data=email_context)
+        title_message_id = send_html_email(
+            to_email=title_company_email,
+            subject=f"Maverick TC - Title Coordination - {transaction.get('property_address')}",
+            html_body=title_html,
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'email', 'title_company', %s, %s, %s)
+            """,
+            (
+                transaction_id,
+                title_company,
+                "Title notification email sent" if title_message_id else "Title notification email failed",
+                f"to={title_company_email} message_id={title_message_id or 'failed'}",
+            ),
+        )
 
     if not transaction.get("payment_upfront_paid"):
         upfront_breakdown = calculate_payment_breakdown(transaction, "upfront")

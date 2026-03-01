@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lender Coordination Notification</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 22px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Maverick TC - Lender Coordination</h2>
+                <p style="margin:8px 0 0; color:#334155;">
+                    Transaction #{{ data.transaction_id }} for {{ data.property_address }}
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 22px;">
+                <p style="margin:0 0 14px;">
+                    Hello {{ data.lender_name }},
+                </p>
+                <p style="margin:0 0 14px;">
+                    Margaret with Maverick TC is coordinating this transaction and sharing key contract milestones for your file.
+                </p>
+
+                <h3 style="margin:18px 0 8px; font-size:16px; color:#0f172a;">Loan & Timeline Details</h3>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+                    <tr><td style="padding:6px 0; color:#475569;">Property</td><td style="padding:6px 0; font-weight:600;">{{ data.property_address }}</td></tr>
+                    <tr><td style="padding:6px 0; color:#475569;">Buyer(s)</td><td style="padding:6px 0; font-weight:600;">{{ data.buyer_name }}</td></tr>
+                    <tr><td style="padding:6px 0; color:#475569;">Seller(s)</td><td style="padding:6px 0; font-weight:600;">{{ data.seller_name }}</td></tr>
+                    <tr><td style="padding:6px 0; color:#475569;">Effective Date</td><td style="padding:6px 0; font-weight:600;">{{ data.effective_date }}</td></tr>
+                    <tr><td style="padding:6px 0; color:#475569;">Financing Approval</td><td style="padding:6px 0; font-weight:600;">{{ data.financing_approval_date }}</td></tr>
+                    <tr><td style="padding:6px 0; color:#475569;">Closing Date</td><td style="padding:6px 0; font-weight:600;">{{ data.closing_date }}</td></tr>
+                </table>
+
+                <p style="margin:16px 0 0;">
+                    If your underwriting timeline changes, please reply to this email so we can keep all parties aligned.
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:14px 22px; border-top:1px solid #e2e8f0; color:#64748b; font-size:13px;">
+                Maverick TC - Transaction Coordination
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
