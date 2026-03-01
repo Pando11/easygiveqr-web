@@ -2,6 +2,7 @@ import os
 import re
 from datetime import date, datetime, timedelta
 from functools import wraps
+from threading import Thread
 from typing import Any
 
 import stripe
@@ -113,6 +114,18 @@ def normalize_phone(phone_number):
     if phone_number and phone_number.startswith("+"):
         return phone_number
     return f"+{digits}" if digits else ""
+
+
+def send_sms_async(to_number, message):
+    """Dispatch SMS in a background thread so request responses stay fast."""
+
+    def _send():
+        try:
+            send_sms(to_number, message)
+        except Exception as exc:
+            print(f"Async SMS send error: {exc}")
+
+    Thread(target=_send, daemon=True).start()
 
 
 def allowed_file(filename):
@@ -1659,7 +1672,7 @@ def upload_contract_route():
 Margaret will review within 2 hours. You'll receive your timeline shortly.
 
 - Maverick TC"""
-        send_sms(agent_phone, confirmation_message)
+        send_sms_async(agent_phone, confirmation_message)
 
         print(f"Contract uploaded: Transaction #{transaction_id} - {property_address}")
         return jsonify(
