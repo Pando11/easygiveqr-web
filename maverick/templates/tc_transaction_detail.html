@@ -581,9 +581,37 @@
                 {% for entry in communications %}
                 <li class="list-row">
                     <div>
+                        {% if entry.is_voice_note %}
+                        <strong>🎤 Voice Note</strong> · {{ entry.voice_note_type_label }}
+                        {% if entry.voice_review_required %}
+                        <small class="pill-risk">Needs Margaret review</small>
+                        {% endif %}
+                        {% if entry.voice_note_id %}
+                        <a class="btn btn-small btn-secondary voice-audio-btn"
+                           href="{{ url_for('tc_voice_note_audio', voice_note_id=entry.voice_note_id) }}"
+                           target="_blank"
+                           rel="noopener">Play original audio</a>
+                        {% endif %}
+                        <p>{{ entry.summary }}</p>
+                        {% if entry.voice_note_transcription %}
+                        <small class="voice-note-line"><strong>Transcription:</strong> {{ entry.voice_note_transcription }}</small>
+                        {% endif %}
+                        {% set actions = entry.voice_actions_taken or {} %}
+                        {% if actions %}
+                        <small class="voice-note-line">
+                            <strong>Actions:</strong>
+                            {% if actions.auto_executed %}Auto-executed.{% else %}No auto-execution.{% endif %}
+                            {% if actions.completed_task_ids %} Completed tasks: {{ actions.completed_task_ids|length }}.{% endif %}
+                            {% if actions.created_task_ids %} Created tasks: {{ actions.created_task_ids|length }}.{% endif %}
+                            {% if actions.review_task_id %} Review task #{{ actions.review_task_id }} created.{% endif %}
+                        </small>
+                        {% endif %}
+                        <small class="voice-note-line">Status: {{ entry.voice_note_status_label }} · Confidence: {{ entry.voice_confidence_score }}%</small>
+                        {% else %}
                         <strong>{{ entry.type_label }}</strong> with {{ entry.party_label }}
                         <p>{{ entry.summary }}</p>
                         {% if entry.outcome %}<small>Outcome: {{ entry.outcome }}</small>{% endif %}
+                        {% endif %}
                     </div>
                     <small>{{ entry.created_at_label }}</small>
                 </li>
@@ -774,9 +802,37 @@
         {% for entry in communications %}
         <li class="list-row">
             <div>
+                {% if entry.is_voice_note %}
+                <strong>🎤 Voice Note</strong> · {{ entry.voice_note_type_label }}
+                {% if entry.voice_review_required %}
+                <small class="pill-risk">Needs Margaret review</small>
+                {% endif %}
+                {% if entry.voice_note_id %}
+                <a class="btn btn-small btn-secondary voice-audio-btn"
+                   href="{{ url_for('tc_voice_note_audio', voice_note_id=entry.voice_note_id) }}"
+                   target="_blank"
+                   rel="noopener">Play original audio</a>
+                {% endif %}
+                <p>{{ entry.summary }}</p>
+                {% if entry.voice_note_transcription %}
+                <small class="voice-note-line"><strong>Transcription:</strong> {{ entry.voice_note_transcription }}</small>
+                {% endif %}
+                {% set actions = entry.voice_actions_taken or {} %}
+                {% if actions %}
+                <small class="voice-note-line">
+                    <strong>Actions:</strong>
+                    {% if actions.auto_executed %}Auto-executed.{% else %}No auto-execution.{% endif %}
+                    {% if actions.completed_task_ids %} Completed tasks: {{ actions.completed_task_ids|length }}.{% endif %}
+                    {% if actions.created_task_ids %} Created tasks: {{ actions.created_task_ids|length }}.{% endif %}
+                    {% if actions.review_task_id %} Review task #{{ actions.review_task_id }} created.{% endif %}
+                </small>
+                {% endif %}
+                <small class="voice-note-line">Status: {{ entry.voice_note_status_label }} · Confidence: {{ entry.voice_confidence_score }}%</small>
+                {% else %}
                 <strong>{{ entry.type_label }}</strong> ({{ entry.party_label }})
                 <p>{{ entry.summary }}</p>
                 {% if entry.outcome %}<small>Outcome: {{ entry.outcome }}</small>{% endif %}
+                {% endif %}
             </div>
             <small>{{ entry.created_at_label }}</small>
         </li>
@@ -1349,6 +1405,18 @@
 .pill-risk {
     background: #fee2e2;
     color: #991b1b;
+}
+
+.voice-audio-btn {
+    margin-left: 8px;
+}
+
+.voice-note-line {
+    display: block;
+    margin-top: 6px;
+    color: #334155;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .inline-override-form {

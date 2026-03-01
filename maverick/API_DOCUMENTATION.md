@@ -119,6 +119,42 @@ Form `action` options:
   - `queued` / `sending` / `completed` / `failed`
   - `total_recipients`, `sent_count`, `failed_count`, `progress_pct`
 
+## Voice Notes (Twilio Voice)
+
+### Voice note webhook
+- `POST /voice-note-webhook`
+- Twilio voice-number webhook target.
+- Behavior:
+  - initial call returns TwiML greeting + record prompt
+  - records up to 120 seconds
+  - stores recording metadata in `voice_notes`
+  - queues transcription + action parsing
+
+### Transcription callbacks (same route)
+- `POST /voice-note-webhook?stage=transcription`
+- Used by Twilio `transcribeCallback` when `VOICE_NOTE_TRANSCRIPTION_MODE=twilio`.
+
+### Audio playback for TC communication log
+- `GET /tc/voice-note/<voice_note_id>/audio`
+- Login required; streams original recording audio from Twilio for in-app playback.
+
+### Voice note execution behavior
+- Parse JSON payload fields:
+  - `transaction_id`
+  - `note_type`
+  - `content`
+  - `complete_tasks[]`
+  - `create_tasks[]`
+  - `confidence`
+- Actions:
+  - logs communication (`communication_type=voice_note`)
+  - completes matching open tasks
+  - creates new follow-up tasks
+  - sends SMS confirmation to Margaret
+- Fallback/safety:
+  - unresolved transaction id -> SMS transcript to Margaret
+  - confidence `< 80` -> review task created, no auto task execution
+
 ## Task Auto-Completion
 
 ### Scheduled auto-completion script

@@ -17,6 +17,7 @@ import stripe
 from dotenv import load_dotenv
 from flask import Flask, Response, g, has_request_context, jsonify, redirect, render_template, request, session, url_for
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.twiml.voice_response import VoiceResponse
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
 
@@ -86,6 +87,13 @@ from utils.timeline_generator import (
     upload_transaction_timeline_pdf,
 )
 from utils.timeline_pdf import build_timeline_pdf
+from utils.voice_notes import (
+    ensure_voice_note_tables,
+    fetch_voice_note_audio_payload,
+    handle_twilio_transcription_callback,
+    queue_voice_note_processing,
+    register_voice_note_capture,
+)
 from utils.vendor_automation import (
     VENDOR_TYPES,
     complete_vendor_followup_tasks,
@@ -2160,6 +2168,35 @@ def log_system_error(component, error_text, transaction_id=None):
             """,
             (transaction_id, safe_component, safe_error),
         )
+
+
+def voice_note_webhook_secret_valid():
+    """Validate optional shared secret for Twilio voice webhook requests."""
+    configured_secret = (os.getenv("VOICE_NOTE_WEBHOOK_SECRET") or "").strip()
+    if not configured_secret:
+        return True
+    provided = (
+        request.headers.get("X-Voice-Secret")
+        or request.headers.get("X-Webhook-Secret")
+        or request.args.get("secret")
+        or request.form.get("secret")
+        or ""
+    ).strip()
+    return provided == configured_secret
+
+
+def build_voice_note_webhook_url(stage=None):
+    """Build absolute callback URLs for Twilio voice note actions."""
+    params = {}
+    if stage:
+        params["stage"] = stage
+    configured_secret = (os.getenv("VOICE_NOTE_WEBHOOK_SECRET") or "").strip()
+    if configured_secret:
+        params["secret"] = configured_secret
+    base_url = url_for("voice_note_webhook", _external=True)
+    if not params:
+        return base_url
+    return f"{base_url}?{urlencode(params)}"
 
 
 def inbound_email_domain():
@@ -8126,12 +8163,22 @@ def tc_transaction(transaction_id):
     inbound_messages = fetch_inbound_email_messages(transaction_id, limit=20)
     risk_state = fetch_transaction_risk_state(transaction_id)
 
+    ensure_voice_note_tables()
     communications = execute_query(
         """
-        SELECT id, communication_type, contact_party, contact_name, summary, outcome, created_at
-        FROM communications
-        WHERE transaction_id = %s
-        ORDER BY created_at DESC
+        SELECT c.id, c.communication_type, c.contact_party, c.contact_name, c.summary, c.outcome, c.created_at,
+               vn.id AS voice_note_id,
+               vn.recording_sid AS voice_recording_sid,
+               vn.note_type AS voice_note_type,
+               vn.transcription_text AS voice_note_transcription,
+               vn.confidence_score AS voice_confidence_score,
+               vn.status AS voice_note_status,
+               vn.review_required AS voice_review_required,
+               vn.actions_taken AS voice_actions_taken
+        FROM communications c
+        LEFT JOIN voice_notes vn ON vn.communication_id = c.id
+        WHERE c.transaction_id = %s
+        ORDER BY c.created_at DESC
         """,
         (transaction_id,),
         fetch=True,
@@ -8140,6 +8187,12 @@ def tc_transaction(transaction_id):
         entry["created_at_label"] = entry["created_at"].strftime("%b %d, %Y %I:%M %p") if entry.get("created_at") else ""
         entry["type_label"] = (entry.get("communication_type") or "").replace("_", " ").title()
         entry["party_label"] = (entry.get("contact_party") or "").replace("_", " ").title()
+        entry["is_voice_note"] = bool(entry.get("voice_note_id"))
+        entry["voice_note_type_label"] = (entry.get("voice_note_type") or "general_update").replace("_", " ").title()
+        entry["voice_note_transcription"] = (entry.get("voice_note_transcription") or "").strip()
+        entry["voice_note_status_label"] = (entry.get("voice_note_status") or "").replace("_", " ").title()
+        entry["voice_confidence_score"] = int(entry.get("voice_confidence_score") or 0)
+        entry["voice_actions_taken"] = parse_json_field(entry.get("voice_actions_taken"), {})
 
     upfront_breakdown = calculate_payment_breakdown(transaction, "upfront")
     closing_breakdown = calculate_payment_breakdown(transaction, "closing")
@@ -9476,6 +9529,24 @@ def download_document(document_id):
     return redirect(url)
 
 
+@app.route("/tc/voice-note/<int:voice_note_id>/audio")
+@login_required
+def tc_voice_note_audio(voice_note_id):
+    """Stream original Twilio voice-note audio for playback in communication log."""
+    ensure_voice_note_tables()
+    payload = fetch_voice_note_audio_payload(voice_note_id)
+    if not payload.get("success"):
+        return payload.get("error") or "Voice note audio unavailable.", 404
+    return Response(
+        payload["data"],
+        mimetype=payload.get("content_type") or "audio/mpeg",
+        headers={
+            "Content-Disposition": f'inline; filename="{payload.get("filename") or f"voice-note-{voice_note_id}.mp3"}"',
+            "Cache-Control": "private, max-age=600",
+        },
+    )
+
+
 @app.route("/tc/transaction/<int:transaction_id>/inbound-email-rule", methods=["POST"])
 @login_required
 def save_inbound_email_rule(transaction_id):
@@ -10495,6 +10566,77 @@ def handle_nudge_response():
             ),
         )
     return "", 200
+
+
+@app.route("/voice-note-webhook", methods=["POST"])
+def voice_note_webhook():
+    """
+    Twilio voice-note intake endpoint.
+    - Initial call: returns greeting + recording instructions.
+    - Recording action callback: stores capture and queues transcription parse.
+    - Transcription callback (?stage=transcription): stores transcript and processes actions.
+    """
+    if not voice_note_webhook_secret_valid():
+        return "Unauthorized", 403
+
+    ensure_voice_note_tables()
+    callback_stage = (request.args.get("stage") or "").strip().lower()
+    if callback_stage == "transcription":
+        recording_sid = (request.form.get("RecordingSid") or "").strip()
+        transcription_text = (request.form.get("TranscriptionText") or "").strip()
+        transcription_status = (request.form.get("TranscriptionStatus") or "completed").strip()
+        handle_twilio_transcription_callback(
+            recording_sid=recording_sid,
+            transcription_text=transcription_text,
+            transcription_status=transcription_status,
+        )
+        return "", 204
+
+    recording_url = (request.form.get("RecordingUrl") or "").strip()
+    if recording_url:
+        transcription_text = (request.form.get("TranscriptionText") or "").strip()
+        transcription_source = "twilio" if transcription_text else None
+        voice_row = register_voice_note_capture(
+            call_sid=request.form.get("CallSid"),
+            recording_sid=request.form.get("RecordingSid"),
+            recording_url=recording_url,
+            from_phone=request.form.get("From"),
+            recording_duration_seconds=request.form.get("RecordingDuration"),
+            transcription_text=transcription_text,
+            transcription_source=transcription_source or "",
+        )
+        voice_note_id = voice_row["id"] if voice_row else None
+        mode = (os.getenv("VOICE_NOTE_TRANSCRIPTION_MODE") or "twilio").strip().lower()
+        if voice_note_id and (transcription_text or mode == "claude"):
+            queue_voice_note_processing(
+                voice_note_id=voice_note_id,
+                transcription_text=transcription_text or None,
+                transcription_source=transcription_source or ("claude" if mode == "claude" else None),
+            )
+
+        response = VoiceResponse()
+        response.say("Thanks. Your voice note is saved. Maverick will text confirmation shortly.")
+        response.hangup()
+        return Response(str(response), mimetype="text/xml")
+
+    mode = (os.getenv("VOICE_NOTE_TRANSCRIPTION_MODE") or "twilio").strip().lower()
+    response = VoiceResponse()
+    response.say("Maverick voice notes. Say transaction number, then your note. Beep.")
+    record_kwargs = {
+        "action": build_voice_note_webhook_url(),
+        "method": "POST",
+        "play_beep": True,
+        "max_length": 120,
+        "timeout": 4,
+        "trim": "trim-silence",
+    }
+    if mode == "twilio":
+        record_kwargs["transcribe"] = True
+        record_kwargs["transcribe_callback"] = build_voice_note_webhook_url(stage="transcription")
+    response.record(**record_kwargs)
+    response.say("No recording was received. Goodbye.")
+    response.hangup()
+    return Response(str(response), mimetype="text/xml")
 
 
 @app.route("/sms-webhook", methods=["POST"])

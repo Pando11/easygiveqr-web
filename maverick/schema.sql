@@ -186,6 +186,29 @@ CREATE TABLE communications (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE voice_notes (
+    id SERIAL PRIMARY KEY,
+    call_sid VARCHAR(80),
+    recording_sid VARCHAR(80) UNIQUE,
+    from_phone VARCHAR(25),
+    recording_url TEXT,
+    recording_duration_seconds INT DEFAULT 0,
+    transcription_text TEXT,
+    transcription_source VARCHAR(20),
+    parse_payload JSONB DEFAULT '{}'::jsonb,
+    confidence_score INT,
+    note_type VARCHAR(80),
+    transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+    communication_id INT REFERENCES communications(id) ON DELETE SET NULL,
+    actions_taken JSONB DEFAULT '{}'::jsonb,
+    status VARCHAR(30) DEFAULT 'received',
+    review_required BOOLEAN DEFAULT FALSE,
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMP
+);
+
 CREATE TABLE referrals (
     id SERIAL PRIMARY KEY,
 
@@ -691,6 +714,10 @@ CREATE INDEX idx_tasks_due_date ON tasks(due_date);
 CREATE INDEX idx_documents_transaction ON documents(transaction_id);
 CREATE INDEX idx_documents_type ON documents(document_type);
 CREATE INDEX idx_communications_transaction ON communications(transaction_id);
+CREATE INDEX idx_voice_notes_recording_sid ON voice_notes(recording_sid);
+CREATE INDEX idx_voice_notes_transaction ON voice_notes(transaction_id, created_at DESC);
+CREATE INDEX idx_voice_notes_status ON voice_notes(status, created_at DESC);
+CREATE INDEX idx_voice_notes_comm ON voice_notes(communication_id);
 CREATE INDEX idx_access_logs_document ON document_access_logs(document_id);
 CREATE INDEX idx_access_logs_timestamp ON document_access_logs(timestamp);
 CREATE UNIQUE INDEX idx_predictive_alerts_txn_alert_date ON predictive_alerts(transaction_id, alert_date);

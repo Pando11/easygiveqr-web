@@ -22,6 +22,7 @@ Core capabilities:
 - AI-powered problem detection with health scoring, recommendations, and one-click action execution
 - Bulk SMS broadcasting with smart variables, preview, filtering, and paced queue sends
 - Rule-based auto-task completion with confidence safeguards, undo tracking, and weekly time-saved metrics
+- Twilio voice-note capture with transcription, auto task actions, and communication-log playback
 - Automation scripts for reminders, closing protocol, problem detection, task auto-completion, and nightly backups
 
 ## Local setup instructions
@@ -61,6 +62,10 @@ TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
 TWILIO_PHONE_NUMBER=
 TWILIO_VOICE_URL=http://demo.twilio.com/docs/voice.xml
+TWILIO_VOICE_NOTE_NUMBER=
+VOICE_NOTE_TRANSCRIPTION_MODE=twilio
+VOICE_NOTE_CLAUDE_MODEL=claude-sonnet-4-20250514
+VOICE_NOTE_WEBHOOK_SECRET=
 HEIDI_PHONE=
 MARGARET_PHONE=
 MARGARET_EMAIL=margaret@getmaverick.com
@@ -237,6 +242,22 @@ Maverick can auto-complete low-risk checklist items based on evidence rules:
 Manual + scheduled runs:
 - Manual route: `POST /tc/task-completion/run`
 - Cron script: `python3 automation/task_auto_completion.py` (every 15 minutes recommended)
+
+## Twilio Voice Notes
+
+Margaret can call a dedicated voice-note number and dictate updates:
+
+- Twilio webhook route: `POST /voice-note-webhook`
+- Flow:
+  1. greeting + beep prompt
+  2. record up to 2 minutes
+  3. transcription (`VOICE_NOTE_TRANSCRIPTION_MODE=twilio|claude`)
+  4. parse transaction + actions
+  5. auto log communication + optional task create/complete
+  6. SMS confirmation to Margaret
+- Safety:
+  - if transaction ID cannot be parsed, transcript is texted to Margaret
+  - if confidence `< 80%`, note is flagged for Margaret review before task automation
 
 ## Inbound Email AI Routing
 
