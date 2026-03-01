@@ -144,6 +144,16 @@ def send_email(to, template, data, reply_to=None):
         loader=FileSystemLoader(str(templates_root)),
         autoescape=select_autoescape(["html", "xml"]),
     )
+    jinja_env.filters["format_date"] = lambda value: (
+        value.strftime("%b %d, %Y")
+        if hasattr(value, "strftime")
+        else str(value or "")
+    )
+    jinja_env.filters["currency"] = lambda value: (
+        f"${float(value):,.2f}"
+        if value not in (None, "")
+        else "$0.00"
+    )
 
     try:
         html_template = jinja_env.get_template(template_path)

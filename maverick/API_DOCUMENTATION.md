@@ -181,6 +181,45 @@ When submitted, Maverick:
   - `update` (edit existing contact)
   - `toggle_active` (activate/deactivate vendor)
 
+## Intelligent Deadline Nudges
+
+### Daily nudge automation script
+- `python3 automation/intelligent_nudges.py`
+- Typical cron schedule: `0 7 * * *`
+- Behavior:
+  - scans active transactions + open deadlines
+  - applies per-type timing/config from `nudge_settings`
+  - sends SMS + email nudges from `templates/nudges/`
+  - logs sends to `nudge_log`
+  - avoids duplicate sends per `(transaction_id, deadline_id, nudge_type)`
+
+### SMS nudge response webhook
+- `POST /nudge-response`
+- Twilio form fields:
+  - `From`
+  - `Body`
+- Behavior:
+  - resolves most recent unresolved `nudge_log` row for sender phone
+  - positive response (`yes`, `scheduled`, `done`) -> marks responded + completes related tasks
+  - help response (`help`, `call`) -> marks escalated + alerts Margaret
+  - unclear response -> forwards summary to Margaret
+
+### Nudge analytics dashboard (TC)
+- `GET /tc/nudge-analytics`
+- Shows:
+  - nudges sent per week
+  - response rate by nudge type
+  - estimated time saved (resolved without escalation)
+  - most effective nudge types/messages
+  - agent response behavior
+
+### Nudge settings dashboard (TC)
+- `GET|POST /tc/nudge-settings`
+- Actions via form `action`:
+  - `update_setting` (enable toggle, lead days, template names, custom message overrides)
+  - `add_whitelist` (skip nudges for specific agents)
+  - `remove_whitelist` (disable whitelist entry)
+
 ## Timeline Packet Automation Notes
 
 Timeline packet dispatch is signature-driven:

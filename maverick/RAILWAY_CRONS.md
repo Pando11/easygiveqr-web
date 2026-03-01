@@ -7,7 +7,16 @@ Use these schedules and commands in Railway Cron.
 - Command: `python send_reminders.py`
 - Includes:
   - 10/7/3/1 day deadline reminder SMS
-  - proactive deadline nudge engine + escalation checks
+  - critical/overdue summary alerts
+  - legacy proactive nudge engine only when `ENABLE_LEGACY_DEADLINE_NUDGES=true`
+
+## Intelligent Deadline Nudges
+- Schedule: `0 7 * * *`
+- Command: `cd maverick && python3 automation/intelligent_nudges.py`
+- Includes:
+  - proactive deadline checks by nudge type + configurable timing
+  - duplicate prevention using `nudge_log`
+  - auto follow-up task creation for unresolved responses
 
 ## Predictive Alerts
 - Schedule: `0 6 * * *`

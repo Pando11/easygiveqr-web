@@ -487,6 +487,44 @@ CREATE TABLE deadline_nudges (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE nudge_log (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    deadline_id INT REFERENCES deadlines(id) ON DELETE CASCADE,
+    nudge_type VARCHAR(100) NOT NULL,
+    sent_to VARCHAR(200),
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    response_received BOOLEAN DEFAULT FALSE,
+    response_date TIMESTAMP,
+    escalated_to_margaret BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE nudge_settings (
+    id SERIAL PRIMARY KEY,
+    nudge_type VARCHAR(100) UNIQUE NOT NULL,
+    enabled BOOLEAN DEFAULT TRUE,
+    lead_days INT NOT NULL DEFAULT 5,
+    sms_template VARCHAR(200),
+    email_template VARCHAR(200),
+    custom_sms_message TEXT,
+    custom_email_message TEXT,
+    include_preferred_vendors BOOLEAN DEFAULT TRUE,
+    preferred_vendor_ids JSONB DEFAULT '[]'::jsonb,
+    updated_by VARCHAR(100),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE nudge_agent_whitelist (
+    id SERIAL PRIMARY KEY,
+    agent_name VARCHAR(200),
+    agent_phone VARCHAR(25),
+    agent_email VARCHAR(200),
+    notes TEXT,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE heads_up_signals (
     id SERIAL PRIMARY KEY,
     transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
@@ -558,6 +596,12 @@ CREATE UNIQUE INDEX idx_transaction_risk_flags_txn ON transaction_risk_flags(tra
 CREATE INDEX idx_deadline_nudges_transaction ON deadline_nudges(transaction_id, due_date DESC);
 CREATE INDEX idx_deadline_nudges_phone ON deadline_nudges(target_phone, status, response_received_at);
 CREATE UNIQUE INDEX idx_deadline_nudges_unique_cycle ON deadline_nudges(transaction_id, nudge_key, due_date, target_party);
+CREATE UNIQUE INDEX idx_nudge_log_unique_deadline_type ON nudge_log(transaction_id, deadline_id, nudge_type);
+CREATE INDEX idx_nudge_log_sent_to ON nudge_log(sent_to, sent_at DESC);
+CREATE INDEX idx_nudge_log_response ON nudge_log(nudge_type, response_received, sent_at DESC);
+CREATE UNIQUE INDEX idx_nudge_settings_type ON nudge_settings(nudge_type);
+CREATE UNIQUE INDEX idx_nudge_agent_whitelist_phone ON nudge_agent_whitelist(agent_phone);
+CREATE UNIQUE INDEX idx_nudge_agent_whitelist_email ON nudge_agent_whitelist(agent_email);
 CREATE UNIQUE INDEX idx_heads_up_signals_unique_daily ON heads_up_signals(transaction_id, pattern_key, signal_date);
 CREATE INDEX idx_heads_up_signals_date_status ON heads_up_signals(signal_date, status, severity);
 CREATE UNIQUE INDEX idx_heads_up_preferences_key ON heads_up_preferences(pattern_key);

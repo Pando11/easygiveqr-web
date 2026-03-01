@@ -1,0 +1,13 @@
+Hi {{ agent_name }},
+
+Friendly reminder: earnest money for {{ property_address }} is due by
+{{ due_date|format_date }} ({{ days_remaining }} days).
+
+Amount due: {{ earnest_amount|currency }}
+Buyer: {{ buyer_name }}
+
+Please remind your buyer to deliver or wire funds to the title company.
+
+Questions? Call Margaret at {{ margaret_phone }}.
+
+- Maverick TC

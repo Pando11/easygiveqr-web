@@ -133,6 +133,60 @@ INBOUND_SENDER_ROLES = (
     "external",
 )
 
+INTELLIGENT_NUDGE_DEFAULTS = {
+    "inspection_not_scheduled": {
+        "label": "Inspection not scheduled",
+        "lead_days": 5,
+        "sms_template": "inspection_reminder.txt",
+        "email_template": "inspection_reminder.html",
+        "include_preferred_vendors": True,
+    },
+    "earnest_not_received": {
+        "label": "Earnest not received",
+        "lead_days": 2,
+        "sms_template": "earnest_reminder.txt",
+        "email_template": "earnest_reminder.html",
+        "include_preferred_vendors": False,
+    },
+    "appraisal_not_ordered": {
+        "label": "Appraisal not ordered",
+        "lead_days": 7,
+        "sms_template": "appraisal_reminder.txt",
+        "email_template": "appraisal_reminder.html",
+        "include_preferred_vendors": False,
+    },
+    "hoa_docs_not_received": {
+        "label": "HOA docs not received",
+        "lead_days": 5,
+        "sms_template": "hoa_reminder.txt",
+        "email_template": "hoa_reminder.html",
+        "include_preferred_vendors": False,
+    },
+    "survey_not_ordered": {
+        "label": "Survey not ordered",
+        "lead_days": 5,
+        "sms_template": "survey_reminder.txt",
+        "email_template": "survey_reminder.html",
+        "include_preferred_vendors": False,
+    },
+    "title_not_received": {
+        "label": "Title commitment not received",
+        "lead_days": 7,
+        "sms_template": "title_reminder.txt",
+        "email_template": "title_reminder.html",
+        "include_preferred_vendors": False,
+    },
+}
+
+INTELLIGENT_NUDGE_TASK_HINTS = {
+    "inspection_not_scheduled": ("schedule home inspection", "follow up on inspection not scheduled"),
+    "earnest_not_received": ("verify earnest money receipt", "follow up on earnest not received"),
+    "appraisal_not_ordered": ("verify appraisal completed", "follow up on appraisal not ordered"),
+    "hoa_docs_not_received": ("get hoa documents", "follow up on hoa docs not received"),
+    "survey_not_ordered": ("get survey", "follow up on survey not ordered"),
+    "title_not_received": ("get title commitment", "follow up on title not received"),
+}
+
 DOCUMENT_REQUEST_TARGET = {
     "contract": "seller",
     "earnest_receipt": "buyer",
@@ -2228,6 +2282,429 @@ def ensure_deadline_nudges_table():
         ON deadline_nudges(transaction_id, nudge_key, due_date, target_party)
         """
     )
+
+
+def ensure_nudge_log_table():
+    """Store intelligent nudge sends and response/escalation status."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS nudge_log (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            deadline_id INT REFERENCES deadlines(id) ON DELETE CASCADE,
+            nudge_type VARCHAR(100) NOT NULL,
+            sent_to VARCHAR(200),
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            response_received BOOLEAN DEFAULT FALSE,
+            response_date TIMESTAMP,
+            escalated_to_margaret BOOLEAN DEFAULT FALSE
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_nudge_log_unique_deadline_type
+        ON nudge_log(transaction_id, deadline_id, nudge_type)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_nudge_log_sent_to
+        ON nudge_log(sent_to, sent_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_nudge_log_response
+        ON nudge_log(nudge_type, response_received, sent_at DESC)
+        """
+    )
+
+
+def ensure_nudge_settings_table():
+    """Persist Margaret's configurable nudge settings."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS nudge_settings (
+            id SERIAL PRIMARY KEY,
+            nudge_type VARCHAR(100) UNIQUE NOT NULL,
+            enabled BOOLEAN DEFAULT TRUE,
+            lead_days INT NOT NULL DEFAULT 5,
+            sms_template VARCHAR(200),
+            email_template VARCHAR(200),
+            custom_sms_message TEXT,
+            custom_email_message TEXT,
+            include_preferred_vendors BOOLEAN DEFAULT TRUE,
+            preferred_vendor_ids JSONB DEFAULT '[]'::jsonb,
+            updated_by VARCHAR(100),
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_nudge_settings_type
+        ON nudge_settings(nudge_type)
+        """
+    )
+    for nudge_type, defaults in INTELLIGENT_NUDGE_DEFAULTS.items():
+        execute_query(
+            """
+            INSERT INTO nudge_settings (
+                nudge_type, enabled, lead_days, sms_template, email_template,
+                include_preferred_vendors, preferred_vendor_ids, updated_by, updated_at
+            )
+            VALUES (%s, TRUE, %s, %s, %s, %s, '[]'::jsonb, 'system', CURRENT_TIMESTAMP)
+            ON CONFLICT (nudge_type) DO NOTHING
+            """,
+            (
+                nudge_type,
+                defaults["lead_days"],
+                defaults["sms_template"],
+                defaults["email_template"],
+                bool(defaults.get("include_preferred_vendors")),
+            ),
+        )
+
+
+def ensure_nudge_agent_whitelist_table():
+    """Store agent no-nudge whitelist entries."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS nudge_agent_whitelist (
+            id SERIAL PRIMARY KEY,
+            agent_name VARCHAR(200),
+            agent_phone VARCHAR(25),
+            agent_email VARCHAR(200),
+            notes TEXT,
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_nudge_agent_whitelist_phone
+        ON nudge_agent_whitelist(agent_phone)
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_nudge_agent_whitelist_email
+        ON nudge_agent_whitelist(agent_email)
+        """
+    )
+
+
+def ensure_intelligent_nudge_tables():
+    """Ensure all intelligent nudge tables exist."""
+    ensure_nudge_log_table()
+    ensure_nudge_settings_table()
+    ensure_nudge_agent_whitelist_table()
+
+
+def nudge_type_label(nudge_type):
+    """Return display label for nudge type key."""
+    defaults = INTELLIGENT_NUDGE_DEFAULTS.get((nudge_type or "").strip(), {})
+    return defaults.get("label") or (nudge_type or "").replace("_", " ").title()
+
+
+def fetch_nudge_settings_rows():
+    """Return nudge settings rows merged with defaults for UI."""
+    ensure_nudge_settings_table()
+    rows = execute_query(
+        """
+        SELECT
+            nudge_type,
+            enabled,
+            lead_days,
+            sms_template,
+            email_template,
+            custom_sms_message,
+            custom_email_message,
+            include_preferred_vendors,
+            preferred_vendor_ids,
+            updated_by,
+            updated_at
+        FROM nudge_settings
+        ORDER BY nudge_type ASC
+        """,
+        fetch=True,
+    ) or []
+    by_type = {row["nudge_type"]: row for row in rows if row.get("nudge_type")}
+    merged = []
+    for nudge_type, defaults in INTELLIGENT_NUDGE_DEFAULTS.items():
+        row = by_type.get(nudge_type, {})
+        preferred_vendor_ids = row.get("preferred_vendor_ids") or []
+        if isinstance(preferred_vendor_ids, str):
+            preferred_vendor_ids = []
+        merged.append(
+            {
+                "nudge_type": nudge_type,
+                "label": defaults.get("label") or nudge_type.replace("_", " ").title(),
+                "enabled": bool(row.get("enabled", True)),
+                "lead_days": int(row.get("lead_days") or defaults["lead_days"]),
+                "sms_template": (row.get("sms_template") or defaults["sms_template"]).strip(),
+                "email_template": (row.get("email_template") or defaults["email_template"]).strip(),
+                "custom_sms_message": (row.get("custom_sms_message") or "").strip(),
+                "custom_email_message": (row.get("custom_email_message") or "").strip(),
+                "include_preferred_vendors": bool(
+                    row.get("include_preferred_vendors", defaults.get("include_preferred_vendors", False))
+                ),
+                "preferred_vendor_ids": preferred_vendor_ids if isinstance(preferred_vendor_ids, list) else [],
+                "updated_by": row.get("updated_by") or "",
+                "updated_at_label": format_timestamp_label(row.get("updated_at")),
+            }
+        )
+    return merged
+
+
+def fetch_nudge_settings_map():
+    """Return compact nudge settings map keyed by nudge type."""
+    settings_map = {}
+    for row in fetch_nudge_settings_rows():
+        settings_map[row["nudge_type"]] = row
+    return settings_map
+
+
+def upsert_nudge_setting(
+    nudge_type,
+    enabled=True,
+    lead_days=5,
+    sms_template="",
+    email_template="",
+    custom_sms_message="",
+    custom_email_message="",
+    include_preferred_vendors=False,
+    preferred_vendor_ids=None,
+    updated_by="margaret",
+):
+    """Create/update one nudge setting row."""
+    if (nudge_type or "").strip() not in INTELLIGENT_NUDGE_DEFAULTS:
+        return False
+    safe_lead_days = max(1, min(21, int(lead_days or 5)))
+    safe_vendor_ids = []
+    for raw_value in preferred_vendor_ids or []:
+        parsed_value = parse_optional_int(raw_value)
+        if parsed_value is not None and parsed_value not in safe_vendor_ids:
+            safe_vendor_ids.append(parsed_value)
+    execute_query(
+        """
+        INSERT INTO nudge_settings (
+            nudge_type, enabled, lead_days, sms_template, email_template,
+            custom_sms_message, custom_email_message, include_preferred_vendors,
+            preferred_vendor_ids, updated_by, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (nudge_type)
+        DO UPDATE SET
+            enabled = EXCLUDED.enabled,
+            lead_days = EXCLUDED.lead_days,
+            sms_template = EXCLUDED.sms_template,
+            email_template = EXCLUDED.email_template,
+            custom_sms_message = EXCLUDED.custom_sms_message,
+            custom_email_message = EXCLUDED.custom_email_message,
+            include_preferred_vendors = EXCLUDED.include_preferred_vendors,
+            preferred_vendor_ids = EXCLUDED.preferred_vendor_ids,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            nudge_type,
+            bool(enabled),
+            safe_lead_days,
+            (sms_template or "").strip()[:200],
+            (email_template or "").strip()[:200],
+            (custom_sms_message or "").strip()[:2500] or None,
+            (custom_email_message or "").strip()[:5000] or None,
+            bool(include_preferred_vendors),
+            json.dumps(safe_vendor_ids),
+            (updated_by or "margaret")[:100],
+        ),
+    )
+    return True
+
+
+def fetch_nudge_whitelist_rows():
+    """Return active whitelist rows for nudge settings UI."""
+    ensure_nudge_agent_whitelist_table()
+    return execute_query(
+        """
+        SELECT id, agent_name, agent_phone, agent_email, notes, active, created_at
+        FROM nudge_agent_whitelist
+        WHERE active = TRUE
+        ORDER BY created_at DESC, id DESC
+        """,
+        fetch=True,
+    ) or []
+
+
+def upsert_nudge_whitelist_row(agent_name="", agent_phone="", agent_email="", notes="", updated_by="margaret"):
+    """Add/update one whitelist row by phone/email."""
+    ensure_nudge_agent_whitelist_table()
+    normalized_phone = normalize_phone(agent_phone or "")
+    normalized_email = normalize_email(agent_email or "")
+    if not normalized_phone and not normalized_email:
+        return False
+    if normalized_phone:
+        execute_query(
+            """
+            INSERT INTO nudge_agent_whitelist (
+                agent_name, agent_phone, agent_email, notes, active, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (agent_phone)
+            DO UPDATE SET
+                agent_name = EXCLUDED.agent_name,
+                agent_email = COALESCE(EXCLUDED.agent_email, nudge_agent_whitelist.agent_email),
+                notes = EXCLUDED.notes,
+                active = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                (agent_name or "").strip()[:200] or None,
+                normalized_phone,
+                normalized_email or None,
+                f"{(notes or '').strip()[:800]} (updated_by={updated_by})"[:900] or None,
+            ),
+        )
+    if normalized_email:
+        execute_query(
+            """
+            INSERT INTO nudge_agent_whitelist (
+                agent_name, agent_phone, agent_email, notes, active, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (agent_email)
+            DO UPDATE SET
+                agent_name = EXCLUDED.agent_name,
+                agent_phone = COALESCE(EXCLUDED.agent_phone, nudge_agent_whitelist.agent_phone),
+                notes = EXCLUDED.notes,
+                active = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                (agent_name or "").strip()[:200] or None,
+                normalized_phone or None,
+                normalized_email or None,
+                f"{(notes or '').strip()[:800]} (updated_by={updated_by})"[:900] or None,
+            ),
+        )
+    return True
+
+
+def delete_nudge_whitelist_row(whitelist_id):
+    """Deactivate one whitelist row."""
+    ensure_nudge_agent_whitelist_table()
+    execute_query(
+        """
+        UPDATE nudge_agent_whitelist
+        SET active = FALSE,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (whitelist_id,),
+    )
+
+
+def get_recent_nudge_by_phone(phone_number):
+    """Fetch most recent unresolved nudge row for inbound phone."""
+    ensure_nudge_log_table()
+    last10 = phone_last10(phone_number)
+    if not last10:
+        return None
+    rows = execute_query(
+        """
+        SELECT
+            nl.id,
+            nl.transaction_id,
+            nl.deadline_id,
+            nl.nudge_type,
+            nl.sent_to,
+            nl.sent_at,
+            nl.response_received,
+            nl.escalated_to_margaret,
+            t.property_address,
+            t.agent_name,
+            t.agent_phone
+        FROM nudge_log nl
+        JOIN transactions t ON t.id = nl.transaction_id
+        WHERE nl.response_received = FALSE
+          AND nl.sent_at >= (CURRENT_TIMESTAMP - INTERVAL '10 days')
+          AND (
+                RIGHT(REGEXP_REPLACE(COALESCE(nl.sent_to, ''), '[^0-9]', '', 'g'), 10) = %s
+             OR RIGHT(REGEXP_REPLACE(COALESCE(t.agent_phone, ''), '[^0-9]', '', 'g'), 10) = %s
+          )
+        ORDER BY nl.sent_at DESC
+        LIMIT 1
+        """,
+        (last10, last10),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def mark_nudge_log_responded(nudge_log_id):
+    """Mark nudge response received."""
+    execute_query(
+        """
+        UPDATE nudge_log
+        SET response_received = TRUE,
+            response_date = COALESCE(response_date, CURRENT_TIMESTAMP)
+        WHERE id = %s
+        """,
+        (nudge_log_id,),
+    )
+
+
+def mark_nudge_log_escalated(nudge_log_id):
+    """Mark nudge as escalated to Margaret."""
+    execute_query(
+        """
+        UPDATE nudge_log
+        SET escalated_to_margaret = TRUE
+        WHERE id = %s
+        """,
+        (nudge_log_id,),
+    )
+
+
+def complete_task_for_nudge(transaction_id, nudge_type):
+    """Complete matching task(s) once a positive nudge response is received."""
+    hints = INTELLIGENT_NUDGE_TASK_HINTS.get((nudge_type or "").strip(), ())
+    if not hints:
+        return []
+    completed_ids = []
+    for hint in hints:
+        rows = execute_query(
+            """
+            UPDATE tasks
+            SET completed = TRUE,
+                status = 'completed',
+                completed_at = CURRENT_TIMESTAMP,
+                completed_by = 'nudge_response',
+                notes = CASE
+                    WHEN COALESCE(notes, '') = '' THEN %s
+                    ELSE notes || E'\n' || %s
+                END
+            WHERE transaction_id = %s
+              AND completed = FALSE
+              AND LOWER(COALESCE(task_description, '')) LIKE %s
+            RETURNING id
+            """,
+            (
+                "Auto-completed after positive nudge response.",
+                "Auto-completed after positive nudge response.",
+                transaction_id,
+                f"%{hint.lower()}%",
+            ),
+            fetch=True,
+        ) or []
+        for row in rows:
+            if row["id"] not in completed_ids:
+                completed_ids.append(row["id"])
+    return completed_ids
 
 
 def phone_last10(value):
@@ -5997,6 +6474,207 @@ def mark_vendor_outreach_scheduled_route(outreach_id):
     return redirect(url_for("tc_daily_checklist", notice=notice, notice_type=notice_type))
 
 
+@app.route("/tc/nudge-analytics")
+@login_required
+def tc_nudge_analytics():
+    """Show intelligent nudge performance and response analytics."""
+    ensure_intelligent_nudge_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    weekly_counts = execute_query(
+        """
+        SELECT DATE_TRUNC('week', sent_at)::date AS week_start, COUNT(*) AS total_sent
+        FROM nudge_log
+        WHERE sent_at >= (CURRENT_DATE - INTERVAL '90 days')
+        GROUP BY DATE_TRUNC('week', sent_at)
+        ORDER BY week_start DESC
+        LIMIT 14
+        """,
+        fetch=True,
+    ) or []
+    weekly_counts = list(reversed(weekly_counts))
+    for row in weekly_counts:
+        row["week_label"] = row["week_start"].strftime("%b %d") if row.get("week_start") else ""
+
+    response_by_type = execute_query(
+        """
+        SELECT
+            nudge_type,
+            COUNT(*) AS total_sent,
+            COUNT(*) FILTER (WHERE response_received = TRUE) AS responses,
+            COUNT(*) FILTER (WHERE escalated_to_margaret = TRUE) AS escalations,
+            ROUND(
+                CASE WHEN COUNT(*) = 0 THEN 0
+                     ELSE (COUNT(*) FILTER (WHERE response_received = TRUE)::numeric / COUNT(*)::numeric) * 100
+                END,
+                1
+            ) AS response_rate
+        FROM nudge_log
+        GROUP BY nudge_type
+        ORDER BY total_sent DESC, response_rate DESC
+        """,
+        fetch=True,
+    ) or []
+    for row in response_by_type:
+        row["label"] = nudge_type_label(row.get("nudge_type"))
+        row["follow_up_needed"] = int(row.get("total_sent") or 0) - int(row.get("responses") or 0)
+
+    time_saved_row = execute_query(
+        """
+        SELECT
+            COUNT(*) FILTER (
+                WHERE response_received = TRUE
+                  AND escalated_to_margaret = FALSE
+            ) AS resolved_without_escalation,
+            COUNT(*) AS total_nudges
+        FROM nudge_log
+        """,
+        fetch=True,
+    ) or []
+    time_saved = time_saved_row[0] if time_saved_row else {"resolved_without_escalation": 0, "total_nudges": 0}
+    resolved_without_escalation = int(time_saved.get("resolved_without_escalation") or 0)
+    estimated_minutes_saved = resolved_without_escalation * 12
+
+    agent_rows = execute_query(
+        """
+        SELECT
+            COALESCE(t.agent_name, 'Unknown Agent') AS agent_name,
+            COALESCE(t.agent_phone, '') AS agent_phone,
+            COUNT(*) AS nudges_sent,
+            COUNT(*) FILTER (WHERE nl.response_received = TRUE) AS responses,
+            COUNT(*) FILTER (WHERE nl.escalated_to_margaret = TRUE) AS escalations,
+            ROUND(
+                CASE WHEN COUNT(*) = 0 THEN 0
+                     ELSE (COUNT(*) FILTER (WHERE nl.response_received = TRUE)::numeric / COUNT(*)::numeric) * 100
+                END,
+                1
+            ) AS response_rate
+        FROM nudge_log nl
+        JOIN transactions t ON t.id = nl.transaction_id
+        GROUP BY t.agent_name, t.agent_phone
+        ORDER BY response_rate DESC, nudges_sent DESC
+        LIMIT 40
+        """,
+        fetch=True,
+    ) or []
+    for row in agent_rows:
+        row["needs_follow_up"] = int(row.get("nudges_sent") or 0) - int(row.get("responses") or 0)
+
+    most_effective_messages = sorted(
+        [row for row in response_by_type if int(row.get("total_sent") or 0) > 0],
+        key=lambda row: (float(row.get("response_rate") or 0), int(row.get("total_sent") or 0)),
+        reverse=True,
+    )[:5]
+
+    return render_template(
+        "tc_nudge_analytics.html",
+        notice=notice,
+        notice_type=notice_type,
+        weekly_counts=weekly_counts,
+        response_by_type=response_by_type,
+        most_effective_messages=most_effective_messages,
+        agent_rows=agent_rows,
+        resolved_without_escalation=resolved_without_escalation,
+        estimated_minutes_saved=estimated_minutes_saved,
+        total_nudges=int(time_saved.get("total_nudges") or 0),
+    )
+
+
+@app.route("/tc/nudge-settings", methods=["GET", "POST"])
+@login_required
+def tc_nudge_settings():
+    """Configure intelligent nudge timing, templates, vendors, and whitelist."""
+    ensure_intelligent_nudge_tables()
+    ensure_vendor_automation_tables()
+
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        next_notice = "Settings saved."
+        next_type = "success"
+
+        if action == "update_setting":
+            nudge_type = (request.form.get("nudge_type") or "").strip()
+            lead_days = parse_optional_int(request.form.get("lead_days")) or INTELLIGENT_NUDGE_DEFAULTS.get(
+                nudge_type, {}
+            ).get("lead_days", 5)
+            enabled = parse_bool_value(request.form.get("enabled"), default=False)
+            include_preferred_vendors = parse_bool_value(request.form.get("include_preferred_vendors"), default=False)
+            preferred_vendor_ids = request.form.getlist("preferred_vendor_ids")
+            ok = upsert_nudge_setting(
+                nudge_type=nudge_type,
+                enabled=enabled,
+                lead_days=lead_days,
+                sms_template=request.form.get("sms_template") or "",
+                email_template=request.form.get("email_template") or "",
+                custom_sms_message=request.form.get("custom_sms_message") or "",
+                custom_email_message=request.form.get("custom_email_message") or "",
+                include_preferred_vendors=include_preferred_vendors,
+                preferred_vendor_ids=preferred_vendor_ids,
+                updated_by=session.get("tc_username", "margaret"),
+            )
+            if not ok:
+                next_notice = "Invalid nudge type. Setting not saved."
+                next_type = "error"
+
+        elif action == "add_whitelist":
+            ok = upsert_nudge_whitelist_row(
+                agent_name=request.form.get("agent_name") or "",
+                agent_phone=request.form.get("agent_phone") or "",
+                agent_email=request.form.get("agent_email") or "",
+                notes=request.form.get("notes") or "",
+                updated_by=session.get("tc_username", "margaret"),
+            )
+            if ok:
+                next_notice = "Agent added to no-nudge whitelist."
+            else:
+                next_notice = "Whitelist entry needs a phone or email."
+                next_type = "warning"
+
+        elif action == "remove_whitelist":
+            whitelist_id = parse_optional_int(request.form.get("whitelist_id"))
+            if whitelist_id is not None:
+                delete_nudge_whitelist_row(whitelist_id)
+                next_notice = "Whitelist entry removed."
+            else:
+                next_notice = "Invalid whitelist row."
+                next_type = "error"
+        else:
+            next_notice = "Unknown settings action."
+            next_type = "warning"
+
+        return redirect(url_for("tc_nudge_settings", notice=next_notice, notice_type=next_type))
+
+    settings_rows = fetch_nudge_settings_rows()
+    whitelist_rows = fetch_nudge_whitelist_rows()
+    inspector_vendors = execute_query(
+        """
+        SELECT id, company_name, contact_name, phone, preferred
+        FROM vendor_contacts
+        WHERE vendor_type = 'inspector'
+          AND active = TRUE
+        ORDER BY preferred DESC, company_name ASC NULLS LAST, id ASC
+        """,
+        fetch=True,
+    ) or []
+
+    return render_template(
+        "tc_nudge_settings.html",
+        notice=notice,
+        notice_type=notice_type,
+        settings_rows=settings_rows,
+        whitelist_rows=whitelist_rows,
+        inspector_vendors=inspector_vendors,
+    )
+
+
 @app.route("/tc/revenue")
 @login_required
 def tc_revenue():
@@ -8958,6 +9636,100 @@ def cancel_transaction(transaction_id):
         (transaction_id,),
     )
     return redirect(url_for("tc_dashboard"))
+
+
+@app.route("/nudge-response", methods=["POST"])
+def handle_nudge_response():
+    """
+    Handle SMS replies to intelligent nudges via Twilio webhook.
+    """
+    ensure_intelligent_nudge_tables()
+    from_phone = normalize_phone(request.form.get("From", ""))
+    message_body_raw = (request.form.get("Body") or "").strip()
+    message_body = message_body_raw.lower()
+    margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE") or "")
+
+    recent_nudge = get_recent_nudge_by_phone(from_phone)
+    if not recent_nudge:
+        if margaret_phone:
+            send_sms(margaret_phone, f"Unknown SMS from {from_phone or 'unknown'}: {message_body_raw[:220]}")
+        return "", 200
+
+    nudge_type = recent_nudge.get("nudge_type") or "deadline_item"
+    label = nudge_type_label(nudge_type).lower()
+    positive_keywords = ("yes", "scheduled", "done", "complete", "completed")
+    help_keywords = ("help", "call", "need help", "margaret")
+
+    if any(keyword in message_body for keyword in positive_keywords):
+        mark_nudge_log_responded(recent_nudge["id"])
+        completed_task_ids = complete_task_for_nudge(recent_nudge["transaction_id"], nudge_type)
+        if from_phone:
+            send_sms(from_phone, "Great! I've updated the transaction. Thanks!")
+        if margaret_phone:
+            send_sms(
+                margaret_phone,
+                (
+                    f"{nudge_type_label(nudge_type)} completed for "
+                    f"Transaction #{recent_nudge['transaction_id']}"
+                ),
+            )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'text', 'agent', %s, %s, %s)
+            """,
+            (
+                recent_nudge["transaction_id"],
+                recent_nudge.get("agent_name") or "Agent",
+                "Positive intelligent nudge response received",
+                (
+                    f"nudge_log_id={recent_nudge['id']} completed_tasks="
+                    f"{','.join(str(task_id) for task_id in completed_task_ids) or 'none'}"
+                ),
+            ),
+        )
+        return "", 200
+
+    if any(keyword in message_body for keyword in help_keywords):
+        mark_nudge_log_escalated(recent_nudge["id"])
+        followup_task_id = create_deadline_nudge_followup_task(
+            recent_nudge["transaction_id"],
+            f"Follow up on {label}",
+            notes=f"Agent requested help via /nudge-response ({from_phone})",
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'text', 'agent', %s, %s, %s)
+            """,
+            (
+                recent_nudge["transaction_id"],
+                recent_nudge.get("agent_name") or "Agent",
+                "Intelligent nudge escalated to Margaret",
+                f"nudge_log_id={recent_nudge['id']} task_id={followup_task_id or 'n/a'}",
+            ),
+        )
+        if margaret_phone:
+            send_sms(
+                margaret_phone,
+                (
+                    f"Agent needs help with {label} - "
+                    f"Transaction #{recent_nudge['transaction_id']} - {from_phone or 'unknown'}"
+                ),
+            )
+        if from_phone:
+            send_sms(from_phone, "I've notified Margaret. She will call you shortly. - Maverick TC")
+        return "", 200
+
+    if margaret_phone:
+        send_sms(
+            margaret_phone,
+            (
+                f"Unclear nudge response from {from_phone or 'unknown'}: "
+                f"'{message_body_raw[:180]}' - Transaction #{recent_nudge['transaction_id']}"
+            ),
+        )
+    return "", 200
 
 
 @app.route("/sms-webhook", methods=["POST"])

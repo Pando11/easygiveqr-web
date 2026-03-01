@@ -18,6 +18,7 @@ Core capabilities:
 - Vendor outreach automation (inspector/appraiser/survey/title) with secure confirmation links
 - Transaction-specific inbound email aliases with AI urgency/category routing
 - Proactive deadline nudges with two-step escalation and SMS YES inspector recommendations
+- Intelligent nudge automation with configurable timing/templates + response analytics
 - Automation scripts for reminders, closing protocol, problem detection, and nightly backups
 
 ## Local setup instructions
@@ -98,6 +99,7 @@ SMTP_USERNAME=
 SMTP_PASSWORD=your_app_password
 SMTP_FROM_EMAIL=
 SMTP_FROM_NAME=Maverick TC
+ENABLE_LEGACY_DEADLINE_NUDGES=false
 ```
 
 ## Run locally
@@ -202,6 +204,24 @@ Behavior:
 - Supports sensitive handling (e.g., buyer concerns not forwarded to seller)
 - Supports per-transaction routing rules (e.g., always notify Margaret for lender emails)
 
+## Intelligent Nudge Automation
+
+Maverick includes a dedicated proactive nudge engine:
+
+- Script: `automation/intelligent_nudges.py`
+- Suggested cron: daily at 7:00 AM
+- Nudge logs: `nudge_log`
+- Settings + whitelist:
+  - `GET|POST /tc/nudge-settings`
+  - `GET /tc/nudge-analytics`
+- Twilio response route:
+  - `POST /nudge-response`
+
+Duplicate prevention:
+- no duplicate send for the same `(transaction, deadline, nudge_type)`
+- skipped when response already received
+- skipped when a matching Margaret follow-up task has already been completed
+
 ## Deploy to Railway
 
 This repository is configured to run Maverick from repo root using:
@@ -218,6 +238,7 @@ Deployment steps:
    - upload + TC login flows work
 6. Configure webhooks:
    - Twilio -> `https://<your-domain>/sms-webhook`
+   - Intelligent nudge replies (optional dedicated endpoint) -> `https://<your-domain>/nudge-response`
    - Stripe -> `https://<your-domain>/stripe/webhook`
 
 ## Cron job setup (Railway)

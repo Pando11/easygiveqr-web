@@ -1,0 +1,21 @@
+<html>
+<body style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.6;">
+    <h2>Appraisal Status Reminder</h2>
+    {% if custom_email_message %}
+    <p>{{ custom_email_message }}</p>
+    {% else %}
+    <p>Hi {{ lender_name }},</p>
+    <p>
+        Please confirm appraisal has been ordered for
+        <strong>{{ property_address }}</strong>.
+    </p>
+    <p>
+        Financing deadline:
+        <strong>{{ financing_deadline|format_date }}</strong>
+        ({{ days_remaining }} days remaining)
+    </p>
+    <p>Reply with status, or call Margaret at {{ margaret_phone }} if support is needed.</p>
+    {% endif %}
+    <p>Thanks,<br>Maverick TC</p>
+</body>
+</html>

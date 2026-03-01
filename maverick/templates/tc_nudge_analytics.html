@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+
+{% block title %}Nudge Analytics - Maverick TC{% endblock %}
+{% block subtitle %}Intelligent Nudge Performance{% endblock %}
+
+{% block content %}
+<section class="card page-header">
+    <div>
+        <h2>📈 Nudge Analytics</h2>
+        <p class="subtle">Track response rates, escalation load, and time saved.</p>
+    </div>
+    <div class="header-actions">
+        <a href="/tc/nudge-settings" class="btn btn-secondary">Nudge Settings</a>
+        <a href="/tc/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+{% endif %}
+
+<section class="card summary-grid">
+    <article class="summary-item">
+        <small>Total Nudges</small>
+        <strong>{{ total_nudges }}</strong>
+    </article>
+    <article class="summary-item">
+        <small>Resolved Without Escalation</small>
+        <strong>{{ resolved_without_escalation }}</strong>
+    </article>
+    <article class="summary-item">
+        <small>Estimated Time Saved</small>
+        <strong>{{ estimated_minutes_saved }} min</strong>
+    </article>
+</section>
+
+<section class="card">
+    <h3>Nudges Sent Per Week</h3>
+    {% if weekly_counts %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Week</th>
+                <th>Nudges Sent</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in weekly_counts %}
+            <tr>
+                <td>{{ row.week_label }}</td>
+                <td>{{ row.total_sent }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="subtle">No nudge history yet.</p>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>Response Rate by Nudge Type</h3>
+    {% if response_by_type %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Nudge Type</th>
+                <th>Sent</th>
+                <th>Responses</th>
+                <th>Escalations</th>
+                <th>Response Rate</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in response_by_type %}
+            <tr>
+                <td>{{ row.label }}</td>
+                <td>{{ row.total_sent }}</td>
+                <td>{{ row.responses }}</td>
+                <td>{{ row.escalations }}</td>
+                <td>{{ row.response_rate }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="subtle">No response metrics yet.</p>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>Most Effective Nudge Messages</h3>
+    {% if most_effective_messages %}
+    <ul class="compact-list">
+        {% for row in most_effective_messages %}
+        <li>
+            <strong>{{ row.label }}</strong> - {{ row.response_rate }}% response rate
+            ({{ row.responses }}/{{ row.total_sent }})
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="subtle">Not enough data yet.</p>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>Agents Who Respond vs Need Follow-Up</h3>
+    {% if agent_rows %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Agent</th>
+                <th>Nudges</th>
+                <th>Responses</th>
+                <th>Need Follow-Up</th>
+                <th>Response Rate</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in agent_rows %}
+            <tr>
+                <td>{{ row.agent_name }}</td>
+                <td>{{ row.nudges_sent }}</td>
+                <td>{{ row.responses }}</td>
+                <td>{{ row.needs_follow_up }}</td>
+                <td>{{ row.response_rate }}%</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="subtle">No agent-level data yet.</p>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.summary-item {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 12px;
+    background: #f8fafc;
+}
+
+.summary-item strong {
+    display: block;
+    font-size: 24px;
+}
+
+.table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.table th,
+.table td {
+    border-bottom: 1px solid #e2e8f0;
+    text-align: left;
+    padding: 8px;
+}
+
+.compact-list {
+    margin-left: 18px;
+}
+
+@media (max-width: 900px) {
+    .summary-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .page-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+}
+</style>
+{% endblock %}

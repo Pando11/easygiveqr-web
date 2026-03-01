@@ -1,0 +1,13 @@
+Hi {{ agent_name }}!
+
+Quick reminder for {{ property_address }} - inspection should be scheduled
+before {{ option_period_end|format_date }} ({{ days_remaining }} days).
+
+Need an inspector? Here are Margaret's recommendations:
+{% for inspector in inspector_recommendations %}
+- {{ inspector.name }} - {{ inspector.phone }}
+{% endfor %}
+
+Reply YES if scheduled, or call Margaret at {{ margaret_phone }} if you need help!
+
+- Maverick TC

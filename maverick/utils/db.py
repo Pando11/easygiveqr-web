@@ -163,3 +163,60 @@ def execute_insert(query, params=None, return_id=True):
         if cur:
             cur.close()
         conn.close()
+
+
+def get_active_transactions(limit=500):
+    """Return active transactions with key contact/deadline fields."""
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            property_address,
+            contract_price,
+            agent_name,
+            agent_phone,
+            agent_email,
+            buyer_name,
+            buyer_phone,
+            seller_name,
+            seller_phone,
+            lender_name,
+            lender_phone,
+            lender_email,
+            title_company,
+            title_officer_phone,
+            title_officer_email,
+            rush_service,
+            status
+        FROM transactions
+        WHERE status = 'ACTIVE'
+        ORDER BY COALESCE(closing_date, CURRENT_DATE + INTERVAL '365 days') ASC, id ASC
+        LIMIT %s
+        """,
+        (int(limit),),
+        fetch=True,
+    ) or []
+    return rows
+
+
+def get_transaction_deadlines(transaction_id):
+    """Return deadline rows for one transaction sorted by date."""
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            transaction_id,
+            deadline_type,
+            deadline_date,
+            description,
+            completed,
+            is_critical,
+            created_at
+        FROM deadlines
+        WHERE transaction_id = %s
+        ORDER BY deadline_date ASC, id ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    return rows

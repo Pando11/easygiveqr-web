@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+
+{% block title %}Nudge Settings - Maverick TC{% endblock %}
+{% block subtitle %}Intelligent Nudge Controls{% endblock %}
+
+{% block content %}
+<section class="card page-header">
+    <div>
+        <h2>⚙️ Nudge Settings</h2>
+        <p class="subtle">Enable/disable nudge types, tune timing, and customize templates.</p>
+    </div>
+    <div class="header-actions">
+        <a href="/tc/nudge-analytics" class="btn btn-secondary">Nudge Analytics</a>
+        <a href="/tc/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+    <h3>Nudge Type Settings</h3>
+    <div class="settings-list">
+        {% for setting in settings_rows %}
+        <article class="setting-card">
+            <form method="POST">
+                <input type="hidden" name="action" value="update_setting">
+                <input type="hidden" name="nudge_type" value="{{ setting.nudge_type }}">
+                <div class="setting-header">
+                    <h4>{{ setting.label }}</h4>
+                    <label class="checkbox">
+                        <input type="checkbox" name="enabled" value="true" {% if setting.enabled %}checked{% endif %}>
+                        Enabled
+                    </label>
+                </div>
+
+                <div class="grid">
+                    <label>
+                        Lead Days
+                        <input type="number" name="lead_days" min="1" max="21" value="{{ setting.lead_days }}">
+                    </label>
+                    <label>
+                        SMS Template
+                        <input type="text" name="sms_template" value="{{ setting.sms_template }}">
+                    </label>
+                    <label>
+                        Email Template
+                        <input type="text" name="email_template" value="{{ setting.email_template }}">
+                    </label>
+                </div>
+
+                <label>
+                    Custom SMS Message (optional)
+                    <textarea name="custom_sms_message" rows="3">{{ setting.custom_sms_message }}</textarea>
+                </label>
+
+                <label>
+                    Custom Email Message (optional)
+                    <textarea name="custom_email_message" rows="4">{{ setting.custom_email_message }}</textarea>
+                </label>
+
+                {% if setting.nudge_type == "inspection_not_scheduled" %}
+                <div class="inspector-config">
+                    <label class="checkbox">
+                        <input
+                            type="checkbox"
+                            name="include_preferred_vendors"
+                            value="true"
+                            {% if setting.include_preferred_vendors %}checked{% endif %}
+                        >
+                        Include preferred inspectors in recommendations
+                    </label>
+                    {% if inspector_vendors %}
+                    <div class="vendor-options">
+                        {% for vendor in inspector_vendors %}
+                        <label class="checkbox">
+                            <input
+                                type="checkbox"
+                                name="preferred_vendor_ids"
+                                value="{{ vendor.id }}"
+                                {% if vendor.id in setting.preferred_vendor_ids %}checked{% endif %}
+                            >
+                            {{ vendor.contact_name or vendor.company_name or "Inspector" }}
+                            {% if vendor.phone %}({{ vendor.phone }}){% endif %}
+                            {% if vendor.preferred %}<span class="pill">Preferred</span>{% endif %}
+                        </label>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="subtle">No active inspector vendors found. Add vendors on the Vendors page.</p>
+                    {% endif %}
+                </div>
+                {% endif %}
+
+                <div class="footer-row">
+                    <small class="subtle">Last updated: {{ setting.updated_at_label or "Not yet" }}</small>
+                    <button type="submit" class="btn">Save</button>
+                </div>
+            </form>
+        </article>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="card">
+    <h3>Agent Whitelist (No Nudges)</h3>
+    <form method="POST" class="grid">
+        <input type="hidden" name="action" value="add_whitelist">
+        <label>
+            Agent Name
+            <input type="text" name="agent_name" maxlength="200">
+        </label>
+        <label>
+            Agent Phone
+            <input type="text" name="agent_phone" maxlength="25">
+        </label>
+        <label>
+            Agent Email
+            <input type="email" name="agent_email" maxlength="200">
+        </label>
+        <label class="full-width">
+            Notes
+            <textarea name="notes" rows="2"></textarea>
+        </label>
+        <div class="full-width">
+            <button type="submit" class="btn">Add to Whitelist</button>
+        </div>
+    </form>
+
+    {% if whitelist_rows %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Agent</th>
+                <th>Phone</th>
+                <th>Email</th>
+                <th>Notes</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in whitelist_rows %}
+            <tr>
+                <td>{{ row.agent_name or "N/A" }}</td>
+                <td>{{ row.agent_phone or "N/A" }}</td>
+                <td>{{ row.agent_email or "N/A" }}</td>
+                <td>{{ row.notes or "" }}</td>
+                <td>
+                    <form method="POST">
+                        <input type="hidden" name="action" value="remove_whitelist">
+                        <input type="hidden" name="whitelist_id" value="{{ row.id }}">
+                        <button type="submit" class="btn btn-secondary">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="subtle">No whitelist entries yet.</p>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.settings-list {
+    display: grid;
+    gap: 12px;
+}
+
+.setting-card {
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    padding: 12px;
+    background: #f8fafc;
+}
+
+.setting-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 14px;
+}
+
+.checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.checkbox input {
+    width: auto;
+}
+
+.full-width {
+    grid-column: 1 / -1;
+}
+
+.inspector-config {
+    margin-top: 10px;
+}
+
+.vendor-options {
+    margin-top: 8px;
+    display: grid;
+    gap: 6px;
+}
+
+.pill {
+    display: inline-block;
+    background: #dcfce7;
+    color: #166534;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 12px;
+    margin-left: 4px;
+}
+
+.footer-row {
+    margin-top: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 12px;
+}
+
+.table th,
+.table td {
+    text-align: left;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 8px;
+    vertical-align: top;
+}
+
+@media (max-width: 900px) {
+    .grid {
+        grid-template-columns: 1fr;
+    }
+
+    .page-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+}
+</style>
+{% endblock %}

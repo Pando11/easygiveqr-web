@@ -1029,13 +1029,22 @@ def main(dry_run=False):
     try:
         reminders_sent = send_stage_reminders()
         log(f"Total reminder texts sent: {reminders_sent}")
-        nudge_summary = run_proactive_deadline_nudges()
-        log(
-            "Proactive nudges completed: "
-            f"{nudge_summary['first_sent']} first, "
-            f"{nudge_summary['second_sent']} second, "
-            f"{nudge_summary['escalated']} escalated"
-        )
+        legacy_nudges_enabled = (os.getenv("ENABLE_LEGACY_DEADLINE_NUDGES") or "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if legacy_nudges_enabled:
+            nudge_summary = run_proactive_deadline_nudges()
+            log(
+                "Proactive nudges completed: "
+                f"{nudge_summary['first_sent']} first, "
+                f"{nudge_summary['second_sent']} second, "
+                f"{nudge_summary['escalated']} escalated"
+            )
+        else:
+            log("Legacy proactive nudge engine disabled (ENABLE_LEGACY_DEADLINE_NUDGES=false).")
         send_critical_deadline_alert_to_margaret()
         send_overdue_deadline_alert_to_margaret()
         log("Reminder job completed successfully")
