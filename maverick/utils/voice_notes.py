@@ -745,8 +745,9 @@ def register_voice_note_capture(
                 transcription_text = COALESCE(EXCLUDED.transcription_text, voice_notes.transcription_text),
                 transcription_source = COALESCE(EXCLUDED.transcription_source, voice_notes.transcription_source),
                 status = CASE
+                    WHEN voice_notes.status IN ('executed', 'review_required') THEN voice_notes.status
                     WHEN EXCLUDED.transcription_text IS NOT NULL AND EXCLUDED.transcription_text <> '' THEN 'transcribed'
-                    ELSE voice_notes.status
+                    ELSE COALESCE(voice_notes.status, EXCLUDED.status)
                 END,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING id, status
@@ -964,7 +965,7 @@ def handle_twilio_transcription_callback(recording_sid, transcription_text, tran
 
     rows = execute_query(
         """
-        SELECT id
+        SELECT id, status, communication_id
         FROM voice_notes
         WHERE recording_sid = %s
         ORDER BY id DESC
@@ -977,6 +978,10 @@ def handle_twilio_transcription_callback(recording_sid, transcription_text, tran
         return {"success": False, "error": "recording_not_found"}
 
     voice_note_id = rows[0]["id"]
+    current_status = (rows[0].get("status") or "").strip().lower()
+    if current_status in {"executed", "review_required"} and rows[0].get("communication_id"):
+        return {"success": True, "voice_note_id": voice_note_id, "queued": False, "ignored": "already_processed"}
+
     status_text = (transcription_status or "").strip().lower()
     transcript = (transcription_text or "").strip()
 
