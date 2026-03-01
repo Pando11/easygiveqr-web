@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Survey Scheduling Request</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 22px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#7c3aed;">Maverick TC - Survey Coordination</h2>
+                <p style="margin:8px 0 0; color:#334155;">
+                    Transaction #{{ data.transaction_id }} for {{ data.property_address }}
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 22px;">
+                <p style="margin:0 0 12px;">Hello {{ data.vendor_name }},</p>
+                <p style="margin:0 0 12px;">
+                    We are requesting survey scheduling support for this property.
+                    <strong>{{ data.urgency_label }}</strong>.
+                </p>
+                <p style="margin:0 0 12px;">
+                    Scheduling link:
+                    <a href="{{ data.scheduling_link }}" target="_blank" rel="noopener">Schedule survey appointment</a>
+                </p>
+                <p style="margin:0 0 12px;">
+                    Confirmation link:
+                    <a href="{{ data.confirm_link }}" target="_blank" rel="noopener">Confirm with Maverick</a>
+                </p>
+                {% if data.timeline_url %}
+                <p style="margin:0 0 12px;">
+                    Timeline packet: <a href="{{ data.timeline_url }}" target="_blank" rel="noopener">View packet</a>
+                </p>
+                {% endif %}
+                <p style="margin:0;">
+                    Reply to Margaret
+                    {% if data.margaret_email %}at <a href="mailto:{{ data.margaret_email }}">{{ data.margaret_email }}</a>{% endif %}
+                    {% if data.margaret_phone %} or call {{ data.margaret_phone }}{% endif %}.
+                </p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

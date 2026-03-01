@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Maverick Vendor Response</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
+        .container { max-width: 760px; margin: 30px auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; }
+        .header { padding: 20px 24px; border-bottom: 1px solid #e2e8f0; }
+        .content { padding: 20px 24px; }
+        .field { margin-bottom: 14px; }
+        label { display: block; font-weight: 600; margin-bottom: 6px; }
+        input, textarea, select { width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
+        textarea { min-height: 90px; resize: vertical; }
+        .btn { background: #1d4ed8; color: #fff; border: 0; padding: 10px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+        .notice { padding: 12px; border-radius: 8px; margin-bottom: 16px; }
+        .notice.success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+        .notice.info { background: #e0e7ff; color: #3730a3; border: 1px solid #a5b4fc; }
+        .meta { color: #475569; margin: 4px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2 style="margin:0;">Maverick Vendor Response</h2>
+            <p class="meta" style="margin-top:8px;">
+                {{ outreach.vendor_type|replace('_', ' ')|title }} coordination for {{ outreach.property_address }}
+            </p>
+            <p class="meta">Transaction #{{ outreach.transaction_id }}</p>
+        </div>
+        <div class="content">
+            {% if submitted and success %}
+            <div class="notice success">
+                Thank you. Your response has been recorded.
+                {% if appointment_label %}
+                Appointment noted for <strong>{{ appointment_label }}</strong>.
+                {% endif %}
+            </div>
+            <p>You may close this page.</p>
+            {% else %}
+            <div class="notice info">
+                Please confirm your scheduling status so Maverick can update the file and checklist automatically.
+            </div>
+            <form method="post">
+                <div class="field">
+                    <label for="response_status">Response status</label>
+                    <select id="response_status" name="response_status">
+                        <option value="confirmed">Confirmed</option>
+                        <option value="needs_call">Need phone call</option>
+                        <option value="unable">Unable to schedule</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="appointment_at">Appointment date/time (optional)</label>
+                    <input id="appointment_at" name="appointment_at" type="datetime-local">
+                </div>
+                <div class="field">
+                    <label for="notes">Notes</label>
+                    <textarea id="notes" name="notes" placeholder="Any details Margaret should know..."></textarea>
+                </div>
+                <button type="submit" class="btn">Submit response</button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

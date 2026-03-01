@@ -2,6 +2,7 @@ import os
 import re
 import smtplib
 from email.message import EmailMessage
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -18,7 +19,42 @@ def _html_to_text(html_body):
     return re.sub(r"\n{3,}", "\n\n", stripped).strip()
 
 
-def send_html_email(to_email, subject, html_body, text_body=None):
+def _attach_files(message, attachments):
+    """Attach in-memory payloads or local files to an EmailMessage."""
+    for attachment in attachments or []:
+        if not isinstance(attachment, dict):
+            continue
+        filename = (attachment.get("filename") or "").strip()
+        content_type = (attachment.get("content_type") or "application/octet-stream").strip()
+        data = attachment.get("data")
+        path = (attachment.get("path") or "").strip()
+
+        if data is None and path:
+            try:
+                data = Path(path).read_bytes()
+                if not filename:
+                    filename = Path(path).name
+            except Exception as exc:
+                print(f"Attachment read error ({path}): {exc}")
+                continue
+
+        if data is None:
+            continue
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        if not isinstance(data, (bytes, bytearray)):
+            continue
+        if not filename:
+            filename = "attachment.bin"
+
+        maintype, subtype = "application", "octet-stream"
+        if "/" in content_type:
+            maintype, subtype = content_type.split("/", 1)
+
+        message.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+
+
+def send_html_email(to_email, subject, html_body, text_body=None, attachments=None):
     """
     Send HTML email using SMTP settings from environment variables.
 
@@ -64,6 +100,7 @@ def send_html_email(to_email, subject, html_body, text_body=None):
     message.set_content((text_body or _html_to_text(html_body) or "Maverick TC notification").strip())
     if html_body:
         message.add_alternative(html_body, subtype="html")
+    _attach_files(message, attachments)
 
     try:
         smtp_client_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP

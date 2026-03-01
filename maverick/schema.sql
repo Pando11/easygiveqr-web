@@ -335,6 +335,51 @@ CREATE TABLE document_analysis_results (
     notes TEXT
 );
 
+CREATE TABLE timeline_packets (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+    timeline_s3_key VARCHAR(500),
+    timeline_filename VARCHAR(255),
+    timeline_signature VARCHAR(128),
+    timeline_snapshot JSONB,
+    sent_recipients JSONB,
+    last_trigger VARCHAR(64),
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE vendor_outreach (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    vendor_type VARCHAR(30) NOT NULL,
+    vendor_name VARCHAR(255),
+    vendor_email VARCHAR(255) NOT NULL,
+    outreach_token UUID UNIQUE NOT NULL,
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    responded_at TIMESTAMP,
+    response_status VARCHAR(30),
+    appointment_at TIMESTAMP,
+    appointment_notes TEXT,
+    related_task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+    followup_task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+    last_message_id VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE calendar_events (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    vendor_outreach_id INT REFERENCES vendor_outreach(id) ON DELETE SET NULL,
+    event_type VARCHAR(50),
+    title VARCHAR(255) NOT NULL,
+    starts_at TIMESTAMP,
+    ends_at TIMESTAMP,
+    details TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -362,3 +407,7 @@ CREATE UNIQUE INDEX idx_client_access_token ON client_access(access_token);
 CREATE UNIQUE INDEX idx_contract_extractions_txn_field ON contract_extractions(transaction_id, field_name);
 CREATE INDEX idx_document_analysis_transaction ON document_analysis_results(transaction_id, analysis_date DESC);
 CREATE INDEX idx_document_analysis_document ON document_analysis_results(document_id);
+CREATE UNIQUE INDEX idx_timeline_packets_transaction ON timeline_packets(transaction_id);
+CREATE INDEX idx_vendor_outreach_transaction ON vendor_outreach(transaction_id, vendor_type, sent_at DESC);
+CREATE UNIQUE INDEX idx_vendor_outreach_token ON vendor_outreach(outreach_token);
+CREATE INDEX idx_calendar_events_transaction ON calendar_events(transaction_id, starts_at DESC);

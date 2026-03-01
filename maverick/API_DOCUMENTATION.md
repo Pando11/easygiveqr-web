@@ -82,6 +82,9 @@ Client portal uses a unique token URL and does not require login credentials.
 ### Generate or re-send client portal links
 - `POST /tc/transaction/<transaction_id>/generate-client-portal`
 
+### Force timeline packet resend
+- `POST /tc/transaction/<transaction_id>/resend-timeline`
+
 ### Document analysis dashboard
 - `GET /tc/transaction/<transaction_id>/document-analysis`
 
@@ -130,3 +133,29 @@ Maverick:
 3. Flags findings only when at least `2/3` methods agree
 4. Stores analysis in `document_analysis_results`
 5. Executes action items (alerts/tasks) with smart thresholds
+
+## Vendor Outreach Response Endpoint
+
+Vendor outreach emails include a secure response URL:
+
+- `GET /vendor/outreach/<access_token>`  
+  Shows a simple response form for vendor scheduling confirmation.
+
+- `POST /vendor/outreach/<access_token>`  
+  Accepts:
+  - `response_status` (`confirmed`, `needs_call`, `unable`)
+  - `appointment_at` (optional datetime-local)
+  - `notes` (optional)
+
+When submitted, Maverick:
+- Logs response on `vendor_outreach`
+- Creates `calendar_events` row if appointment was provided
+- Marks linked coordination/follow-up task(s) complete
+- Writes communication audit note
+
+## Timeline Packet Automation Notes
+
+Timeline packet dispatch is signature-driven:
+- Initial send on transaction approval
+- Automatic re-send when tracked milestone signature changes (closing date, major deadlines, repair timeline additions)
+- Stored in `timeline_packets` for idempotency and audit trail

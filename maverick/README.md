@@ -14,6 +14,8 @@ Core capabilities:
 - Client portal links for buyer/seller timeline + document upload
 - Triple-scan AI contract extraction with confidence verification (OCR + PyPDF2 + pdfplumber)
 - Automated HOA/Inspection/Appraisal document analysis with action-item automation
+- Auto-generated timeline PDF packet (with milestone chart) + multi-party email distribution
+- Vendor outreach automation (inspector/appraiser/survey/title) with secure confirmation links
 - Automation scripts for reminders, closing protocol, problem detection, and nightly backups
 
 ## Local setup instructions
@@ -54,12 +56,26 @@ TWILIO_AUTH_TOKEN=
 TWILIO_PHONE_NUMBER=
 HEIDI_PHONE=
 MARGARET_PHONE=
+MARGARET_EMAIL=
 
 AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=
 AWS_REGION=us-east-2
 AWS_S3_BUCKET_DOCUMENTS=maverick-documents
 AWS_S3_BUCKET_BACKUPS=maverick-backups
+
+INSPECTOR_NAME=Inspection Team
+INSPECTOR_EMAIL=
+INSPECTOR_CALENDLY_URL=
+APPRAISER_NAME=Appraisal Team
+APPRAISER_EMAIL=
+APPRAISER_CALENDLY_URL=
+SURVEY_COMPANY_NAME=Survey Team
+SURVEY_COMPANY_EMAIL=
+SURVEY_CALENDLY_URL=
+TITLE_COORDINATION_NAME=Title Team
+TITLE_COORDINATION_EMAIL=
+TITLE_CALENDLY_URL=
 
 STRIPE_ENV=dev
 STRIPE_SECRET_KEY=
@@ -140,6 +156,20 @@ Dashboard route:
 Review/action routes:
 - `POST /tc/transaction/<transaction_id>/document-analysis/<analysis_id>/review`
 - `POST /tc/transaction/<transaction_id>/document-analysis/override-task`
+
+## Timeline Packet + Vendor Outreach Automation
+
+After Margaret approves and activates a transaction, Maverick:
+
+1. Generates a professional timeline PDF packet (all deadlines, weekly expectations, key contacts, moving checklist)
+2. Uploads/stores the packet in S3 and transaction documents
+3. Emails packet updates to buyer, seller, agent, lender, and title contacts
+4. Sends vendor outreach emails to inspector/appraiser/survey/title with scheduling + secure confirmation links
+5. Auto-creates follow-up tasks if vendors do not respond within 24 hours
+
+Relevant routes:
+- `POST /tc/transaction/<transaction_id>/resend-timeline`
+- `GET|POST /vendor/outreach/<access_token>`
 
 ## Deploy to Railway
 

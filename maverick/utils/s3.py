@@ -76,6 +76,32 @@ def upload_document(file, transaction_id, document_type, filename):
         return None
 
 
+def upload_local_file(local_path, transaction_id, document_type, filename, content_type=None):
+    """Upload a local file path into the standard documents bucket layout."""
+    try:
+        if not DOCUMENTS_BUCKET:
+            print("S3 upload error: AWS_S3_BUCKET_DOCUMENTS is not configured")
+            return None
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        s3_key = (
+            f"documents/{datetime.now().year}/{datetime.now().month:02d}/"
+            f"{document_type}_{transaction_id}_{timestamp}_{filename}"
+        )
+
+        extra_args = {"ContentType": content_type} if content_type else None
+        if extra_args:
+            _get_s3_client().upload_file(local_path, DOCUMENTS_BUCKET, s3_key, ExtraArgs=extra_args)
+        else:
+            _get_s3_client().upload_file(local_path, DOCUMENTS_BUCKET, s3_key)
+
+        print(f"Local file uploaded to S3: {s3_key}")
+        return s3_key
+    except Exception as exc:
+        print(f"S3 local upload error: {exc}")
+        return None
+
+
 def get_presigned_url(s3_key, expiration=3600, download_filename=None):
     """
     Generate presigned URL for document download.

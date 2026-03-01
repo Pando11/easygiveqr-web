@@ -3,11 +3,13 @@ import re
 import csv
 import io
 import json
+import hashlib
 import tempfile
 from datetime import date, datetime, timedelta
 from functools import wraps
 from threading import Thread
 from typing import Any
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import jwt
@@ -30,8 +32,9 @@ from utils.contract_extraction import (
     extract_via_pypdf,
 )
 from utils.document_analysis import analyze_appraisal, analyze_hoa_documents, analyze_inspection_report
-from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document
+from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document, upload_local_file
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
+from utils.timeline_pdf import build_timeline_pdf
 
 load_dotenv()
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
@@ -82,6 +85,9 @@ CLIENT_UPLOAD_DOCUMENT_TYPES = {
 HOA_ANALYSIS_DOCUMENT_TYPES = {"hoa", "hoa_documents", "hoa_docs"}
 INSPECTION_ANALYSIS_DOCUMENT_TYPES = {"inspection", "inspection_report"}
 APPRAISAL_ANALYSIS_DOCUMENT_TYPES = {"appraisal", "appraisal_report"}
+
+TIMELINE_VENDOR_TYPES = ("inspector", "appraiser", "survey", "title")
+TIMELINE_MAJOR_DEADLINE_TYPES = {"option_fee", "earnest_money", "option_period_end", "financing_approval", "closing"}
 
 DOCUMENT_REQUEST_TARGET = {
     "contract": "seller",
@@ -1469,6 +1475,14 @@ def run_document_analysis(document_id, transaction_id, document_type, s3_key, ex
 
         executed_actions = execute_document_analysis_actions(transaction_id, analysis_type, action_items)
         update_analysis_action_items(saved_row["id"], executed_actions)
+        if analysis_type in {"inspection", "appraisal"}:
+            has_repair_related_task = any(
+                (action.get("type") or "").strip().lower() == "create_task"
+                and "repair" in ((action.get("task") or "").lower())
+                for action in action_items
+            )
+            if has_repair_related_task:
+                maybe_dispatch_timeline_update_for_repairs(transaction_id)
     except Exception as exc:
         print(f"Document analysis error (txn#{transaction_id}, doc#{document_id}): {exc}")
         findings = {
@@ -1893,6 +1907,1092 @@ def provision_client_portal_access(transaction, buyer_email=None, seller_email=N
             "seller": seller_access.get("email") or "",
         },
     }
+
+
+def ensure_timeline_packets_table():
+    """Store latest generated timeline packet metadata/signature per transaction."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS timeline_packets (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+            timeline_s3_key VARCHAR(500),
+            timeline_filename VARCHAR(255),
+            timeline_signature VARCHAR(128),
+            timeline_snapshot JSONB,
+            sent_recipients JSONB,
+            last_trigger VARCHAR(64),
+            generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_packets_transaction
+        ON timeline_packets(transaction_id)
+        """
+    )
+
+
+def ensure_vendor_outreach_table():
+    """Track outbound vendor scheduling requests and response status."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS vendor_outreach (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            vendor_type VARCHAR(30) NOT NULL,
+            vendor_name VARCHAR(255),
+            vendor_email VARCHAR(255) NOT NULL,
+            outreach_token UUID UNIQUE NOT NULL,
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            responded_at TIMESTAMP,
+            response_status VARCHAR(30),
+            appointment_at TIMESTAMP,
+            appointment_notes TEXT,
+            related_task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+            followup_task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+            last_message_id VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_vendor_outreach_transaction
+        ON vendor_outreach(transaction_id, vendor_type, sent_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_outreach_token
+        ON vendor_outreach(outreach_token)
+        """
+    )
+
+
+def ensure_calendar_events_table():
+    """Store vendor-confirmed appointments created from outreach links."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS calendar_events (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            vendor_outreach_id INT REFERENCES vendor_outreach(id) ON DELETE SET NULL,
+            event_type VARCHAR(50),
+            title VARCHAR(255) NOT NULL,
+            starts_at TIMESTAMP,
+            ends_at TIMESTAMP,
+            details TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_calendar_events_transaction
+        ON calendar_events(transaction_id, starts_at DESC)
+        """
+    )
+
+
+def ensure_timeline_automation_tables():
+    """Ensure timeline packet and vendor outreach tables exist."""
+    ensure_timeline_packets_table()
+    ensure_vendor_outreach_table()
+    ensure_calendar_events_table()
+
+
+def parse_vendor_datetime(raw_value):
+    """Parse vendor appointment datetime from form input."""
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def fetch_vendor_outreach_by_token(access_token):
+    """Resolve vendor outreach row + transaction context by secure token."""
+    ensure_vendor_outreach_table()
+    rows = execute_query(
+        """
+        SELECT
+            vo.id,
+            vo.transaction_id,
+            vo.vendor_type,
+            vo.vendor_name,
+            vo.vendor_email,
+            vo.outreach_token::text AS outreach_token,
+            vo.sent_at,
+            vo.responded_at,
+            vo.response_status,
+            vo.appointment_at,
+            vo.appointment_notes,
+            vo.related_task_id,
+            vo.followup_task_id,
+            t.property_address,
+            t.agent_name,
+            t.rush_service
+        FROM vendor_outreach vo
+        JOIN transactions t ON t.id = vo.transaction_id
+        WHERE vo.outreach_token::text = %s
+        LIMIT 1
+        """,
+        ((access_token or "").strip(),),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def complete_vendor_response_tasks(task_ids, appointment_at, notes):
+    """Mark linked vendor coordination tasks complete after confirmation."""
+    cleaned_ids = []
+    for value in task_ids or []:
+        try:
+            task_id = int(value or 0)
+        except (TypeError, ValueError):
+            task_id = 0
+        if task_id > 0 and task_id not in cleaned_ids:
+            cleaned_ids.append(task_id)
+    if not cleaned_ids:
+        return []
+
+    event_note = (
+        f"Vendor confirmed appointment for {appointment_at.strftime('%b %d, %Y %I:%M %p')}"
+        if isinstance(appointment_at, datetime)
+        else "Vendor confirmed response via secure link."
+    )
+    if notes:
+        event_note = f"{event_note} Notes: {notes}"
+    updated_rows = []
+    for task_id in cleaned_ids:
+        rows = execute_query(
+            """
+            UPDATE tasks
+            SET completed = TRUE,
+                status = 'completed',
+                completed_at = CURRENT_TIMESTAMP,
+                completed_by = 'vendor-link',
+                notes = CASE
+                    WHEN COALESCE(notes, '') = '' THEN %s
+                    ELSE notes || E'\n' || %s
+                END
+            WHERE id = %s
+            RETURNING id
+            """,
+            (event_note, event_note, task_id),
+            fetch=True,
+        ) or []
+        if rows:
+            updated_rows.append(rows[0]["id"])
+    return updated_rows
+
+
+def fetch_timeline_transaction(transaction_id):
+    """Fetch transaction fields required for timeline packet generation."""
+    rows = execute_query(
+        """
+        SELECT
+            id, status, rush_service, property_address,
+            effective_date, closing_date,
+            option_fee_due_date, earnest_due_date, seller_disclosure_due_date, survey_due_date,
+            option_period_end_date, hoa_docs_due_date, buyer_hoa_review_end_date, title_commitment_due_date,
+            financing_approval_date, buyer_title_objection_end_date,
+            buyer_name, buyer_phone, seller_name, seller_phone,
+            agent_name, agent_phone, agent_email,
+            lender_name, lender_email, lender_phone,
+            title_company, title_officer_name, title_officer_email, title_officer_phone,
+            updated_at
+        FROM transactions
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def fetch_timeline_deadlines(transaction_id):
+    """Return ordered deadline rows for timeline rendering."""
+    return execute_query(
+        """
+        SELECT id, deadline_type, deadline_date, description, completed
+        FROM deadlines
+        WHERE transaction_id = %s
+        ORDER BY deadline_date ASC, id ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+
+
+def fetch_repair_timeline_tasks(transaction_id):
+    """Return repair-related timeline tasks used for update signatures."""
+    return execute_query(
+        """
+        SELECT id, task_description, due_date, completed, status
+        FROM tasks
+        WHERE transaction_id = %s
+          AND (
+                LOWER(task_description) LIKE '%%repair%%'
+             OR LOWER(task_description) LIKE '%%appraisal%%shortfall%%'
+          )
+        ORDER BY due_date ASC NULLS LAST, id ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+
+
+def build_timeline_snapshot(transaction, deadline_rows, repair_tasks):
+    """Create deterministic snapshot payload used to detect major schedule changes."""
+    major_deadline_map = {}
+    deadline_map = {}
+    for row in deadline_rows:
+        deadline_type = (row.get("deadline_type") or "").strip().lower()
+        deadline_value = row.get("deadline_date")
+        iso_value = deadline_value.isoformat() if deadline_value else ""
+        deadline_map[deadline_type] = iso_value
+        if deadline_type in TIMELINE_MAJOR_DEADLINE_TYPES:
+            major_deadline_map[deadline_type] = iso_value
+
+    snapshot = {
+        "effective_date": (
+            transaction.get("effective_date").isoformat() if isinstance(transaction.get("effective_date"), date) else ""
+        ),
+        "closing_date": (
+            transaction.get("closing_date").isoformat() if isinstance(transaction.get("closing_date"), date) else ""
+        ),
+        "major_deadlines": major_deadline_map,
+        "all_deadlines": deadline_map,
+        "repair_task_count": len(repair_tasks),
+        "repair_task_descriptions": [row.get("task_description") or "" for row in repair_tasks],
+    }
+    return snapshot
+
+
+def timeline_signature(snapshot):
+    """Hash timeline snapshot so we only re-send when meaningful values change."""
+    payload = json.dumps(snapshot, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def infer_timeline_trigger(previous_snapshot, current_snapshot, requested_reason):
+    """Classify why a timeline was re-sent for logging and subject lines."""
+    if not previous_snapshot:
+        return requested_reason or "approved"
+    if (previous_snapshot.get("closing_date") or "") != (current_snapshot.get("closing_date") or ""):
+        return "closing_date_changed"
+
+    prev_major = previous_snapshot.get("major_deadlines") or {}
+    curr_major = current_snapshot.get("major_deadlines") or {}
+    for deadline_type in TIMELINE_MAJOR_DEADLINE_TYPES:
+        if (prev_major.get(deadline_type) or "") != (curr_major.get(deadline_type) or ""):
+            return "major_deadline_shift"
+
+    prev_repairs = int(previous_snapshot.get("repair_task_count") or 0)
+    curr_repairs = int(current_snapshot.get("repair_task_count") or 0)
+    if curr_repairs > prev_repairs:
+        return "repair_timeline_added"
+    return requested_reason or "timeline_updated"
+
+
+def fetch_timeline_packet_row(transaction_id):
+    """Return current timeline packet metadata row."""
+    ensure_timeline_packets_table()
+    rows = execute_query(
+        """
+        SELECT id, transaction_id, timeline_s3_key, timeline_filename, timeline_signature,
+               timeline_snapshot, sent_recipients, last_trigger, generated_at, last_sent_at, updated_at
+        FROM timeline_packets
+        WHERE transaction_id = %s
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    row["timeline_snapshot"] = parse_json_field(row.get("timeline_snapshot"), {})
+    row["sent_recipients"] = parse_json_field(row.get("sent_recipients"), [])
+    return row
+
+
+def upsert_timeline_packet_row(transaction_id, s3_key, filename, signature, snapshot, sent_recipients, trigger_reason):
+    """Persist latest timeline packet metadata for change detection and audit."""
+    ensure_timeline_packets_table()
+    execute_query(
+        """
+        INSERT INTO timeline_packets (
+            transaction_id,
+            timeline_s3_key,
+            timeline_filename,
+            timeline_signature,
+            timeline_snapshot,
+            sent_recipients,
+            last_trigger,
+            generated_at,
+            last_sent_at,
+            updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT (transaction_id)
+        DO UPDATE SET
+            timeline_s3_key = EXCLUDED.timeline_s3_key,
+            timeline_filename = EXCLUDED.timeline_filename,
+            timeline_signature = EXCLUDED.timeline_signature,
+            timeline_snapshot = EXCLUDED.timeline_snapshot,
+            sent_recipients = EXCLUDED.sent_recipients,
+            last_trigger = EXCLUDED.last_trigger,
+            generated_at = CURRENT_TIMESTAMP,
+            last_sent_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            transaction_id,
+            s3_key,
+            filename,
+            signature,
+            json.dumps(snapshot or {}, default=str),
+            json.dumps(sent_recipients or [], default=str),
+            trigger_reason,
+        ),
+    )
+
+
+def fetch_client_email_map(transaction_id):
+    """Resolve buyer/seller emails from client access table."""
+    email_map = {"buyer": "", "seller": ""}
+    for access_row in fetch_client_access_rows(transaction_id):
+        role = (access_row.get("client_type") or "").strip().lower()
+        if role in email_map:
+            email_map[role] = normalize_email(access_row.get("email"))
+    return email_map
+
+
+def ensure_primary_portal_link(transaction_id):
+    """Return a stable portal upload link for timeline packet content."""
+    buyer_access = upsert_client_access(transaction_id, "buyer", None)
+    if buyer_access and buyer_access.get("access_token"):
+        return client_portal_link_for_token(buyer_access["access_token"])
+    seller_access = upsert_client_access(transaction_id, "seller", None)
+    if seller_access and seller_access.get("access_token"):
+        return client_portal_link_for_token(seller_access["access_token"])
+    return ""
+
+
+def _contact_line(name_value, email_value="", phone_value=""):
+    """Format compact contact lines for PDF/email content."""
+    parts = [piece for piece in [name_value, email_value, phone_value] if (piece or "").strip()]
+    return " | ".join(parts) if parts else "N/A"
+
+
+def timeline_service_level_label(transaction):
+    """Readable service-level indicator shown in timeline packet."""
+    return "Rush (priority handling)" if transaction.get("rush_service") else "Standard"
+
+
+def build_timeline_pdf_payload(transaction, deadline_rows, portal_link, trigger_reason, buyer_email="", seller_email=""):
+    """Build context payload consumed by the timeline PDF renderer."""
+    payment_document_points = [
+        "Earnest and option receipts should be uploaded as soon as funded.",
+        "Loan approval and insurance binder should be finalized before closing week.",
+        "Final settlement statement is reviewed immediately after closing.",
+    ]
+    inspection_appraisal_points = [
+        "Inspection is typically coordinated during the first week after effective date.",
+        "Appraisal timing depends on lender ordering and access readiness.",
+        "If repair negotiations or appraisal shortfalls occur, Maverick issues update tasks immediately.",
+    ]
+    weekly_expectations = [
+        "Week 1: Contract activation, earnest/option receipts, and initial coordination.",
+        "Week 2: Inspection, disclosures, and survey/title milestones.",
+        "Week 3+: Financing approval, pre-closing confirmations, and final logistics.",
+        "Closing Week: Final walk-through, wire verification, and closing document readiness.",
+    ]
+    moving_checklist = [
+        "Confirm utility transfer date at least 3 business days before closing.",
+        "Schedule movers and packing support once closing risk is low.",
+        "Set up USPS address forwarding and update key accounts.",
+        "Prepare closing-day IDs, wire confirmations, and occupancy plans.",
+    ]
+    contacts = {
+        "buyer": _contact_line(transaction.get("buyer_name"), buyer_email, transaction.get("buyer_phone")),
+        "seller": _contact_line(transaction.get("seller_name"), seller_email, transaction.get("seller_phone")),
+        "agent": _contact_line(transaction.get("agent_name"), transaction.get("agent_email"), transaction.get("agent_phone")),
+        "lender": _contact_line(transaction.get("lender_name"), transaction.get("lender_email"), transaction.get("lender_phone")),
+        "title": _contact_line(
+            transaction.get("title_company") or transaction.get("title_officer_name"),
+            transaction.get("title_officer_email"),
+            transaction.get("title_officer_phone"),
+        ),
+        "margaret": _contact_line(
+            "Margaret - Maverick TC",
+            normalize_email(os.getenv("MARGARET_EMAIL")),
+            normalize_phone(os.getenv("MARGARET_PHONE")),
+        ),
+    }
+    return {
+        "transaction_id": transaction["id"],
+        "property_address": transaction.get("property_address"),
+        "effective_date": transaction.get("effective_date"),
+        "closing_date": transaction.get("closing_date"),
+        "service_level": timeline_service_level_label(transaction),
+        "generated_at": datetime.now(),
+        "trigger_reason": trigger_reason,
+        "deadlines": deadline_rows,
+        "contacts": contacts,
+        "upload_portal_link": portal_link,
+        "weekly_expectations": weekly_expectations,
+        "payment_document_points": payment_document_points,
+        "inspection_appraisal_points": inspection_appraisal_points,
+        "moving_checklist": moving_checklist,
+    }
+
+
+def generate_timeline_pdf_artifact(transaction, deadline_rows, trigger_reason, buyer_email="", seller_email=""):
+    """Create timeline PDF, upload to S3, and track as a document row."""
+    portal_link = ensure_primary_portal_link(transaction["id"])
+    payload = build_timeline_pdf_payload(
+        transaction=transaction,
+        deadline_rows=deadline_rows,
+        portal_link=portal_link,
+        trigger_reason=trigger_reason,
+        buyer_email=buyer_email,
+        seller_email=seller_email,
+    )
+    temp_pdf_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+            temp_pdf_path = tmp_file.name
+        build_timeline_pdf(temp_pdf_path, payload)
+        pdf_bytes = b""
+        with open(temp_pdf_path, "rb") as pdf_handle:
+            pdf_bytes = pdf_handle.read()
+
+        filename = f"timeline_packet_txn_{transaction['id']}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        s3_key = upload_local_file(
+            local_path=temp_pdf_path,
+            transaction_id=transaction["id"],
+            document_type="timeline_packet",
+            filename=filename,
+            content_type="application/pdf",
+        )
+        if not s3_key:
+            return {"success": False, "error": "upload_failed"}
+
+        document_id = execute_insert(
+            """
+            INSERT INTO documents (
+                transaction_id, document_type, filename, s3_key, file_size, uploaded_by, uploaded_at
+            ) VALUES (%s, 'timeline_packet', %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING id
+            """,
+            (transaction["id"], filename, s3_key, len(pdf_bytes), "system_timeline"),
+        )
+        return {
+            "success": True,
+            "s3_key": s3_key,
+            "filename": filename,
+            "document_id": document_id,
+            "pdf_bytes": pdf_bytes,
+            "timeline_url": get_presigned_url(s3_key, expiration=60 * 60 * 24 * 7),
+            "portal_link": portal_link,
+            "payload": payload,
+        }
+    finally:
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            try:
+                os.remove(temp_pdf_path)
+            except OSError:
+                pass
+
+
+def timeline_recipient_focus_points(role):
+    """Audience-specific focus bullets for timeline emails."""
+    role = (role or "").strip().lower()
+    if role == "buyer":
+        return [
+            "Review option and inspection windows early to preserve negotiation flexibility.",
+            "Confirm wiring and insurance details before closing week.",
+            "Use your upload portal link to submit signed documents quickly.",
+        ]
+    if role == "seller":
+        return [
+            "Stay ahead of disclosure, survey, and repair-related requests.",
+            "Coordinate showing/access windows for inspection and appraisal teams.",
+            "Use the upload portal for signed amendments and supporting documents.",
+        ]
+    if role == "lender":
+        return [
+            "Financing-approval and closing milestones are highlighted in the attached packet.",
+            "Notify Maverick immediately if underwriting timelines shift.",
+            "Reply with any document gaps so Margaret can coordinate same-day.",
+        ]
+    if role == "title":
+        return [
+            "Title commitment and closing milestones are included in the packet.",
+            "Please confirm file-open status and any curative items early.",
+            "Reply if closing schedule windows need to be adjusted.",
+        ]
+    if role == "agent":
+        return [
+            "This packet includes all milestone deadlines and weekly client expectations.",
+            "Use it to answer buyer/seller timing questions without manual timeline builds.",
+            "Reply to this thread if contract terms or dates change.",
+        ]
+    return [
+        "See attached timeline for complete milestone details.",
+        "Reply with any schedule changes so Maverick can re-issue updates.",
+    ]
+
+
+def build_timeline_email_recipients(transaction, buyer_email="", seller_email=""):
+    """Build email recipient list for timeline distribution."""
+    email_map = fetch_client_email_map(transaction["id"])
+    resolved_buyer_email = normalize_email(buyer_email) or email_map.get("buyer") or ""
+    resolved_seller_email = normalize_email(seller_email) or email_map.get("seller") or ""
+
+    return [
+        {
+            "role": "buyer",
+            "name": transaction.get("buyer_name") or "Buyer",
+            "email": resolved_buyer_email,
+        },
+        {
+            "role": "seller",
+            "name": transaction.get("seller_name") or "Seller",
+            "email": resolved_seller_email,
+        },
+        {
+            "role": "agent",
+            "name": transaction.get("agent_name") or "Agent",
+            "email": normalize_email(transaction.get("agent_email")),
+        },
+        {
+            "role": "lender",
+            "name": transaction.get("lender_name") or "Lender",
+            "email": normalize_email(transaction.get("lender_email")),
+        },
+        {
+            "role": "title",
+            "name": transaction.get("title_company") or "Title Company",
+            "email": normalize_email(transaction.get("title_officer_email")),
+        },
+    ]
+
+
+def send_timeline_packet_emails(transaction, timeline_artifact, trigger_reason, buyer_email="", seller_email=""):
+    """Distribute timeline PDF to buyer/seller/agent/lender/title audiences."""
+    property_address = transaction.get("property_address") or "your transaction"
+    recipients = build_timeline_email_recipients(transaction, buyer_email=buyer_email, seller_email=seller_email)
+    sent_recipients = []
+
+    is_update = trigger_reason not in {"approved", "manual_refresh"}
+    subject_prefix = "Updated transaction timeline" if is_update else "Your transaction timeline"
+
+    for recipient in recipients:
+        role = recipient["role"]
+        to_email = normalize_email(recipient.get("email"))
+        contact_name = recipient.get("name") or role.title()
+        if not to_email or not is_email_valid(to_email):
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'email', %s, %s, %s, %s)
+                """,
+                (
+                    transaction["id"],
+                    role,
+                    contact_name,
+                    "Timeline packet email skipped (missing recipient email)",
+                    f"trigger={trigger_reason}",
+                ),
+            )
+            continue
+
+        template_context = {
+            "recipient_name": contact_name,
+            "recipient_role": role.title(),
+            "property_address": property_address,
+            "transaction_id": transaction["id"],
+            "effective_date": format_date_label(transaction.get("effective_date")),
+            "closing_date": format_date_label(transaction.get("closing_date")),
+            "message_line": (
+                f"{subject_prefix} for {property_address} is ready! "
+                "This shows all important dates and deadlines. We'll send reminders as dates approach. "
+                "Questions? Reply to this email or call Margaret at "
+                f"{normalize_phone(os.getenv('MARGARET_PHONE')) or 'our support line'}."
+            ),
+            "timeline_url": timeline_artifact.get("timeline_url"),
+            "portal_link": timeline_artifact.get("portal_link"),
+            "focus_points": timeline_recipient_focus_points(role),
+            "trigger_reason": trigger_reason.replace("_", " ").title(),
+        }
+        if has_request_context():
+            html_body = render_template("emails/timeline_packet_notification.html", data=template_context)
+        else:
+            with app.app_context():
+                html_body = render_template("emails/timeline_packet_notification.html", data=template_context)
+
+        message_id = send_html_email(
+            to_email=to_email,
+            subject=f"Maverick TC - {subject_prefix.title()} - {property_address}",
+            html_body=html_body,
+            attachments=[
+                {
+                    "filename": timeline_artifact.get("filename") or "timeline_packet.pdf",
+                    "content_type": "application/pdf",
+                    "data": timeline_artifact.get("pdf_bytes"),
+                }
+            ],
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'email', %s, %s, %s, %s)
+            """,
+            (
+                transaction["id"],
+                role,
+                contact_name,
+                "Timeline packet email sent" if message_id else "Timeline packet email failed",
+                f"to={to_email} trigger={trigger_reason} message_id={message_id or 'failed'}",
+            ),
+        )
+        if message_id:
+            sent_recipients.append({"role": role, "email": to_email, "name": contact_name, "message_id": message_id})
+
+    return sent_recipients
+
+
+def create_vendor_coordination_task(transaction_id, vendor_type, property_address, rush_service=False):
+    """Create vendor response confirmation task for outreach workflows."""
+    task_descriptions = {
+        "inspector": "Confirm inspection appointment with vendor",
+        "appraiser": "Confirm appraiser access appointment with vendor",
+        "survey": "Confirm survey scheduling with vendor",
+        "title": "Confirm title file opened and closing appointment",
+    }
+    description = task_descriptions.get(vendor_type, "Confirm vendor scheduling update")
+    due_days = 1 if rush_service else 2
+    due_date = date.today() + timedelta(days=due_days)
+    rows = execute_query(
+        """
+        INSERT INTO tasks (
+            transaction_id, task_description, task_category, due_date,
+            priority, status, completed, display_order, notes, created_at
+        )
+        VALUES (%s, %s, 'coordination', %s, %s, 'pending', FALSE, 45, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            transaction_id,
+            description,
+            due_date,
+            "high",
+            f"Auto-created vendor outreach task for {vendor_type} on {property_address}",
+        ),
+        fetch=True,
+    ) or []
+    return rows[0]["id"] if rows else None
+
+
+def build_vendor_catalog(transaction):
+    """Build vendor outreach recipient entries from env + transaction metadata."""
+    catalog = []
+    vendor_rows = [
+        {
+            "vendor_type": "inspector",
+            "vendor_name": (os.getenv("INSPECTOR_NAME") or "Inspection Team").strip(),
+            "vendor_email": normalize_email(os.getenv("INSPECTOR_EMAIL")),
+            "template_name": "emails/vendor_inspector_request.html",
+            "calendly_url": (os.getenv("INSPECTOR_CALENDLY_URL") or "").strip(),
+        },
+        {
+            "vendor_type": "appraiser",
+            "vendor_name": (os.getenv("APPRAISER_NAME") or "Appraisal Team").strip(),
+            "vendor_email": normalize_email(os.getenv("APPRAISER_EMAIL")),
+            "template_name": "emails/vendor_appraiser_request.html",
+            "calendly_url": (os.getenv("APPRAISER_CALENDLY_URL") or "").strip(),
+        },
+        {
+            "vendor_type": "survey",
+            "vendor_name": (os.getenv("SURVEY_COMPANY_NAME") or "Survey Team").strip(),
+            "vendor_email": normalize_email(os.getenv("SURVEY_COMPANY_EMAIL")),
+            "template_name": "emails/vendor_survey_request.html",
+            "calendly_url": (os.getenv("SURVEY_CALENDLY_URL") or "").strip(),
+        },
+        {
+            "vendor_type": "title",
+            "vendor_name": (transaction.get("title_company") or os.getenv("TITLE_COORDINATION_NAME") or "Title Team").strip(),
+            "vendor_email": (
+                normalize_email(transaction.get("title_officer_email"))
+                or normalize_email(os.getenv("TITLE_COORDINATION_EMAIL"))
+            ),
+            "template_name": "emails/vendor_title_file_notice.html",
+            "calendly_url": (os.getenv("TITLE_CALENDLY_URL") or "").strip(),
+        },
+    ]
+    for item in vendor_rows:
+        if item["vendor_email"] and is_email_valid(item["vendor_email"]):
+            catalog.append(item)
+    return catalog
+
+
+def create_vendor_outreach_record(transaction_id, vendor_type, vendor_name, vendor_email, related_task_id=None):
+    """Insert one vendor outreach row and return the generated token."""
+    ensure_vendor_outreach_table()
+    rows = execute_query(
+        """
+        INSERT INTO vendor_outreach (
+            transaction_id, vendor_type, vendor_name, vendor_email, outreach_token,
+            related_task_id, sent_at, created_at, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s::uuid, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING id, outreach_token::text AS outreach_token
+        """,
+        (transaction_id, vendor_type, vendor_name, vendor_email, str(uuid4()), related_task_id),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def build_vendor_links(vendor_row, transaction):
+    """Build scheduling and response links for vendor emails."""
+    confirm_link = f"{app_base_url()}/vendor/outreach/{vendor_row['outreach_token']}"
+    calendly_url = (vendor_row.get("calendly_url") or "").strip()
+    if not calendly_url:
+        return {"confirm_link": confirm_link, "scheduling_link": confirm_link}
+
+    query = urlencode(
+        {
+            "a1": transaction.get("property_address") or "",
+            "a2": f"TX-{transaction['id']}",
+            "a3": "Rush" if transaction.get("rush_service") else "Standard",
+            "a4": confirm_link,
+        }
+    )
+    separator = "&" if "?" in calendly_url else "?"
+    return {"confirm_link": confirm_link, "scheduling_link": f"{calendly_url}{separator}{query}"}
+
+
+def send_vendor_outreach(transaction, timeline_artifact, trigger_reason):
+    """Send scheduling request emails to inspector/appraiser/survey/title vendors."""
+    catalog = build_vendor_catalog(transaction)
+    if not catalog:
+        return []
+
+    sent = []
+    for vendor in catalog:
+        existing_rows = execute_query(
+            """
+            SELECT id
+            FROM vendor_outreach
+            WHERE transaction_id = %s
+              AND vendor_type = %s
+            ORDER BY sent_at DESC
+            LIMIT 1
+            """,
+            (transaction["id"], vendor["vendor_type"]),
+            fetch=True,
+        ) or []
+        if existing_rows and trigger_reason == "approved":
+            continue
+
+        related_task_id = create_vendor_coordination_task(
+            transaction_id=transaction["id"],
+            vendor_type=vendor["vendor_type"],
+            property_address=transaction.get("property_address") or "this property",
+            rush_service=bool(transaction.get("rush_service")),
+        )
+        outreach_row = create_vendor_outreach_record(
+            transaction_id=transaction["id"],
+            vendor_type=vendor["vendor_type"],
+            vendor_name=vendor["vendor_name"],
+            vendor_email=vendor["vendor_email"],
+            related_task_id=related_task_id,
+        )
+        if not outreach_row:
+            continue
+
+        merged_vendor = dict(vendor)
+        merged_vendor.update(outreach_row)
+        links = build_vendor_links(merged_vendor, transaction)
+        context = {
+            "vendor_name": vendor["vendor_name"],
+            "property_address": transaction.get("property_address"),
+            "transaction_id": transaction["id"],
+            "urgency_label": "RUSH - response requested within 24 hours"
+            if transaction.get("rush_service")
+            else "Standard - response requested within 24 hours",
+            "scheduling_link": links["scheduling_link"],
+            "confirm_link": links["confirm_link"],
+            "timeline_url": timeline_artifact.get("timeline_url"),
+            "portal_link": timeline_artifact.get("portal_link"),
+            "margaret_email": normalize_email(os.getenv("MARGARET_EMAIL")),
+            "margaret_phone": normalize_phone(os.getenv("MARGARET_PHONE")),
+            "trigger_reason": trigger_reason.replace("_", " ").title(),
+        }
+        if has_request_context():
+            html_body = render_template(vendor["template_name"], data=context)
+        else:
+            with app.app_context():
+                html_body = render_template(vendor["template_name"], data=context)
+
+        message_id = send_html_email(
+            to_email=vendor["vendor_email"],
+            subject=f"Maverick TC - {vendor['vendor_type'].title()} Coordination - {transaction.get('property_address')}",
+            html_body=html_body,
+        )
+        execute_query(
+            """
+            UPDATE vendor_outreach
+            SET last_message_id = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (message_id or "failed", outreach_row["id"]),
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'email', %s, %s, %s, %s)
+            """,
+            (
+                transaction["id"],
+                vendor["vendor_type"],
+                vendor["vendor_name"],
+                "Vendor outreach email sent" if message_id else "Vendor outreach email failed",
+                f"to={vendor['vendor_email']} message_id={message_id or 'failed'}",
+            ),
+        )
+        if message_id:
+            sent.append(
+                {
+                    "vendor_type": vendor["vendor_type"],
+                    "vendor_email": vendor["vendor_email"],
+                    "message_id": message_id,
+                    "outreach_id": outreach_row["id"],
+                }
+            )
+    return sent
+
+
+def dispatch_timeline_packet(
+    transaction_id,
+    trigger_reason="timeline_updated",
+    force=False,
+    buyer_email="",
+    seller_email="",
+    send_vendor_requests=False,
+):
+    """Generate/send timeline packet and optionally vendor outreach notifications."""
+    ensure_timeline_automation_tables()
+    transaction = fetch_timeline_transaction(transaction_id)
+    if not transaction:
+        return {"success": False, "error": "transaction_not_found"}
+
+    status = (transaction.get("status") or "").upper()
+    if status not in {"ACTIVE", "COMPLETED"}:
+        return {"success": False, "error": "transaction_not_active"}
+
+    deadline_rows = fetch_timeline_deadlines(transaction_id)
+    repair_tasks = fetch_repair_timeline_tasks(transaction_id)
+    snapshot = build_timeline_snapshot(transaction, deadline_rows, repair_tasks)
+    signature = timeline_signature(snapshot)
+    current_packet = fetch_timeline_packet_row(transaction_id)
+    previous_snapshot = (current_packet or {}).get("timeline_snapshot") or {}
+    resolved_trigger = infer_timeline_trigger(previous_snapshot, snapshot, trigger_reason)
+
+    if current_packet and current_packet.get("timeline_signature") == signature and not force:
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "no_changes",
+            "trigger_reason": resolved_trigger,
+            "timeline_s3_key": current_packet.get("timeline_s3_key"),
+        }
+
+    timeline_artifact = generate_timeline_pdf_artifact(
+        transaction=transaction,
+        deadline_rows=deadline_rows,
+        trigger_reason=resolved_trigger,
+        buyer_email=buyer_email,
+        seller_email=seller_email,
+    )
+    if not timeline_artifact.get("success"):
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', 'system', 'timeline', %s, %s)
+            """,
+            (
+                transaction_id,
+                "Timeline packet generation failed",
+                f"reason={timeline_artifact.get('error')}",
+            ),
+        )
+        return {"success": False, "error": timeline_artifact.get("error")}
+
+    sent_recipients = send_timeline_packet_emails(
+        transaction=transaction,
+        timeline_artifact=timeline_artifact,
+        trigger_reason=resolved_trigger,
+        buyer_email=buyer_email,
+        seller_email=seller_email,
+    )
+    vendor_results = []
+    if send_vendor_requests:
+        vendor_results = send_vendor_outreach(transaction, timeline_artifact, resolved_trigger)
+
+    upsert_timeline_packet_row(
+        transaction_id=transaction_id,
+        s3_key=timeline_artifact.get("s3_key"),
+        filename=timeline_artifact.get("filename"),
+        signature=signature,
+        snapshot=snapshot,
+        sent_recipients=sent_recipients,
+        trigger_reason=resolved_trigger,
+    )
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'timeline', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Timeline packet generated and distributed",
+            (
+                f"trigger={resolved_trigger} recipients={len(sent_recipients)} "
+                f"vendors_notified={len(vendor_results)} s3_key={timeline_artifact.get('s3_key')}"
+            ),
+        ),
+    )
+    return {
+        "success": True,
+        "skipped": False,
+        "trigger_reason": resolved_trigger,
+        "timeline_s3_key": timeline_artifact.get("s3_key"),
+        "timeline_url": timeline_artifact.get("timeline_url"),
+        "recipients_sent": sent_recipients,
+        "vendors_sent": vendor_results,
+    }
+
+
+def ensure_vendor_followup_tasks():
+    """Create 24h no-response follow-up tasks for vendor outreach records."""
+    ensure_vendor_outreach_table()
+    rows = execute_query(
+        """
+        SELECT vo.id, vo.transaction_id, vo.vendor_type, vo.vendor_name, vo.followup_task_id,
+               t.property_address
+        FROM vendor_outreach vo
+        JOIN transactions t ON t.id = vo.transaction_id
+        WHERE vo.responded_at IS NULL
+          AND vo.followup_task_id IS NULL
+          AND vo.sent_at <= (CURRENT_TIMESTAMP - INTERVAL '24 hours')
+          AND t.status = 'ACTIVE'
+        ORDER BY vo.sent_at ASC
+        """,
+        fetch=True,
+    ) or []
+    created_count = 0
+    for row in rows:
+        task_rows = execute_query(
+            """
+            INSERT INTO tasks (
+                transaction_id, task_description, task_category, due_date,
+                priority, status, completed, display_order, notes, created_at
+            )
+            VALUES (%s, %s, 'coordination', %s, 'high', 'pending', FALSE, 46, %s, CURRENT_TIMESTAMP)
+            RETURNING id
+            """,
+            (
+                row["transaction_id"],
+                f"Follow up with {row.get('vendor_name') or row.get('vendor_type')} for appointment confirmation",
+                date.today(),
+                f"No vendor response within 24h for {row.get('property_address')}",
+            ),
+            fetch=True,
+        ) or []
+        if not task_rows:
+            continue
+        followup_task_id = task_rows[0]["id"]
+        execute_query(
+            """
+            UPDATE vendor_outreach
+            SET followup_task_id = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (followup_task_id, row["id"]),
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', 'system', 'vendor_outreach', %s, %s)
+            """,
+            (
+                row["transaction_id"],
+                "Vendor follow-up task auto-created",
+                f"vendor_type={row.get('vendor_type')} task_id={followup_task_id}",
+            ),
+        )
+        created_count += 1
+    return created_count
+
+
+def auto_dispatch_timeline_updates(limit=40):
+    """Auto-resend timeline packets when date/repair signatures shift."""
+    ensure_timeline_packets_table()
+    rows = execute_query(
+        """
+        SELECT t.id
+        FROM transactions t
+        JOIN timeline_packets tp ON tp.transaction_id = t.id
+        WHERE t.status = 'ACTIVE'
+        ORDER BY t.updated_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+        fetch=True,
+    ) or []
+    sent_updates = 0
+    for row in rows:
+        result = dispatch_timeline_packet(
+            transaction_id=row["id"],
+            trigger_reason="timeline_updated",
+            force=False,
+            send_vendor_requests=False,
+        )
+        if result.get("success") and not result.get("skipped"):
+            sent_updates += 1
+    return sent_updates
+
+
+def maybe_dispatch_timeline_update_for_repairs(transaction_id):
+    """Trigger non-blocking timeline update when repair timeline tasks are added."""
+    try:
+        dispatch_timeline_packet(
+            transaction_id=transaction_id,
+            trigger_reason="repair_timeline_added",
+            force=False,
+            send_vendor_requests=False,
+        )
+    except Exception as exc:
+        print(f"Repair timeline dispatch error (txn#{transaction_id}): {exc}")
 
 
 def build_client_portal_context(access_token):
@@ -2904,6 +4004,8 @@ def mobile_dashboard():
 def mobile_daily_checklist():
     """Return today's checklist as JSON for mobile."""
     try:
+        ensure_vendor_followup_tasks()
+        auto_dispatch_timeline_updates(limit=40)
         today = date.today()
         call_window_start = today - timedelta(days=1)
         call_window_end = today + timedelta(days=3)
@@ -3737,6 +4839,8 @@ def toggle_call_made(deadline_id):
 def tc_daily_checklist():
     """Render an auto-generated checklist for today's critical work."""
     try:
+        ensure_vendor_followup_tasks()
+        auto_dispatch_timeline_updates(limit=40)
         today = date.today()
         call_window_start = today - timedelta(days=1)
         call_window_end = today + timedelta(days=3)
@@ -4666,6 +5770,27 @@ def approve_transaction(transaction_id):
         seller_email=seller_email or None,
     )
 
+    timeline_result = dispatch_timeline_packet(
+        transaction_id=transaction_id,
+        trigger_reason="approved",
+        force=True,
+        buyer_email=buyer_email or "",
+        seller_email=seller_email or "",
+        send_vendor_requests=True,
+    )
+    if not timeline_result.get("success"):
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', 'system', 'timeline', %s, %s)
+            """,
+            (
+                transaction_id,
+                "Timeline packet dispatch failed on approval",
+                f"error={timeline_result.get('error', 'unknown')}",
+            ),
+        )
+
     return redirect(url_for("tc_dashboard"))
 
 
@@ -5004,6 +6129,129 @@ def client_portal_upload(access_token):
         notice_type="success",
     )
     return redirect(redirect_url)
+
+
+@app.route("/vendor/outreach/<access_token>", methods=["GET", "POST"])
+def vendor_outreach_response(access_token):
+    """Public response endpoint for vendor confirmation links."""
+    ensure_timeline_automation_tables()
+    outreach = fetch_vendor_outreach_by_token(access_token)
+    if not outreach:
+        return "This vendor response link is invalid or expired.", 404
+
+    if request.method == "GET":
+        return render_template(
+            "vendor_outreach_response.html",
+            outreach=outreach,
+            submitted=False,
+            success=False,
+            appointment_label="",
+        )
+
+    response_status = (request.form.get("response_status") or "confirmed").strip().lower()
+    if response_status not in {"confirmed", "needs_call", "unable"}:
+        response_status = "confirmed"
+    appointment_at = parse_vendor_datetime(request.form.get("appointment_at"))
+    notes = (request.form.get("notes") or "").strip()[:1200]
+
+    execute_query(
+        """
+        UPDATE vendor_outreach
+        SET responded_at = CURRENT_TIMESTAMP,
+            response_status = %s,
+            appointment_at = %s,
+            appointment_notes = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (response_status, appointment_at, notes or None, outreach["id"]),
+    )
+
+    calendar_event_id = None
+    if appointment_at:
+        calendar_event_id = execute_insert(
+            """
+            INSERT INTO calendar_events (
+                transaction_id, vendor_outreach_id, event_type, title, starts_at, ends_at, details, created_at
+            )
+            VALUES (%s, %s, 'vendor_appointment', %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING id
+            """,
+            (
+                outreach["transaction_id"],
+                outreach["id"],
+                f"{(outreach.get('vendor_type') or 'vendor').title()} appointment - {outreach.get('property_address')}",
+                appointment_at,
+                appointment_at + timedelta(minutes=45),
+                notes or "Appointment confirmed by vendor via secure link.",
+            ),
+        )
+
+    completed_task_ids = complete_vendor_response_tasks(
+        [outreach.get("related_task_id"), outreach.get("followup_task_id")],
+        appointment_at=appointment_at,
+        notes=notes,
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', %s, %s, %s, %s)
+        """,
+        (
+            outreach["transaction_id"],
+            outreach.get("vendor_type") or "vendor",
+            outreach.get("vendor_name") or "Vendor",
+            "Vendor responded via secure outreach link",
+            (
+                f"status={response_status} appointment={appointment_at.isoformat() if appointment_at else 'none'} "
+                f"calendar_event_id={calendar_event_id or 'n/a'} completed_tasks={','.join(str(task_id) for task_id in completed_task_ids) or 'none'}"
+            ),
+        ),
+    )
+
+    refreshed = fetch_vendor_outreach_by_token(access_token) or outreach
+    appointment_label = appointment_at.strftime("%b %d, %Y %I:%M %p") if appointment_at else ""
+    return render_template(
+        "vendor_outreach_response.html",
+        outreach=refreshed,
+        submitted=True,
+        success=True,
+        appointment_label=appointment_label,
+    )
+
+
+@app.route("/tc/transaction/<int:transaction_id>/resend-timeline", methods=["POST"])
+@login_required
+def resend_timeline_packet(transaction_id):
+    """Allow TC to force a timeline packet refresh/re-send."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+    if (transaction.get("status") or "").upper() not in {"ACTIVE", "COMPLETED"}:
+        return "Timeline resend is only available for active/completed transactions.", 400
+
+    result = dispatch_timeline_packet(
+        transaction_id=transaction_id,
+        trigger_reason="manual_refresh",
+        force=True,
+        send_vendor_requests=False,
+    )
+    if not result.get("success"):
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Timeline resend failed. Please retry.",
+            doc_notice_type="error",
+        )
+        return redirect(redirect_url)
+
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice="Timeline packet re-sent successfully.",
+        doc_notice_type="success",
+    )
+    return redirect(f"{redirect_url}#review-details")
 
 
 @app.route("/tc/transaction/<int:transaction_id>/document-analysis")

@@ -546,6 +546,9 @@
             <form method="post" action="{{ url_for('generate_client_portal_link', transaction_id=transaction.id) }}">
                 <button type="submit" class="btn btn-secondary action-btn">Generate Client Portal Link</button>
             </form>
+            <form method="post" action="{{ url_for('resend_timeline_packet', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Re-send Timeline Packet</button>
+            </form>
             <div class="portal-links-box">
                 <p><strong>Buyer Portal:</strong>
                     {% if client_portal_links.buyer.exists %}

@@ -109,6 +109,31 @@ When a new contract arrives:
 
 The **Approve & Activate Transaction** button stays disabled until all required extraction fields are verified.
 
+### Automatic Timeline Packet + Distribution (After Approval)
+
+Immediately after you approve a transaction, Maverick now handles timeline distribution automatically:
+
+1. Generates a professional PDF timeline packet with:
+   - All contract deadlines
+   - Visual timeline/gantt-style chart
+   - Weekly expectations
+   - Payment/document milestones
+   - Inspection/appraisal windows
+   - Moving checklist
+   - Party contact info + Margaret contact info
+   - Client upload portal link
+2. Emails the packet to:
+   - Buyer
+   - Seller
+   - Agent
+   - Lender
+   - Title company
+3. Uses update-aware messaging if dates/timeline shift later.
+
+### Timeline Re-Send
+
+If needed, use **Re-send Timeline Packet** from the transaction Actions card.
+
 ### If Contract Has Errors
 
 - Do not approve yet.
@@ -146,6 +171,14 @@ Common issues:
 - Clear overdue tasks first.
 - Move due-today tasks before noon.
 - Capture blockers in notes and communication log.
+
+### Vendor Follow-Up Tasks (Auto-Created)
+
+When vendor outreach is sent (inspector/appraiser/survey/title), Maverick tracks responses.
+If no response is received within 24 hours, a follow-up task is auto-added to your checklist.
+
+- Treat these as high-priority coordination tasks.
+- Update/complete once vendor confirms scheduling.
 
 ---
 
@@ -199,6 +232,10 @@ When HOA, inspection, or appraisal PDFs are uploaded, Maverick auto-analyzes the
 6. If needed, use **Override Task (Mark N/A)**.
 7. Add notes and click **Mark as Reviewed**.
 
+### Repair Timeline Update Trigger
+
+If inspection/appraisal findings generate repair-related tasks, Maverick can issue updated timeline packets to keep parties aligned on new timeline risk.
+
 ### Smart Alert Rules
 
 - HOA special assessment over $3,000 -> immediate SMS alert
@@ -227,6 +264,14 @@ Log:
 Do not log:
 - Trivial acknowledgements
 - Automated system messages
+
+### Automated Communication Notes You Will See
+
+You will now see system-created entries for:
+- Timeline packet generated/sent
+- Vendor outreach email sent/failed
+- Vendor secure-link response received
+- Auto follow-up task creation after 24h no response
 
 ### Logging Best Practice
 
@@ -280,6 +325,24 @@ Buyer and seller portal links let clients:
 2. After activation, use **Generate Client Portal Link** on the transaction page.
 3. Confirm links appear in the Actions card.
 4. Re-send links if clients report they cannot find the message.
+
+### Vendor Coordination Workflow (New)
+
+After approval, Maverick sends outreach emails to configured vendors:
+- Inspector
+- Appraiser
+- Survey team
+- Title coordinator
+
+Each outreach includes:
+- Scheduling link (e.g., Calendly if configured)
+- Secure confirmation link
+- Direct reply path to Margaret (email/phone)
+
+When vendor confirms via link:
+- Related coordination task is auto-marked complete
+- Appointment can be captured as a calendar event
+- Communication log is updated automatically
 
 ### Best Practices
 
