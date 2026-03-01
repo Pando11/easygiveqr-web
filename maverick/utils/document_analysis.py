@@ -249,6 +249,8 @@ def analyze_inspection_report(pdf_path):
         "electrical_issues": r"([^\n\.]{0,90}(?:electric|wiring|panel|outlet)[^\n\.]{0,160})",
         "foundation_issues": r"([^\n\.]{0,90}(?:foundation|crack|settlement|structural)[^\n\.]{0,160})",
         "estimated_costs": r"([^\n\.]{0,90}\$\s?\d[\d,]*(?:\.\d{1,2})?\s*(?:to repair|estimate|cost)[^\n\.]{0,80})",
+        "year_built": r"([^\n\.]{0,80}(?:year built|built in)\s*[:\-]?\s*(?:19|20)\d{2}[^\n\.]{0,40})",
+        "renovation_signals": r"([^\n\.]{0,90}(?:renovat|updated|remodel|new roof|new hvac|new plumbing)[^\n\.]{0,120})",
     }
 
     major_defects_matches = _collect_pattern_matches(method_texts, patterns["major_defects"])
@@ -259,6 +261,8 @@ def analyze_inspection_report(pdf_path):
     electrical_matches = _collect_pattern_matches(method_texts, patterns["electrical_issues"])
     foundation_matches = _collect_pattern_matches(method_texts, patterns["foundation_issues"])
     estimate_matches = _collect_pattern_matches(method_texts, patterns["estimated_costs"])
+    year_built_matches = _collect_pattern_matches(method_texts, patterns["year_built"])
+    renovation_matches = _collect_pattern_matches(method_texts, patterns["renovation_signals"])
 
     major_defects = major_defects_matches["flagged"]
     repair_items = repair_matches["flagged"]
@@ -268,6 +272,23 @@ def analyze_inspection_report(pdf_path):
     electrical_issues = electrical_matches["flagged"]
     foundation_issues = foundation_matches["flagged"]
     estimate_items = estimate_matches["flagged"]
+    year_built_items = year_built_matches["flagged"]
+    renovation_items = renovation_matches["flagged"]
+
+    property_year_built = None
+    for item in year_built_items:
+        text = item.get("text", "")
+        match = re.search(r"(19\d{2}|20\d{2})", text)
+        if not match:
+            continue
+        try:
+            value = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 1900 <= value <= 2100:
+            property_year_built = value
+            break
+    has_recent_renovation = bool(renovation_items)
 
     safety_issues = []
     for item in major_defects + electrical_issues + foundation_issues:
@@ -339,6 +360,8 @@ def analyze_inspection_report(pdf_path):
         + electrical_issues
         + foundation_issues
         + estimate_items
+        + year_built_items
+        + renovation_items
     )
 
     return {
@@ -351,6 +374,10 @@ def analyze_inspection_report(pdf_path):
         "foundation_issues": foundation_issues,
         "estimated_repair_cost": estimated_repair_cost,
         "estimated_cost_evidence": estimate_items,
+        "property_year_built": property_year_built,
+        "year_built_evidence": year_built_items,
+        "has_recent_renovation": has_recent_renovation,
+        "renovation_evidence": renovation_items,
         "safety_issues": safety_issues,
         "action_items": action_items,
         "confidence_summary": _confidence_summary(all_items),
@@ -363,6 +390,8 @@ def analyze_inspection_report(pdf_path):
             + electrical_matches["ignored_low_confidence_count"]
             + foundation_matches["ignored_low_confidence_count"]
             + estimate_matches["ignored_low_confidence_count"]
+            + year_built_matches["ignored_low_confidence_count"]
+            + renovation_matches["ignored_low_confidence_count"]
         ),
         "method_errors": method_errors,
     }

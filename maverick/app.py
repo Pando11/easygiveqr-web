@@ -32,6 +32,16 @@ from utils.contract_extraction import (
     extract_via_pypdf,
 )
 from utils.document_analysis import analyze_appraisal, analyze_hoa_documents, analyze_inspection_report
+from utils.heads_up import (
+    HEADS_UP_PATTERN_META,
+    accept_heads_up_signal,
+    build_heads_up_report,
+    dismiss_heads_up_signal,
+    fetch_pattern_preferences,
+    refresh_heads_up_if_stale,
+    run_heads_up_monitor,
+    save_pattern_preference,
+)
 from utils.inbound_email import (
     classify_inbound_email,
     extract_email_address,
@@ -41,6 +51,22 @@ from utils.inbound_email import (
 from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document, upload_local_file
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 from utils.timeline_pdf import build_timeline_pdf
+from utils.vendor_automation import (
+    VENDOR_TYPES,
+    complete_vendor_followup_tasks,
+    create_vendor_contact,
+    ensure_vendor_automation_tables,
+    fetch_pending_vendor_responses,
+    fetch_vendor_contacts_with_performance,
+    log_vendor_outreach,
+    mark_vendor_outreach_scheduled,
+    normalize_vendor_type,
+    parse_schedule_datetime,
+    send_manual_vendor_follow_up,
+    send_vendor_requests,
+    set_vendor_contact_active,
+    update_vendor_contact,
+)
 
 load_dotenv()
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
@@ -2022,6 +2048,22 @@ def ensure_timeline_automation_tables():
     ensure_timeline_packets_table()
     ensure_vendor_outreach_table()
     ensure_calendar_events_table()
+    ensure_vendor_automation_tables()
+
+
+def log_system_error(component, error_text, transaction_id=None):
+    """Persist operational errors for later review without breaking UX flows."""
+    safe_component = (component or "system").strip()[:80] or "system"
+    safe_error = (error_text or "unknown error").strip()[:1800]
+    print(f"[{safe_component}] {safe_error}")
+    if transaction_id:
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', 'system', %s, 'Automation warning', %s)
+            """,
+            (transaction_id, safe_component, safe_error),
+        )
 
 
 def inbound_email_domain():
@@ -5145,6 +5187,7 @@ def mobile_daily_checklist():
     try:
         ensure_vendor_followup_tasks()
         auto_dispatch_timeline_updates(limit=40)
+        refresh_heads_up_if_stale(max_age_minutes=180, send_sms=False)
         today = date.today()
         call_window_start = today - timedelta(days=1)
         call_window_end = today + timedelta(days=3)
@@ -5563,6 +5606,11 @@ def mobile_log_communication(transaction_id):
 @login_required
 def tc_dashboard():
     """Render Margaret's main dashboard with status-grouped transactions."""
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
     needs_review = execute_query(
         """
         SELECT id, property_address, agent_name, agent_phone, created_at,
@@ -5652,16 +5700,301 @@ def tc_dashboard():
             bool(transaction.get("payment_closing_paid")),
         )
 
+    heads_up_report = {
+        "summary": {
+            "healthy_count": 0,
+            "watch_count": 0,
+            "urgent_count": 0,
+            "total_active": len(active_transactions),
+            "accepted_count": 0,
+            "dismissed_count": 0,
+        },
+        "open_watch": [],
+        "open_urgent": [],
+    }
+    try:
+        refresh_heads_up_if_stale(max_age_minutes=180, send_sms=False)
+        heads_up_report = build_heads_up_report()
+    except Exception as exc:
+        print(f"Heads Up refresh error: {exc}")
+
     tc_name = (session.get("tc_username") or "margaret").capitalize()
     current_date_label = datetime.now().strftime("%A, %B %d, %Y")
     return render_template(
         "tc_dashboard.html",
         tc_name=tc_name,
         current_date_label=current_date_label,
+        notice=notice,
+        notice_type=notice_type,
         needs_review=needs_review,
         active_transactions=active_transactions,
         completed_transactions=completed_transactions,
+        heads_up_summary=heads_up_report["summary"],
+        heads_up_watch=heads_up_report["open_watch"][:3],
+        heads_up_urgent=heads_up_report["open_urgent"][:3],
     )
+
+
+@app.route("/tc/heads-up")
+@login_required
+def tc_heads_up():
+    """Render daily Heads Up report with actionable suggestions."""
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    refresh_heads_up_if_stale(max_age_minutes=120, send_sms=False)
+    report = build_heads_up_report()
+    preferences = fetch_pattern_preferences()
+    pattern_rows = []
+    for pattern_key, meta in HEADS_UP_PATTERN_META.items():
+        pref = preferences.get(pattern_key, {"always_alert": True, "auto_handle": False})
+        pattern_rows.append(
+            {
+                "pattern_key": pattern_key,
+                "label": meta.get("label") or pattern_key,
+                "description": meta.get("description") or "",
+                "always_alert": bool(pref.get("always_alert")),
+                "auto_handle": bool(pref.get("auto_handle")),
+            }
+        )
+
+    return render_template(
+        "tc_heads_up.html",
+        notice=notice,
+        notice_type=notice_type,
+        report=report,
+        pattern_rows=pattern_rows,
+    )
+
+
+@app.route("/tc/heads-up/refresh", methods=["POST"])
+@login_required
+def refresh_tc_heads_up():
+    """Force-refresh Heads Up monitor from TC UI."""
+    run_heads_up_monitor(send_sms=False)
+    redirect_url = url_for(
+        "tc_heads_up",
+        notice="Heads Up report refreshed.",
+        notice_type="success",
+    )
+    return redirect(redirect_url)
+
+
+@app.route("/tc/heads-up/signal/<int:signal_id>/accept", methods=["POST"])
+@login_required
+def accept_tc_heads_up_signal(signal_id):
+    """Accept one Heads Up suggestion (with optional edits)."""
+    suggestion_override = (request.form.get("suggestion") or "").strip()
+    task_id = accept_heads_up_signal(
+        signal_id=signal_id,
+        acted_by=session.get("tc_username", "margaret"),
+        suggestion_override=suggestion_override,
+        auto_handled=False,
+    )
+    if task_id is None:
+        redirect_url = url_for(
+            "tc_heads_up",
+            notice="Could not accept this suggestion (already dismissed/resolved or unavailable).",
+            notice_type="warning",
+        )
+        return redirect(redirect_url)
+
+    redirect_url = url_for(
+        "tc_heads_up",
+        notice=f"Suggestion accepted. Task #{task_id} created.",
+        notice_type="success",
+    )
+    return redirect(redirect_url)
+
+
+@app.route("/tc/heads-up/signal/<int:signal_id>/dismiss", methods=["POST"])
+@login_required
+def dismiss_tc_heads_up_signal(signal_id):
+    """Dismiss one Heads Up suggestion."""
+    notes = (request.form.get("dismissal_notes") or "").strip()
+    success = dismiss_heads_up_signal(
+        signal_id=signal_id,
+        dismissed_by=session.get("tc_username", "margaret"),
+        notes=notes,
+    )
+    redirect_url = url_for(
+        "tc_heads_up",
+        notice=("Suggestion dismissed." if success else "Suggestion could not be dismissed."),
+        notice_type=("success" if success else "warning"),
+    )
+    return redirect(redirect_url)
+
+
+@app.route("/tc/heads-up/preferences", methods=["POST"])
+@login_required
+def save_tc_heads_up_preferences():
+    """Save Heads Up preference toggles."""
+    pattern_key = (request.form.get("pattern_key") or "").strip()
+    always_alert = parse_bool_value(request.form.get("always_alert"), default=False)
+    auto_handle = parse_bool_value(request.form.get("auto_handle"), default=False)
+    ok = save_pattern_preference(
+        pattern_key=pattern_key,
+        always_alert=always_alert,
+        auto_handle=auto_handle,
+        updated_by=session.get("tc_username", "margaret"),
+    )
+    redirect_url = url_for(
+        "tc_heads_up",
+        notice=(
+            "Heads Up preference saved."
+            if ok
+            else "Invalid pattern key. Preference not saved."
+        ),
+        notice_type=("success" if ok else "error"),
+    )
+    return redirect(redirect_url)
+
+
+@app.route("/tc/vendors", methods=["GET", "POST"])
+@login_required
+def tc_vendors():
+    """Manage vendor directory, preferences, and performance metrics."""
+    ensure_vendor_automation_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        redirect_notice = ""
+        redirect_type = "success"
+
+        try:
+            if action == "add":
+                payload = {
+                    "vendor_type": normalize_vendor_type(request.form.get("vendor_type")),
+                    "company_name": request.form.get("company_name"),
+                    "contact_name": request.form.get("contact_name"),
+                    "email": request.form.get("email"),
+                    "phone": request.form.get("phone"),
+                    "scheduling_url": request.form.get("scheduling_url"),
+                    "service_area": request.form.get("service_area"),
+                    "preferred": parse_bool_value(request.form.get("preferred"), default=False),
+                    "active": parse_bool_value(request.form.get("active"), default=True),
+                    "notes": request.form.get("notes"),
+                }
+                if payload["vendor_type"] not in VENDOR_TYPES:
+                    redirect_notice = "Invalid vendor type."
+                    redirect_type = "error"
+                else:
+                    vendor_id = create_vendor_contact(payload)
+                    if vendor_id:
+                        redirect_notice = "Vendor contact added."
+                    else:
+                        redirect_notice = "Could not add vendor contact."
+                        redirect_type = "error"
+
+            elif action == "update":
+                vendor_id = parse_optional_int(request.form.get("vendor_id"))
+                if not vendor_id:
+                    redirect_notice = "Vendor ID missing."
+                    redirect_type = "error"
+                else:
+                    payload = {
+                        "vendor_type": normalize_vendor_type(request.form.get("vendor_type")),
+                        "company_name": request.form.get("company_name"),
+                        "contact_name": request.form.get("contact_name"),
+                        "email": request.form.get("email"),
+                        "phone": request.form.get("phone"),
+                        "scheduling_url": request.form.get("scheduling_url"),
+                        "service_area": request.form.get("service_area"),
+                        "preferred": parse_bool_value(request.form.get("preferred"), default=False),
+                        "active": parse_bool_value(request.form.get("active"), default=False),
+                        "notes": request.form.get("notes"),
+                    }
+                    if payload["vendor_type"] not in VENDOR_TYPES:
+                        redirect_notice = "Invalid vendor type."
+                        redirect_type = "error"
+                    else:
+                        ok = update_vendor_contact(vendor_id, payload)
+                        redirect_notice = "Vendor contact updated." if ok else "Could not update vendor contact."
+                        if not ok:
+                            redirect_type = "error"
+
+            elif action == "toggle_active":
+                vendor_id = parse_optional_int(request.form.get("vendor_id"))
+                active = parse_bool_value(request.form.get("active"), default=False)
+                if not vendor_id:
+                    redirect_notice = "Vendor ID missing."
+                    redirect_type = "error"
+                else:
+                    ok = set_vendor_contact_active(vendor_id, active)
+                    redirect_notice = (
+                        "Vendor marked active." if (ok and active) else
+                        ("Vendor marked inactive." if ok else "Could not update vendor status.")
+                    )
+                    if not ok:
+                        redirect_type = "error"
+            else:
+                redirect_notice = "Unknown vendor action."
+                redirect_type = "warning"
+
+        except Exception as exc:
+            log_system_error("vendor_management", str(exc))
+            redirect_notice = f"Vendor update failed: {str(exc)[:200]}"
+            redirect_type = "error"
+
+        return redirect(url_for("tc_vendors", notice=redirect_notice, notice_type=redirect_type))
+
+    vendors = fetch_vendor_contacts_with_performance()
+    grouped_vendors = {vendor_type: [] for vendor_type in VENDOR_TYPES}
+    for row in vendors:
+        vendor_type = normalize_vendor_type(row.get("vendor_type"))
+        if vendor_type not in grouped_vendors:
+            grouped_vendors[vendor_type] = []
+        grouped_vendors[vendor_type].append(row)
+
+    return render_template(
+        "tc_vendors.html",
+        notice=notice,
+        notice_type=notice_type,
+        grouped_vendors=grouped_vendors,
+        vendor_types=VENDOR_TYPES,
+    )
+
+
+@app.route("/tc/vendor-outreach/<int:outreach_id>/follow-up", methods=["POST"])
+@login_required
+def follow_up_vendor_outreach(outreach_id):
+    """Send manual follow-up email for one pending vendor outreach."""
+    result = send_manual_vendor_follow_up(
+        outreach_id=outreach_id,
+        requested_by=session.get("tc_username", "margaret"),
+    )
+    notice = "Follow-up email sent."
+    notice_type = "success"
+    if not result.get("success"):
+        notice = f"Could not send follow-up: {result.get('error', 'unknown error')}"
+        notice_type = "warning"
+    return redirect(url_for("tc_daily_checklist", notice=notice, notice_type=notice_type))
+
+
+@app.route("/tc/vendor-outreach/<int:outreach_id>/mark-scheduled", methods=["POST"])
+@login_required
+def mark_vendor_outreach_scheduled_route(outreach_id):
+    """Manually mark one pending vendor outreach as scheduled."""
+    scheduled_input = (request.form.get("scheduled_date") or "").strip()
+    notes = (request.form.get("notes") or "").strip()
+    result = mark_vendor_outreach_scheduled(
+        outreach_id=outreach_id,
+        scheduled_datetime=scheduled_input or None,
+        notes=notes,
+        source="manual_checklist",
+    )
+    notice = "Vendor marked as scheduled."
+    notice_type = "success"
+    if not result.get("success"):
+        notice = f"Could not mark scheduled: {result.get('error', 'unknown error')}"
+        notice_type = "warning"
+    return redirect(url_for("tc_daily_checklist", notice=notice, notice_type=notice_type))
 
 
 @app.route("/tc/revenue")
@@ -5978,8 +6311,15 @@ def toggle_call_made(deadline_id):
 def tc_daily_checklist():
     """Render an auto-generated checklist for today's critical work."""
     try:
+        notice = (request.args.get("notice") or "").strip()
+        notice_type = (request.args.get("notice_type") or "success").strip().lower()
+        if notice_type not in {"success", "warning", "error"}:
+            notice_type = "success"
+
         ensure_vendor_followup_tasks()
+        ensure_vendor_automation_tables()
         auto_dispatch_timeline_updates(limit=40)
+        refresh_heads_up_if_stale(max_age_minutes=180, send_sms=False)
         today = date.today()
         call_window_start = today - timedelta(days=1)
         call_window_end = today + timedelta(days=3)
@@ -6086,21 +6426,32 @@ def tc_daily_checklist():
             deadline["days_until"] = (deadline["deadline_date"] - today).days if deadline.get("deadline_date") else None
             deadline["deadline_label"] = (deadline.get("deadline_type") or "").replace("_", " ").title()
 
+        pending_vendor_responses = fetch_pending_vendor_responses(limit=40)
         summary = {
-            "total_items": len(overdue_tasks) + len(due_today_tasks) + len(calls_to_make) + len(reminders_to_send),
+            "total_items": (
+                len(overdue_tasks)
+                + len(due_today_tasks)
+                + len(calls_to_make)
+                + len(reminders_to_send)
+                + len(pending_vendor_responses)
+            ),
             "overdue_count": len(overdue_tasks),
             "due_today_count": len(due_today_tasks),
             "calls_count": len(calls_to_make),
+            "vendor_response_count": len(pending_vendor_responses),
         }
 
         return render_template(
             "tc_daily_checklist.html",
             current_date_label=today.strftime("%A, %B %d, %Y"),
+            notice=notice,
+            notice_type=notice_type,
             summary=summary,
             calls_to_make=calls_to_make,
             overdue_tasks=overdue_tasks,
             due_today_tasks=due_today_tasks,
             reminders_to_send=reminders_to_send,
+            pending_vendor_responses=pending_vendor_responses,
         )
     except Exception as exc:
         print(f"Daily checklist error: {exc}")
@@ -6923,7 +7274,7 @@ def approve_transaction(transaction_id):
         force=True,
         buyer_email=buyer_email or "",
         seller_email=seller_email or "",
-        send_vendor_requests=True,
+        send_vendor_requests=False,
     )
     if not timeline_result.get("success"):
         execute_query(
@@ -6938,7 +7289,34 @@ def approve_transaction(transaction_id):
             ),
         )
 
-    return redirect(url_for("tc_dashboard"))
+    dashboard_notice = "Transaction approved."
+    dashboard_notice_type = "success"
+    try:
+        vendor_result = send_vendor_requests(transaction_id)
+        sent_count = vendor_result.get("sent_count", 0)
+        if sent_count > 0:
+            dashboard_notice = "✅ Transaction approved and vendor requests sent!"
+            dashboard_notice_type = "success"
+        else:
+            dashboard_notice = "⚠️ Transaction approved, but no active vendors were available to email."
+            dashboard_notice_type = "warning"
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', 'system', 'vendor_automation', %s, %s)
+            """,
+            (
+                transaction_id,
+                "Vendor scheduling automation run after approval",
+                f"sent_count={sent_count}",
+            ),
+        )
+    except Exception as exc:
+        dashboard_notice = f"⚠️ Transaction approved, but vendor emails failed: {str(exc)[:200]}"
+        dashboard_notice_type = "warning"
+        log_system_error("vendor_automation", str(exc), transaction_id)
+
+    return redirect(url_for("tc_dashboard", notice=dashboard_notice, notice_type=dashboard_notice_type))
 
 
 @app.route("/tc/transaction/<int:transaction_id>/upload-document", methods=["POST"])
@@ -7276,6 +7654,89 @@ def client_portal_upload(access_token):
         notice_type="success",
     )
     return redirect(redirect_url)
+
+
+@app.route("/vendor-response/<int:transaction_id>/<vendor_type>", methods=["POST"])
+def vendor_response_webhook(transaction_id, vendor_type):
+    """
+    Receive scheduling webhook callbacks from vendor booking tools.
+    """
+    ensure_vendor_automation_tables()
+    normalized_vendor_type = normalize_vendor_type(vendor_type)
+    if normalized_vendor_type not in VENDOR_TYPES:
+        return jsonify({"success": False, "error": "invalid_vendor_type"}), 400
+    if not get_transaction_or_none(transaction_id):
+        return jsonify({"success": False, "error": "transaction_not_found"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    scheduled_input = (
+        payload.get("scheduled_time")
+        or payload.get("scheduled_at")
+        or payload.get("start_time")
+        or payload.get("event_start")
+    )
+    if not scheduled_input and isinstance(payload.get("event"), dict):
+        scheduled_input = payload["event"].get("start_time")
+    scheduled_at = parse_schedule_datetime(scheduled_input)
+    scheduled_date = scheduled_at.date() if scheduled_at else date.today()
+    vendor_id = parse_optional_int(payload.get("vendor_id"))
+    notes = (
+        payload.get("notes")
+        or payload.get("message")
+        or payload.get("event_type")
+        or "Scheduling webhook received"
+    )
+    notes = str(notes).strip()[:1200]
+
+    log_vendor_outreach(
+        transaction_id=transaction_id,
+        vendor_type=normalized_vendor_type,
+        vendor_id=vendor_id,
+        outreach_type="scheduled",
+        response_received=True,
+        response_date=datetime.utcnow(),
+        scheduled_date=scheduled_date,
+        notes=notes,
+    )
+    completed_task_ids = complete_vendor_followup_tasks(transaction_id, normalized_vendor_type)
+
+    vendor_display = "Surveyor" if normalized_vendor_type == "surveyor" else normalized_vendor_type.title()
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', %s, 'vendor_webhook', %s, %s)
+        """,
+        (
+            transaction_id,
+            normalized_vendor_type,
+            "Vendor scheduling webhook received",
+            (
+                f"scheduled_date={scheduled_date.isoformat()} "
+                f"completed_tasks={','.join(str(task_id) for task_id in completed_task_ids) or 'none'}"
+            ),
+        ),
+    )
+
+    margaret_phone = os.getenv("MARGARET_PHONE")
+    if margaret_phone:
+        schedule_label = scheduled_date.strftime("%b %d")
+        send_sms(
+            margaret_phone,
+            (
+                f"✅ {vendor_display} scheduled for {schedule_label} "
+                f"- Transaction #{transaction_id}"
+            ),
+        )
+
+    return jsonify(
+        {
+            "success": True,
+            "transaction_id": transaction_id,
+            "vendor_type": normalized_vendor_type,
+            "scheduled_date": scheduled_date.isoformat(),
+            "completed_task_ids": completed_task_ids,
+        }
+    ), 200
 
 
 @app.route("/vendor/outreach/<access_token>", methods=["GET", "POST"])

@@ -11,9 +11,78 @@
     </div>
     <div class="header-actions">
         <a href="/tc/daily-checklist" class="btn">Today's Checklist</a>
+        <a href="/tc/vendors" class="btn btn-secondary">Vendors</a>
+        <a href="/tc/heads-up" class="btn">Heads Up</a>
         <a href="/tc/revenue" class="btn btn-secondary">Revenue</a>
         <a href="/tc/logout" class="btn btn-secondary">Logout</a>
     </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">
+    {{ notice }}
+</div>
+{% endif %}
+
+<section class="status-section section-blue">
+    <div class="section-title-row">
+        <h3>📊 Transaction Health Summary</h3>
+        <a href="/tc/heads-up" class="btn btn-small btn-secondary">Open Full Heads Up Report</a>
+    </div>
+    <div class="health-summary-grid">
+        <article class="health-card health-green">
+            <h4>🟢 Healthy</h4>
+            <p>{{ heads_up_summary.healthy_count }}</p>
+            <small>On track, no intervention needed</small>
+        </article>
+        <article class="health-card health-yellow">
+            <h4>🟡 Watch</h4>
+            <p>{{ heads_up_summary.watch_count }}</p>
+            <small>Need awareness + proactive follow-up</small>
+        </article>
+        <article class="health-card health-red">
+            <h4>🔴 Urgent</h4>
+            <p>{{ heads_up_summary.urgent_count }}</p>
+            <small>Immediate action recommended</small>
+        </article>
+    </div>
+
+    {% if heads_up_urgent or heads_up_watch %}
+    <div class="heads-up-items-grid">
+        {% if heads_up_urgent %}
+        <div class="heads-up-col">
+            <h4>Urgent Signals</h4>
+            <ul class="heads-up-list">
+                {% for item in heads_up_urgent %}
+                <li>
+                    <strong>{{ item.property_address }}</strong>
+                    <p>{{ item.headline }}</p>
+                    <small>💡 {{ item.suggestion }}</small>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        {% if heads_up_watch %}
+        <div class="heads-up-col">
+            <h4>Watch Signals</h4>
+            <ul class="heads-up-list">
+                {% for item in heads_up_watch %}
+                <li>
+                    <strong>{{ item.property_address }}</strong>
+                    <p>{{ item.headline }}</p>
+                    <small>💡 {{ item.suggestion }}</small>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        No watch/urgent signals currently. All active transactions are healthy.
+    </div>
+    {% endif %}
 </section>
 
 <section class="status-section section-red">
@@ -172,6 +241,11 @@
     background: linear-gradient(180deg, #fff, #f6fff9);
 }
 
+.section-blue {
+    border-left: 6px solid #2563eb;
+    background: linear-gradient(180deg, #fff, #f8fbff);
+}
+
 .section-title-row {
     display: flex;
     align-items: center;
@@ -216,6 +290,88 @@
 
 .cards-grid-compact {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.health-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.health-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    background: #fff;
+}
+
+.health-card h4 {
+    margin-bottom: 6px;
+}
+
+.health-card p {
+    font-size: 26px;
+    font-weight: 800;
+    margin-bottom: 4px;
+}
+
+.health-card small {
+    color: #475569;
+}
+
+.health-green {
+    border-left: 4px solid #16a34a;
+}
+
+.health-yellow {
+    border-left: 4px solid #d97706;
+}
+
+.health-red {
+    border-left: 4px solid #dc2626;
+}
+
+.heads-up-items-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.heads-up-col {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    background: #fff;
+}
+
+.heads-up-col h4 {
+    margin-bottom: 8px;
+    color: #0f172a;
+}
+
+.heads-up-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 10px;
+}
+
+.heads-up-list li {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    background: #f8fafc;
+}
+
+.heads-up-list p {
+    margin: 4px 0;
+    color: #1e293b;
+}
+
+.heads-up-list small {
+    color: #334155;
 }
 
 .txn-card {
@@ -353,7 +509,9 @@
 
 @media (max-width: 1024px) {
     .cards-grid,
-    .cards-grid-compact {
+    .cards-grid-compact,
+    .health-summary-grid,
+    .heads-up-items-grid {
         grid-template-columns: 1fr;
     }
 }

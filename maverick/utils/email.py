@@ -5,6 +5,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 from dotenv import load_dotenv
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 load_dotenv()
 
@@ -54,17 +55,17 @@ def _attach_files(message, attachments):
         message.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
 
 
-def send_html_email(to_email, subject, html_body, text_body=None, attachments=None):
+def send_html_email(to_email, subject, html_body, text_body=None, attachments=None, reply_to=None):
     """
     Send HTML email using SMTP settings from environment variables.
 
     Required env vars:
       - SMTP_HOST
       - SMTP_PORT (defaults to 587)
-      - SMTP_FROM_EMAIL (or SMTP_USERNAME fallback)
+      - SMTP_FROM_EMAIL (or SMTP_USERNAME/SMTP_USER fallback)
 
     Optional env vars:
-      - SMTP_USERNAME
+      - SMTP_USERNAME (or SMTP_USER alias)
       - SMTP_PASSWORD
       - SMTP_USE_TLS (default true)
       - SMTP_USE_SSL (default false)
@@ -76,9 +77,9 @@ def send_html_email(to_email, subject, html_body, text_body=None, attachments=No
     """
     smtp_host = (os.getenv("SMTP_HOST") or "").strip()
     smtp_port = int((os.getenv("SMTP_PORT") or "587").strip())
-    smtp_username = (os.getenv("SMTP_USERNAME") or "").strip()
+    smtp_username = ((os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER")) or "").strip()
     smtp_password = (os.getenv("SMTP_PASSWORD") or "").strip()
-    smtp_from_email = (os.getenv("SMTP_FROM_EMAIL") or smtp_username).strip()
+    smtp_from_email = (os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USER") or smtp_username).strip()
     smtp_from_name = (os.getenv("SMTP_FROM_NAME") or "Maverick TC").strip()
     use_tls = (os.getenv("SMTP_USE_TLS") or "true").strip().lower() in {"1", "true", "yes", "on"}
     use_ssl = (os.getenv("SMTP_USE_SSL") or "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -97,6 +98,8 @@ def send_html_email(to_email, subject, html_body, text_body=None, attachments=No
     message["Subject"] = subject
     message["From"] = f"{smtp_from_name} <{smtp_from_email}>"
     message["To"] = to_email
+    if reply_to:
+        message["Reply-To"] = reply_to
     message.set_content((text_body or _html_to_text(html_body) or "Maverick TC notification").strip())
     if html_body:
         message.add_alternative(html_body, subtype="html")
@@ -114,3 +117,49 @@ def send_html_email(to_email, subject, html_body, text_body=None, attachments=No
     except Exception as exc:
         print(f"Email send error to {to_email}: {exc}")
         return None
+
+
+def send_email(to, template, data, reply_to=None):
+    """
+    Render a Jinja template and send an HTML email via SMTP.
+
+    Args:
+        to: recipient email address
+        template: template path relative to maverick/templates
+        data: render context dict (can include "subject")
+        reply_to: optional reply-to email
+
+    Returns:
+        message-id string on success, None on failure
+    """
+    context = data or {}
+    subject = (context.get("subject") or "Maverick TC Notification").strip()
+    template_path = (template or "").strip()
+    if not template_path:
+        print("Email send skipped: template path is required.")
+        return None
+
+    templates_root = Path(__file__).resolve().parents[1] / "templates"
+    jinja_env = Environment(
+        loader=FileSystemLoader(str(templates_root)),
+        autoescape=select_autoescape(["html", "xml"]),
+    )
+
+    try:
+        html_template = jinja_env.get_template(template_path)
+    except Exception as exc:
+        print(f"Email template load error ({template_path}): {exc}")
+        return None
+
+    try:
+        html_content = html_template.render(**context)
+    except Exception as exc:
+        print(f"Email template render error ({template_path}): {exc}")
+        return None
+
+    return send_html_email(
+        to_email=to,
+        subject=subject,
+        html_body=html_content,
+        reply_to=reply_to,
+    )

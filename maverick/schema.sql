@@ -349,6 +349,22 @@ CREATE TABLE timeline_packets (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE vendor_contacts (
+    id SERIAL PRIMARY KEY,
+    vendor_type VARCHAR(50),
+    -- Types: inspector, appraiser, surveyor, title
+    company_name VARCHAR(200),
+    contact_name VARCHAR(200),
+    email VARCHAR(200),
+    phone VARCHAR(20),
+    scheduling_url TEXT,
+    service_area VARCHAR(150),
+    preferred BOOLEAN DEFAULT FALSE,
+    active BOOLEAN DEFAULT TRUE,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE vendor_outreach (
     id SERIAL PRIMARY KEY,
     transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
@@ -366,6 +382,20 @@ CREATE TABLE vendor_outreach (
     last_message_id VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE vendor_outreach_log (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    vendor_type VARCHAR(50),
+    vendor_id INT REFERENCES vendor_contacts(id) ON DELETE SET NULL,
+    outreach_type VARCHAR(50),
+    -- Types: email_sent, follow_up_sent, response_received, scheduled
+    outreach_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    response_received BOOLEAN DEFAULT FALSE,
+    response_date TIMESTAMP,
+    scheduled_date DATE,
+    notes TEXT
 );
 
 CREATE TABLE calendar_events (
@@ -457,6 +487,36 @@ CREATE TABLE deadline_nudges (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE heads_up_signals (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    pattern_key VARCHAR(80) NOT NULL,
+    severity VARCHAR(20) NOT NULL,
+    headline TEXT NOT NULL,
+    suggestion TEXT NOT NULL,
+    details JSONB,
+    signal_date DATE NOT NULL,
+    status VARCHAR(20) DEFAULT 'open',
+    modified_suggestion TEXT,
+    accepted_by VARCHAR(100),
+    accepted_at TIMESTAMP,
+    dismissed_by VARCHAR(100),
+    dismissed_at TIMESTAMP,
+    dismissal_notes TEXT,
+    auto_action_result TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE heads_up_preferences (
+    id SERIAL PRIMARY KEY,
+    pattern_key VARCHAR(80) UNIQUE NOT NULL,
+    always_alert BOOLEAN DEFAULT TRUE,
+    auto_handle BOOLEAN DEFAULT FALSE,
+    updated_by VARCHAR(100),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -485,8 +545,12 @@ CREATE UNIQUE INDEX idx_contract_extractions_txn_field ON contract_extractions(t
 CREATE INDEX idx_document_analysis_transaction ON document_analysis_results(transaction_id, analysis_date DESC);
 CREATE INDEX idx_document_analysis_document ON document_analysis_results(document_id);
 CREATE UNIQUE INDEX idx_timeline_packets_transaction ON timeline_packets(transaction_id);
+CREATE INDEX idx_vendor_contacts_type_active ON vendor_contacts(vendor_type, active, preferred);
+CREATE INDEX idx_vendor_contacts_company_name ON vendor_contacts(company_name);
 CREATE INDEX idx_vendor_outreach_transaction ON vendor_outreach(transaction_id, vendor_type, sent_at DESC);
 CREATE UNIQUE INDEX idx_vendor_outreach_token ON vendor_outreach(outreach_token);
+CREATE INDEX idx_vendor_outreach_log_pending ON vendor_outreach_log(outreach_type, response_received, outreach_date);
+CREATE INDEX idx_vendor_outreach_log_transaction ON vendor_outreach_log(transaction_id, outreach_date DESC);
 CREATE INDEX idx_calendar_events_transaction ON calendar_events(transaction_id, starts_at DESC);
 CREATE INDEX idx_inbound_email_messages_transaction ON inbound_email_messages(transaction_id, received_at DESC);
 CREATE UNIQUE INDEX idx_inbound_email_rules_txn_role ON inbound_email_rules(transaction_id, sender_role);
@@ -494,3 +558,6 @@ CREATE UNIQUE INDEX idx_transaction_risk_flags_txn ON transaction_risk_flags(tra
 CREATE INDEX idx_deadline_nudges_transaction ON deadline_nudges(transaction_id, due_date DESC);
 CREATE INDEX idx_deadline_nudges_phone ON deadline_nudges(target_phone, status, response_received_at);
 CREATE UNIQUE INDEX idx_deadline_nudges_unique_cycle ON deadline_nudges(transaction_id, nudge_key, due_date, target_party);
+CREATE UNIQUE INDEX idx_heads_up_signals_unique_daily ON heads_up_signals(transaction_id, pattern_key, signal_date);
+CREATE INDEX idx_heads_up_signals_date_status ON heads_up_signals(signal_date, status, severity);
+CREATE UNIQUE INDEX idx_heads_up_preferences_key ON heads_up_preferences(pattern_key);

@@ -1,0 +1,30 @@
+<html>
+<body style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.6;">
+    <p>Hi {{ vendor_name }},</p>
+
+    <p>New survey request for transaction #{{ transaction_id }}:</p>
+
+    <p>
+        <strong>Property:</strong> {{ property_address }}<br>
+        <strong>Preferred Date:</strong> {{ preferred_date or "As soon as possible" }}<br>
+        <strong>Buyer:</strong> {{ buyer_name or "Buyer" }}<br>
+        <strong>Buyer Agent:</strong> {{ agent_name or "Agent" }} - {{ agent_phone or "N/A" }}
+    </p>
+
+    {% if scheduling_url %}
+    <p>Schedule here: {{ scheduling_url }}?property={{ (property_address or "")|replace(" ", "%20") }}</p>
+    {% else %}
+    <p>Please reply with available times or call Margaret at {{ margaret_phone or "N/A" }}</p>
+    {% endif %}
+
+    {% if is_rush %}
+    <p><strong>⚠️ RUSH SERVICE REQUESTED - Please prioritize</strong></p>
+    {% endif %}
+
+    <p>
+        Thanks,<br>
+        Maverick Transaction Coordination<br>
+        On behalf of Margaret
+    </p>
+</body>
+</html>

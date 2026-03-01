@@ -16,6 +16,12 @@
     </div>
 </section>
 
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">
+    {{ notice }}
+</div>
+{% endif %}
+
 <section class="card summary-card">
     <div class="metric">
         <span class="metric-label">Total Items</span>
@@ -32,6 +38,10 @@
     <div class="metric metric-blue">
         <span class="metric-label">Calls to Make</span>
         <strong>{{ summary.calls_count }}</strong>
+    </div>
+    <div class="metric metric-purple">
+        <span class="metric-label">Vendor Responses Needed</span>
+        <strong>{{ summary.vendor_response_count }}</strong>
     </div>
 </section>
 
@@ -143,6 +153,45 @@
     <div class="empty-state">No reminders queued for today.</div>
     {% endif %}
 </section>
+
+<section class="card checklist-section" id="vendor-responses">
+    <div class="section-title">
+        <h3>📧 Vendor Responses Needed</h3>
+        <span class="count">{{ pending_vendor_responses|length }}</span>
+    </div>
+    {% if pending_vendor_responses %}
+    <div class="checklist-grid">
+        {% for outreach in pending_vendor_responses %}
+        <article class="check-item vendor-pending">
+            <p>
+                <strong>{{ outreach.vendor_type_label }}</strong> for
+                <a href="/tc/transaction/{{ outreach.transaction_id }}">{{ outreach.property_address }}</a>
+            </p>
+            <p class="subtle">
+                Sent {{ outreach.days_ago }} day{{ "" if outreach.days_ago == 1 else "s" }} ago - No response yet
+            </p>
+            <p class="subtle">
+                {{ outreach.contact_name or outreach.company_name or "Vendor" }}
+                {% if outreach.email %}
+                · {{ outreach.email }}
+                {% endif %}
+            </p>
+            <div class="vendor-actions no-print">
+                <form method="POST" action="/tc/vendor-outreach/{{ outreach.id }}/follow-up">
+                    <button type="submit" class="btn btn-secondary">Follow Up</button>
+                </form>
+                <form method="POST" action="/tc/vendor-outreach/{{ outreach.id }}/mark-scheduled" class="mark-scheduled-form">
+                    <input type="date" name="scheduled_date" aria-label="Scheduled date">
+                    <button type="submit" class="btn">Mark Scheduled</button>
+                </form>
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No pending vendor responses right now.</div>
+    {% endif %}
+</section>
 {% endblock %}
 
 {% block extra_css %}
@@ -166,7 +215,7 @@
 
 .summary-card {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 10px;
     border: 1px solid #bfdbfe;
     background: linear-gradient(125deg, #dbeafe, #e0f2fe, #ecfeff);
@@ -199,6 +248,10 @@
 
 .metric-blue strong {
     color: #1d4ed8;
+}
+
+.metric-purple strong {
+    color: #6d28d9;
 }
 
 .checklist-section {
@@ -278,6 +331,30 @@
 .danger-text {
     color: #b91c1c;
     font-weight: 700;
+}
+
+.vendor-pending {
+    border-color: #e9d5ff;
+    background: #faf5ff;
+}
+
+.vendor-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.mark-scheduled-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.mark-scheduled-form input[type="date"] {
+    width: auto;
+    min-width: 145px;
+    padding: 10px;
 }
 
 .empty-state {

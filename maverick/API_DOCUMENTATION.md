@@ -153,6 +153,34 @@ When submitted, Maverick:
 - Marks linked coordination/follow-up task(s) complete
 - Writes communication audit note
 
+## Automated Vendor Scheduling Endpoints
+
+### Auto-send preferred vendor requests
+- Triggered in: `POST /tc/transaction/<transaction_id>/approve`
+- Behavior:
+  - Selects preferred active vendor contacts by type and optional service-area match
+  - Sends templated emails under `templates/emails/vendor_requests/`
+  - Logs outreach events to `vendor_outreach_log`
+  - Creates follow-up tasks when response is pending
+
+### Vendor scheduling webhook
+- `POST /vendor-response/<transaction_id>/<vendor_type>`
+- Accepts JSON payload fields:
+  - `scheduled_time` or `scheduled_at` or `start_time` (ISO datetime preferred)
+  - `vendor_id` (optional)
+  - `notes` (optional)
+- Behavior:
+  - Logs `scheduled` outreach event on `vendor_outreach_log`
+  - Marks pending follow-up task(s) complete for that vendor type
+  - Sends SMS confirmation to Margaret
+
+### Vendor management (TC)
+- `GET|POST /tc/vendors`
+- Actions via form `action`:
+  - `add` (create vendor contact)
+  - `update` (edit existing contact)
+  - `toggle_active` (activate/deactivate vendor)
+
 ## Timeline Packet Automation Notes
 
 Timeline packet dispatch is signature-driven:

@@ -58,7 +58,7 @@ TWILIO_AUTH_TOKEN=
 TWILIO_PHONE_NUMBER=
 HEIDI_PHONE=
 MARGARET_PHONE=
-MARGARET_EMAIL=
+MARGARET_EMAIL=margaret@getmaverick.com
 INBOUND_EMAIL_DOMAIN=getmaverick.com
 INBOUND_EMAIL_WEBHOOK_SECRET=
 
@@ -91,6 +91,13 @@ ANTHROPIC_API_KEY=
 VENMO_HANDLE=@GetMaverick
 PAYPAL_EMAIL=pay@getmaverick.com
 PAYPAL_HANDLE=getmaverick
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=notifications@getmaverick.com
+SMTP_USERNAME=
+SMTP_PASSWORD=your_app_password
+SMTP_FROM_EMAIL=
+SMTP_FROM_NAME=Maverick TC
 ```
 
 ## Run locally
@@ -175,6 +182,8 @@ After Margaret approves and activates a transaction, Maverick:
 Relevant routes:
 - `POST /tc/transaction/<transaction_id>/resend-timeline`
 - `GET|POST /vendor/outreach/<access_token>`
+- `POST /vendor-response/<transaction_id>/<vendor_type>` (vendor scheduling webhook)
+- `GET|POST /tc/vendors` (vendor directory + performance management)
 
 ## Inbound Email AI Routing
 
