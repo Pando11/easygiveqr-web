@@ -382,11 +382,31 @@
             </div>
             {% endif %}
 
+            <div class="doc-analysis-box">
+                <h4>Document Analysis</h4>
+                <p>
+                    Analyzed: {{ analysis_overview.total_analyzed }} |
+                    Pending review: {{ analysis_overview.pending_review_count }} |
+                    Action items: {{ analysis_overview.action_item_count }}
+                </p>
+                <a class="text-link" href="{{ url_for('tc_document_analysis', transaction_id=transaction.id) }}">
+                    View Full Analysis Dashboard
+                </a>
+            </div>
+
             {% if documents %}
             <ul class="simple-list">
                 {% for doc in documents %}
                 <li class="list-row">
-                    <span><strong>{{ doc.document_type.replace('_', ' ').title() }}:</strong> {{ doc.filename }}</span>
+                    <span>
+                        <strong>{{ doc.document_type.replace('_', ' ').title() }}:</strong> {{ doc.filename }}
+                        <small class="doc-analysis-status status-{{ 'reviewed' if doc.analysis_reviewed else ('pending' if doc.analysis_available else 'none') }}">
+                            Analysis: {{ doc.analysis_status_label }}
+                            {% if doc.analysis_action_count %}
+                            ({{ doc.analysis_action_count }} actions)
+                            {% endif %}
+                        </small>
+                    </span>
                     <div class="actions-inline">
                         <a href="{{ url_for('view_document', document_id=doc.id) }}" title="View">View</a>
                         <a href="{{ url_for('download_document', document_id=doc.id) }}" title="Download">Download</a>
@@ -1049,6 +1069,38 @@
     padding: 10px;
     margin-bottom: 10px;
     background: #f8fafc;
+}
+
+.doc-analysis-box {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+    background: #f8fbff;
+}
+
+.doc-analysis-box h4 {
+    margin-bottom: 6px;
+    color: #0f172a;
+}
+
+.doc-analysis-status {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.doc-analysis-status.status-reviewed {
+    color: #166534;
+}
+
+.doc-analysis-status.status-pending {
+    color: #92400e;
+}
+
+.doc-analysis-status.status-none {
+    color: #64748b;
 }
 
 .doc-requests-box h4 {

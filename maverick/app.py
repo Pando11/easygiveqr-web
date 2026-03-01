@@ -2,6 +2,7 @@ import os
 import re
 import csv
 import io
+import json
 import tempfile
 from datetime import date, datetime, timedelta
 from functools import wraps
@@ -28,6 +29,7 @@ from utils.contract_extraction import (
     extract_via_pdfplumber,
     extract_via_pypdf,
 )
+from utils.document_analysis import analyze_hoa_documents, analyze_inspection_report
 from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 
@@ -76,6 +78,9 @@ CLIENT_UPLOAD_DOCUMENT_TYPES = {
     "settlement_statement",
     "other",
 }
+
+HOA_ANALYSIS_DOCUMENT_TYPES = {"hoa", "hoa_documents", "hoa_docs"}
+INSPECTION_ANALYSIS_DOCUMENT_TYPES = {"inspection", "inspection_report"}
 
 DOCUMENT_REQUEST_TARGET = {
     "contract": "seller",
@@ -1131,6 +1136,320 @@ def notify_client_portal_links(transaction_id, transaction, access_rows):
                 sent_email += 1
 
     return {"sent_sms": sent_sms, "sent_email": sent_email}
+
+
+def ensure_document_analysis_results_table():
+    """Ensure document analysis storage exists."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS document_analysis_results (
+            id SERIAL PRIMARY KEY,
+            document_id INT REFERENCES documents(id) ON DELETE CASCADE,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            document_type VARCHAR(50),
+            analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            findings JSONB,
+            action_items JSONB,
+            margaret_reviewed BOOLEAN DEFAULT FALSE,
+            reviewed_at TIMESTAMP,
+            notes TEXT
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_document_analysis_transaction
+        ON document_analysis_results(transaction_id, analysis_date DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_document_analysis_document
+        ON document_analysis_results(document_id)
+        """
+    )
+
+
+def parse_json_field(raw_value, default_value):
+    """Return parsed JSON field with fallback."""
+    if raw_value is None:
+        return default_value
+    if isinstance(raw_value, (dict, list)):
+        return raw_value
+    if isinstance(raw_value, str):
+        try:
+            return json.loads(raw_value)
+        except Exception:
+            return default_value
+    return default_value
+
+
+def calculate_due_date(due_days):
+    """Calculate a due date offset from today."""
+    try:
+        days = int(due_days)
+    except (TypeError, ValueError):
+        days = 7
+    if days < 0:
+        days = 0
+    return date.today() + timedelta(days=days)
+
+
+def create_analysis_task(transaction_id, description, priority="medium", due_days=7):
+    """Create task from automated document analysis action item."""
+    due_date = calculate_due_date(due_days)
+    rows = execute_query(
+        """
+        INSERT INTO tasks (
+            transaction_id, task_description, task_category, due_date,
+            priority, status, completed, display_order, notes, created_at
+        )
+        VALUES (%s, %s, 'document_analysis', %s, %s, 'pending', FALSE, 999, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            transaction_id,
+            description,
+            (priority or "medium").lower(),
+            due_date,
+            "Auto-created from document analysis",
+        ),
+        fetch=True,
+    ) or []
+    return rows[0]["id"] if rows else None
+
+
+def save_analysis_results(document_id, transaction_id, document_type, findings, action_items):
+    """Insert one analysis result row."""
+    ensure_document_analysis_results_table()
+    rows = execute_query(
+        """
+        INSERT INTO document_analysis_results (
+            document_id, transaction_id, document_type, findings, action_items
+        ) VALUES (%s, %s, %s, %s::jsonb, %s::jsonb)
+        RETURNING id, analysis_date
+        """,
+        (
+            document_id,
+            transaction_id,
+            document_type,
+            json.dumps(findings or {}, default=str),
+            json.dumps(action_items or [], default=str),
+        ),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def update_analysis_action_items(analysis_id, action_items):
+    """Update action_items payload for analysis row."""
+    ensure_document_analysis_results_table()
+    execute_query(
+        """
+        UPDATE document_analysis_results
+        SET action_items = %s::jsonb
+        WHERE id = %s
+        """,
+        (json.dumps(action_items or [], default=str), analysis_id),
+    )
+
+
+def get_document_analysis_rows(transaction_id):
+    """Return analysis rows for one transaction."""
+    ensure_document_analysis_results_table()
+    rows = execute_query(
+        """
+        SELECT
+            dar.id,
+            dar.document_id,
+            dar.transaction_id,
+            dar.document_type,
+            dar.analysis_date,
+            dar.findings,
+            dar.action_items,
+            dar.margaret_reviewed,
+            dar.reviewed_at,
+            dar.notes,
+            d.filename,
+            d.document_type AS uploaded_document_type,
+            d.uploaded_at
+        FROM document_analysis_results dar
+        LEFT JOIN documents d ON d.id = dar.document_id
+        WHERE dar.transaction_id = %s
+        ORDER BY dar.analysis_date DESC, dar.id DESC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+
+    for row in rows:
+        row["findings"] = parse_json_field(row.get("findings"), {})
+        row["action_items"] = parse_json_field(row.get("action_items"), [])
+        row["analysis_date_label"] = format_timestamp_label(row.get("analysis_date"))
+        row["reviewed_at_label"] = format_timestamp_label(row.get("reviewed_at"))
+        row["uploaded_at_label"] = format_timestamp_label(row.get("uploaded_at"))
+        row["document_label"] = document_type_label(row.get("document_type"))
+    return rows
+
+
+def execute_document_analysis_actions(transaction_id, analysis_type, action_items):
+    """Execute alerts/tasks generated by analysis with smart notification thresholds."""
+    executed_actions = []
+    margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE") or "")
+
+    for action in action_items or []:
+        action_type = (action.get("type") or "").strip().lower()
+        executed_action = dict(action)
+        executed_action["executed_at"] = datetime.utcnow().isoformat() + "Z"
+
+        if action_type == "create_task":
+            task_id = create_analysis_task(
+                transaction_id=transaction_id,
+                description=(action.get("task") or "Review document analysis finding").strip(),
+                priority=(action.get("priority") or "medium"),
+                due_days=action.get("due_days", 7),
+            )
+            executed_action["task_id"] = task_id
+            executed_action["status"] = "created" if task_id else "failed"
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'note', 'system', 'document_analysis', %s, %s)
+                """,
+                (
+                    transaction_id,
+                    f"Document analysis task action ({analysis_type})",
+                    f"task={action.get('task')} task_id={task_id or 'failed'}",
+                ),
+            )
+            executed_actions.append(executed_action)
+            continue
+
+        if action_type == "alert_margaret":
+            message = (action.get("message") or "Document analysis alert").strip()
+            immediate = bool(action.get("immediate"))
+            sms_sid = None
+
+            if immediate and margaret_phone:
+                prefix = "🏢" if analysis_type == "hoa" else "🔍"
+                sms_sid = send_sms(margaret_phone, f"{prefix} {message} - Transaction #{transaction_id}")
+                executed_action["sms_sid"] = sms_sid or "failed"
+                executed_action["status"] = "sms_sent" if sms_sid else "sms_failed"
+            else:
+                task_id = create_analysis_task(
+                    transaction_id=transaction_id,
+                    description=f"Review analysis alert: {message}",
+                    priority=action.get("priority", "medium"),
+                    due_days=0,
+                )
+                executed_action["task_id"] = task_id
+                executed_action["status"] = "added_to_daily_checklist" if task_id else "failed"
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'text', 'system', 'margaret', %s, %s)
+                """,
+                (
+                    transaction_id,
+                    f"Document analysis alert ({analysis_type})",
+                    f"message={message} immediate={immediate} sms_sid={sms_sid or 'n/a'} task_id={executed_action.get('task_id') or 'n/a'}",
+                ),
+            )
+            executed_actions.append(executed_action)
+            continue
+
+        executed_action["status"] = "ignored"
+        executed_actions.append(executed_action)
+
+    return executed_actions
+
+
+def run_document_analysis(document_id, transaction_id, document_type, s3_key, extension):
+    """Analyze HOA/inspection docs and persist findings."""
+    normalized_type = (document_type or "").strip().lower()
+    analysis_type = None
+    if normalized_type in HOA_ANALYSIS_DOCUMENT_TYPES:
+        analysis_type = "hoa"
+    elif normalized_type in INSPECTION_ANALYSIS_DOCUMENT_TYPES:
+        analysis_type = "inspection"
+    if not analysis_type:
+        return
+
+    if (extension or "").lower() != "pdf":
+        findings = {
+            "error": "Automated analysis currently supports PDF uploads only.",
+            "confidence_summary": {"high": 0, "medium": 0, "low": 0},
+            "action_items": [],
+        }
+        save_analysis_results(document_id, transaction_id, analysis_type, findings, [])
+        return
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+            temp_path = tmp_file.name
+
+        if not download_file(s3_key, temp_path):
+            findings = {
+                "error": "Could not download document from S3 for analysis.",
+                "confidence_summary": {"high": 0, "medium": 0, "low": 0},
+                "action_items": [],
+            }
+            save_analysis_results(document_id, transaction_id, analysis_type, findings, [])
+            return
+
+        findings = analyze_hoa_documents(temp_path) if analysis_type == "hoa" else analyze_inspection_report(temp_path)
+        action_items = findings.get("action_items") or []
+        saved_row = save_analysis_results(
+            document_id=document_id,
+            transaction_id=transaction_id,
+            document_type=analysis_type,
+            findings=findings,
+            action_items=action_items,
+        )
+        if not saved_row:
+            return
+
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', 'system', 'document_analysis', %s, %s)
+            """,
+            (
+                transaction_id,
+                f"Document analyzed ({analysis_type})",
+                f"document_id={document_id} analysis_id={saved_row['id']} action_items={len(action_items)}",
+            ),
+        )
+
+        executed_actions = execute_document_analysis_actions(transaction_id, analysis_type, action_items)
+        update_analysis_action_items(saved_row["id"], executed_actions)
+    except Exception as exc:
+        print(f"Document analysis error (txn#{transaction_id}, doc#{document_id}): {exc}")
+        findings = {
+            "error": str(exc),
+            "confidence_summary": {"high": 0, "medium": 0, "low": 0},
+            "action_items": [],
+        }
+        save_analysis_results(document_id, transaction_id, analysis_type or normalized_type or "unknown", findings, [])
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def run_document_analysis_async(document_id, transaction_id, document_type, s3_key, extension):
+    """Dispatch document analysis in a background thread."""
+
+    def _run():
+        try:
+            run_document_analysis(document_id, transaction_id, document_type, s3_key, extension)
+        except Exception as exc:
+            print(f"Async document analysis error (txn#{transaction_id}, doc#{document_id}): {exc}")
+
+    Thread(target=_run, daemon=True).start()
 
 
 def document_request_status_label(status_value):
@@ -3640,6 +3959,30 @@ def tc_transaction(transaction_id):
             document["uploaded_at"].strftime("%b %d, %Y %I:%M %p") if document.get("uploaded_at") else "Unknown"
         )
 
+    analysis_rows = get_document_analysis_rows(transaction_id)
+    analysis_by_document = {}
+    analysis_pending_review_count = 0
+    analysis_action_item_count = 0
+    for row in analysis_rows:
+        row["action_count"] = len(row.get("action_items") or [])
+        analysis_action_item_count += row["action_count"]
+        if not row.get("margaret_reviewed"):
+            analysis_pending_review_count += 1
+        document_id = row.get("document_id")
+        if document_id and document_id not in analysis_by_document:
+            analysis_by_document[document_id] = row
+
+    for document in documents:
+        linked_analysis = analysis_by_document.get(document["id"])
+        document["analysis_available"] = bool(linked_analysis)
+        document["analysis_reviewed"] = bool(linked_analysis and linked_analysis.get("margaret_reviewed"))
+        document["analysis_status_label"] = (
+            "Reviewed"
+            if document["analysis_reviewed"]
+            else ("Needs review" if linked_analysis else "Not analyzed")
+        )
+        document["analysis_action_count"] = linked_analysis.get("action_count", 0) if linked_analysis else 0
+
     uploaded_document_types = {doc["document_type"] for doc in documents}
     if transaction.get("contract_s3_key"):
         uploaded_document_types.add("contract")
@@ -3775,6 +4118,11 @@ def tc_transaction(transaction_id):
         extraction_review=extraction_review,
         email_status=email_status,
         client_portal_links=client_portal_links,
+        analysis_overview={
+            "total_analyzed": len(analysis_rows),
+            "pending_review_count": analysis_pending_review_count,
+            "action_item_count": analysis_action_item_count,
+        },
     )
 
 
@@ -4348,6 +4696,14 @@ def upload_transaction_document(transaction_id):
         action="upload",
         ip_address=request.remote_addr or "",
     )
+
+    run_document_analysis_async(
+        document_id=document_id,
+        transaction_id=transaction_id,
+        document_type=document_type,
+        s3_key=s3_key,
+        extension=extension,
+    )
     return redirect(f"{url_for('tc_transaction', transaction_id=transaction_id)}#documents")
 
 
@@ -4555,7 +4911,7 @@ def client_portal_upload(access_token):
         )
         return redirect(redirect_url)
 
-    execute_insert(
+    document_id = execute_insert(
         """
         INSERT INTO documents (
             transaction_id, document_type, filename, s3_key, file_size, uploaded_by, uploaded_at
@@ -4571,6 +4927,14 @@ def client_portal_upload(access_token):
             f"client_{access_row.get('client_type')}",
         ),
     )
+    if document_id:
+        run_document_analysis_async(
+            document_id=document_id,
+            transaction_id=transaction["id"],
+            document_type=document_type,
+            s3_key=s3_key,
+            extension=extension,
+        )
 
     ensure_document_requests_table()
     execute_query(
@@ -4595,6 +4959,117 @@ def client_portal_upload(access_token):
         notice_type="success",
     )
     return redirect(redirect_url)
+
+
+@app.route("/tc/transaction/<int:transaction_id>/document-analysis")
+@login_required
+def tc_document_analysis(transaction_id):
+    """Show document analysis dashboard for one transaction."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+
+    analysis_rows = get_document_analysis_rows(transaction_id)
+    hoa_summary = next((row for row in analysis_rows if row.get("document_type") == "hoa"), None)
+    inspection_summary = next((row for row in analysis_rows if row.get("document_type") == "inspection"), None)
+
+    return render_template(
+        "tc_document_analysis.html",
+        transaction=transaction,
+        analysis_rows=analysis_rows,
+        hoa_summary=hoa_summary,
+        inspection_summary=inspection_summary,
+    )
+
+
+@app.route("/tc/transaction/<int:transaction_id>/document-analysis/<int:analysis_id>/review", methods=["POST"])
+@login_required
+def mark_document_analysis_reviewed(transaction_id, analysis_id):
+    """Allow Margaret to mark an analysis row as reviewed and save notes."""
+    if not get_transaction_or_none(transaction_id):
+        return "Transaction not found", 404
+
+    notes = (request.form.get("notes") or "").strip()
+    reviewed = parse_bool_value(request.form.get("reviewed"), default=True)
+    execute_query(
+        """
+        UPDATE document_analysis_results
+        SET margaret_reviewed = %s,
+            reviewed_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END,
+            notes = %s
+        WHERE id = %s
+          AND transaction_id = %s
+        """,
+        (reviewed, reviewed, notes or None, analysis_id, transaction_id),
+    )
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', %s, %s, %s)
+        """,
+        (
+            transaction_id,
+            session.get("tc_username", "margaret"),
+            "Document analysis review updated",
+            f"analysis_id={analysis_id} reviewed={reviewed}",
+        ),
+    )
+
+    return redirect(url_for("tc_document_analysis", transaction_id=transaction_id))
+
+
+@app.route("/tc/transaction/<int:transaction_id>/document-analysis/override-task", methods=["POST"])
+@login_required
+def override_document_analysis_task(transaction_id):
+    """Mark an auto-created analysis task as not applicable."""
+    if not get_transaction_or_none(transaction_id):
+        return "Transaction not found", 404
+
+    try:
+        task_id = int(request.form.get("task_id") or "0")
+    except ValueError:
+        return redirect(url_for("tc_document_analysis", transaction_id=transaction_id))
+    if task_id <= 0:
+        return redirect(url_for("tc_document_analysis", transaction_id=transaction_id))
+
+    execute_query(
+        """
+        UPDATE tasks
+        SET completed = TRUE,
+            status = 'not_applicable',
+            completed_at = CURRENT_TIMESTAMP,
+            completed_by = %s,
+            notes = CASE
+                WHEN COALESCE(notes, '') = '' THEN %s
+                ELSE notes || E'\n' || %s
+            END
+        WHERE id = %s
+          AND transaction_id = %s
+        """,
+        (
+            session.get("tc_username", "margaret"),
+            "[Override] Marked not applicable from document analysis dashboard.",
+            "[Override] Marked not applicable from document analysis dashboard.",
+            task_id,
+            transaction_id,
+        ),
+    )
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', %s, %s, %s)
+        """,
+        (
+            transaction_id,
+            session.get("tc_username", "margaret"),
+            "Document analysis task overridden",
+            f"task_id={task_id} marked_not_applicable=true",
+        ),
+    )
+
+    return redirect(url_for("tc_document_analysis", transaction_id=transaction_id))
 
 
 @app.route("/tc/document/<int:document_id>/view")

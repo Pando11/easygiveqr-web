@@ -321,6 +321,19 @@ CREATE TABLE contract_extractions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE document_analysis_results (
+    id SERIAL PRIMARY KEY,
+    document_id INT REFERENCES documents(id) ON DELETE CASCADE,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    document_type VARCHAR(50),
+    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    findings JSONB,
+    action_items JSONB,
+    margaret_reviewed BOOLEAN DEFAULT FALSE,
+    reviewed_at TIMESTAMP,
+    notes TEXT
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -346,3 +359,5 @@ CREATE INDEX idx_document_requests_status ON document_requests(status);
 CREATE UNIQUE INDEX idx_client_access_transaction_type ON client_access(transaction_id, client_type);
 CREATE UNIQUE INDEX idx_client_access_token ON client_access(access_token);
 CREATE UNIQUE INDEX idx_contract_extractions_txn_field ON contract_extractions(transaction_id, field_name);
+CREATE INDEX idx_document_analysis_transaction ON document_analysis_results(transaction_id, analysis_date DESC);
+CREATE INDEX idx_document_analysis_document ON document_analysis_results(document_id);

@@ -13,6 +13,7 @@ Core capabilities:
 - Twilio SMS reminders, updates, and escalation alerts
 - Client portal links for buyer/seller timeline + document upload
 - Triple-scan AI contract extraction with confidence verification (OCR + PyPDF2 + pdfplumber)
+- Automated HOA/Inspection document analysis with action-item automation
 - Automation scripts for reminders, closing protocol, problem detection, and nightly backups
 
 ## Local setup instructions
@@ -113,6 +114,7 @@ These routes power buyer/seller client access using secure UUID tokens:
 
 TC actions:
 - `POST /tc/transaction/<transaction_id>/generate-client-portal`
+- `GET /tc/transaction/<transaction_id>/document-analysis`
 
 ## Contract Extraction Verification
 
@@ -127,6 +129,17 @@ Verification workflow routes:
 
 Approval gating:
 - Transaction approval requires all required extraction fields to be verified.
+
+## Automated HOA / Inspection Analysis
+
+Uploaded HOA and inspection documents are analyzed with triple-scan text extraction.
+
+Dashboard route:
+- `GET /tc/transaction/<transaction_id>/document-analysis`
+
+Review/action routes:
+- `POST /tc/transaction/<transaction_id>/document-analysis/<analysis_id>/review`
+- `POST /tc/transaction/<transaction_id>/document-analysis/override-task`
 
 ## Deploy to Railway
 
@@ -160,6 +173,7 @@ See `RAILWAY_CRONS.md` for copy/paste schedules and commands for:
 - `CLIENT_PORTAL_USER_GUIDE.md`
 - `API_DOCUMENTATION.md`
 - `EXTRACTION_VERIFICATION_GUIDE.md`
+- `DOCUMENT_ANALYSIS_USER_GUIDE.md`
 - `STRIPE_MINIONS_INSTRUCTIONS.md`
 - `STRIPE_DEV_SETUP.md`
 - `LAUNCH_CHECKLIST.md`

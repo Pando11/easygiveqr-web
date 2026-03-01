@@ -82,6 +82,17 @@ Client portal uses a unique token URL and does not require login credentials.
 ### Generate or re-send client portal links
 - `POST /tc/transaction/<transaction_id>/generate-client-portal`
 
+### Document analysis dashboard
+- `GET /tc/transaction/<transaction_id>/document-analysis`
+
+### Mark analysis reviewed / add notes
+- `POST /tc/transaction/<transaction_id>/document-analysis/<analysis_id>/review`
+
+### Override auto-created analysis task
+- `POST /tc/transaction/<transaction_id>/document-analysis/override-task`
+- Form body:
+  - `task_id`
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values
@@ -105,3 +116,16 @@ Contract uploads trigger asynchronous triple-scan extraction:
 3. Layout-aware text: `pdfplumber`
 
 The system writes field-level confidence rows to `contract_extractions` and requires manual verification before approval.
+
+## Automated HOA / Inspection Analysis
+
+When these document types are uploaded:
+- HOA: `hoa`, `hoa_documents`, `hoa_docs`
+- Inspection: `inspection`, `inspection_report`
+
+Maverick:
+1. Downloads the PDF from S3
+2. Runs triple-scan extraction (OCR + PyPDF2 + pdfplumber)
+3. Flags findings only when at least `2/3` methods agree
+4. Stores analysis in `document_analysis_results`
+5. Executes action items (alerts/tasks) with smart thresholds
