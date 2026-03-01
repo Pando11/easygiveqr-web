@@ -92,9 +92,9 @@
 
     <hr class="divider">
 
-    <form method="post" class="inline-save-form">
+    <form method="post" class="inline-save-form" id="saveTemplateForm">
         <input type="hidden" name="action" value="save_template">
-        <input type="hidden" name="template_body" value="{{ form_state.template_body }}">
+        <input type="hidden" name="template_body" id="saveTemplateBody" value="{{ form_state.template_body }}">
         <input type="text" name="new_template_name" maxlength="120" placeholder="Save current message as template..." required>
         <button class="btn btn-secondary" type="submit">Save Template</button>
     </form>
@@ -309,6 +309,8 @@ const templateBody = document.getElementById("template_body");
 const templateNameField = document.getElementById("templateNameField");
 const filterScope = document.getElementById("filter_scope");
 const filterStatus = document.getElementById("filter_status");
+const saveTemplateForm = document.getElementById("saveTemplateForm");
+const saveTemplateBody = document.getElementById("saveTemplateBody");
 
 function syncTemplateSelection() {
     if (!templateSelect || !templateBody || !templateNameField) {
@@ -347,6 +349,12 @@ function toggleStatusFilter() {
 if (filterScope) {
     filterScope.addEventListener("change", toggleStatusFilter);
     toggleStatusFilter();
+}
+
+if (saveTemplateForm && saveTemplateBody && templateBody) {
+    saveTemplateForm.addEventListener("submit", () => {
+        saveTemplateBody.value = templateBody.value || "";
+    });
 }
 
 const progressCard = document.getElementById("jobProgressCard");
