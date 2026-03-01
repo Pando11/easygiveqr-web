@@ -385,15 +385,15 @@ def extract_earnest_amount(first_page_text, key_info_extracted=None):
         except (TypeError, ValueError):
             continue
 
-    text = (first_page_text or "").lower()
+    text = re.sub(r"\s+", " ", (first_page_text or "")).lower()
     earnest_window = ""
-    match = re.search(r"earnest.{0,120}", text, flags=re.IGNORECASE)
+    match = re.search(r"earnest.{0,220}", text, flags=re.IGNORECASE)
     if match:
         earnest_window = match.group(0)
 
     amount_pattern = r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})|[0-9]+(?:\.[0-9]{1,2})?)"
     candidates = []
-    target_texts = [earnest_window] if earnest_window else [text]
+    target_texts = [earnest_window, text] if earnest_window else [text]
     for target in target_texts:
         for amount_match in re.finditer(amount_pattern, target):
             raw = amount_match.group(1).replace(",", "")
