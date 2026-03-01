@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+
+{% block title %}Calendar Sync - Maverick TC{% endblock %}
+{% block subtitle %}Google Calendar Integration{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="section-header">
+        <div>
+            <h2>Google Calendar Sync</h2>
+            <p class="hint-text">Automate deadlines, inspections, appraisals, and closing events on Margaret's calendar.</p>
+        </div>
+        <a href="{{ url_for('tc_dashboard') }}" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<section class="card">
+    <div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+</section>
+{% endif %}
+
+<section class="grid-two">
+    <article class="card">
+        <h3>Sync Settings</h3>
+        <p class="hint-text">Railway must include <code>GOOGLE_CALENDAR_CREDENTIALS</code> before sync can run.</p>
+        <form method="post" class="stack-form">
+            <input type="hidden" name="action" value="update_settings">
+
+            <div class="field-grid">
+                <label>Calendar ID
+                    <input type="text" name="calendar_id" value="{{ settings.calendar_id }}" placeholder="primary">
+                </label>
+                <label>Timezone
+                    <input type="text" name="timezone" value="{{ settings.timezone }}" placeholder="America/Chicago">
+                </label>
+                <label>Default Closing Time
+                    <input type="time" name="closing_default_time" value="{{ settings.closing_default_time or '09:00' }}">
+                </label>
+                <label>Default Closing Duration (minutes)
+                    <input type="number" name="closing_duration_minutes" min="30" max="240" step="15"
+                           value="{{ settings.closing_duration_minutes or 60 }}">
+                </label>
+            </div>
+
+            <div class="toggle-grid">
+                <label><input type="checkbox" name="enabled" value="1" {% if settings.enabled %}checked{% endif %}> Enable calendar sync</label>
+                <label><input type="checkbox" name="sync_deadlines" value="1" {% if settings.sync_deadlines %}checked{% endif %}> Sync deadlines (yellow)</label>
+                <label><input type="checkbox" name="sync_inspections" value="1" {% if settings.sync_inspections %}checked{% endif %}> Sync inspections (blue)</label>
+                <label><input type="checkbox" name="sync_appraisals" value="1" {% if settings.sync_appraisals %}checked{% endif %}> Sync appraisals (green)</label>
+                <label><input type="checkbox" name="sync_closings" value="1" {% if settings.sync_closings %}checked{% endif %}> Sync closings (red)</label>
+                <label><input type="checkbox" name="two_way_sync_enabled" value="1" {% if settings.two_way_sync_enabled %}checked{% endif %}> Enable two-way webhook updates</label>
+                <label><input type="checkbox" name="auto_delete_on_cancel" value="1" {% if settings.auto_delete_on_cancel %}checked{% endif %}> Delete events when transaction is cancelled</label>
+            </div>
+
+            <button type="submit" class="btn">Save Settings</button>
+        </form>
+    </article>
+
+    <article class="card">
+        <h3>Automation Metrics (Last 3 Months)</h3>
+        <div class="metric-grid">
+            <div class="metric-item">
+                <span>Created</span>
+                <strong>{{ metrics.summary.created }}</strong>
+            </div>
+            <div class="metric-item">
+                <span>Updated</span>
+                <strong>{{ metrics.summary.updated }}</strong>
+            </div>
+            <div class="metric-item">
+                <span>Deleted</span>
+                <strong>{{ metrics.summary.deleted }}</strong>
+            </div>
+            <div class="metric-item">
+                <span>Failed</span>
+                <strong>{{ metrics.summary.failed }}</strong>
+            </div>
+        </div>
+        <p class="hint-text">
+            Estimated time saved: <strong>{{ metrics.estimated_hours_saved }} hours</strong>
+            ({{ metrics.estimated_minutes_saved }} minutes).
+        </p>
+        <form method="post">
+            <input type="hidden" name="action" value="sync_active_now">
+            <button type="submit" class="btn btn-secondary">Run Sync for All Active Transactions</button>
+        </form>
+    </article>
+</section>
+
+<section class="grid-two">
+    <article class="card">
+        <h3>Recent Calendar Sync Activity</h3>
+        {% if recent_audit %}
+        <ul class="simple-list">
+            {% for row in recent_audit %}
+            <li class="list-row">
+                <div>
+                    <strong>{{ row.action_label }}</strong> · {{ row.event_type_label }}
+                    <small class="hint-text">
+                        {{ row.property_address or ('Transaction #' ~ row.transaction_id) }}
+                        · {{ row.status_label }} · {{ row.created_at_label }}
+                    </small>
+                    {% if row.details %}
+                    <small class="hint-text">{{ row.details }}</small>
+                    {% endif %}
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="hint-text">No calendar sync activity logged yet.</p>
+        {% endif %}
+    </article>
+
+    <article class="card">
+        <h3>Webhook Channels (Two-Way Sync)</h3>
+        <form method="post" class="stack-form compact-form">
+            <input type="hidden" name="action" value="register_channel">
+            <label>Channel ID
+                <input type="text" name="channel_id" placeholder="google-channel-id">
+            </label>
+            <label>Resource ID
+                <input type="text" name="resource_id" placeholder="resource-id">
+            </label>
+            <label>Resource URI
+                <input type="text" name="resource_uri" placeholder="https://www.googleapis.com/...">
+            </label>
+            <label>Expiration (ms epoch, optional)
+                <input type="number" name="expiration_ms" placeholder="1736956800000">
+            </label>
+            <button type="submit" class="btn btn-secondary">Store Channel Metadata</button>
+        </form>
+
+        {% if recent_channels %}
+        <ul class="simple-list">
+            {% for row in recent_channels %}
+            <li class="list-row">
+                <div>
+                    <strong>{{ row.channel_id }}</strong>
+                    <small class="hint-text">
+                        Active: {{ 'Yes' if row.active else 'No' }} · Updated: {{ row.updated_label }}
+                    </small>
+                    <small class="hint-text">Expires: {{ row.expiration_label or 'Unknown' }}</small>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="hint-text">No channels recorded yet. Add channel metadata after watch registration.</p>
+        {% endif %}
+    </article>
+</section>
+
+<style>
+.grid-two {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.hint-text {
+    color: #475569;
+    font-size: 13px;
+}
+
+.field-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.field-grid label,
+.toggle-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 13px;
+    color: #1e293b;
+}
+
+.toggle-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin: 10px 0 14px;
+}
+
+.toggle-grid label {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
+.metric-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.metric-item {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    background: #f8fbff;
+    padding: 10px;
+}
+
+.metric-item span {
+    display: block;
+    font-size: 12px;
+    color: #64748b;
+}
+
+.metric-item strong {
+    font-size: 22px;
+    color: #0f172a;
+}
+
+@media (max-width: 960px) {
+    .grid-two,
+    .field-grid,
+    .toggle-grid,
+    .metric-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}

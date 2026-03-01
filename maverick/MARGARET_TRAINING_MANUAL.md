@@ -357,6 +357,35 @@ Global management:
   - add manual Q&A entries
   - review time-saved metrics and FAQ draft suggestions
 
+### Google Calendar Sync (New)
+
+Maverick can now keep your Google Calendar updated for core transaction events.
+
+Where to manage:
+- Global settings + audit metrics: **/tc/calendar-sync**
+- Per transaction controls: transaction detail -> **Google Calendar Sync** card
+
+What auto-syncs:
+- **Deadlines** as yellow all-day events
+- **Inspection appointments** as blue timed events
+- **Appraisal appointments** as green timed events
+- **Closing appointment** as red timed event
+
+How to use:
+1. Open **/tc/calendar-sync**
+2. Enable sync and confirm calendar ID/timezone
+3. Save settings
+4. On a transaction page, click **Sync Calendar Now** to force refresh
+5. Set closing time/location in the same card when needed
+
+Two-way sync option:
+- If enabled in settings, Maverick accepts updates from `/calendar-webhook`.
+- If an event time is changed in Google Calendar (through your webhook bridge), Maverick updates the corresponding deadline/closing/vendor appointment record and logs it automatically.
+
+Override options:
+- You can delete synced events for any transaction with **Delete Synced Events**.
+- You can disable specific sync categories (deadlines/inspections/appraisals/closings) globally.
+
 ### Logging Best Practice
 
 For each log entry, capture:

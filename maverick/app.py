@@ -5,7 +5,7 @@ import io
 import json
 import hashlib
 import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from functools import wraps
 from threading import Thread
 from typing import Any
@@ -70,6 +70,22 @@ from utils.closing_checklist import (
     remove_closing_checklist_item,
     send_closing_checklist,
     toggle_closing_checklist_item,
+)
+from utils.calendar_sync import (
+    delete_calendar_events,
+    fetch_calendar_mapping_by_event_id,
+    fetch_calendar_mappings,
+    fetch_calendar_sync_metrics,
+    fetch_calendar_sync_settings,
+    log_calendar_sync_event,
+    sync_all_deadlines,
+    sync_to_calendar,
+    update_calendar_event,
+    upsert_calendar_webhook_channel,
+    upsert_transaction_calendar_preferences,
+    fetch_transaction_calendar_preferences,
+    update_calendar_sync_settings,
+    ensure_calendar_sync_tables,
 )
 from utils.common_qa import (
     AUTO_ANSWER_CONFIDENCE_THRESHOLD,
@@ -2422,6 +2438,7 @@ def ensure_timeline_automation_tables():
     ensure_timeline_packets_table()
     ensure_vendor_outreach_table()
     ensure_calendar_events_table()
+    ensure_calendar_sync_tables()
     ensure_vendor_automation_tables()
 
 
@@ -6021,6 +6038,385 @@ def common_qa_variant_similarity_threshold():
     return max(0.3, min(parsed, 0.99))
 
 
+def parse_optional_hhmm(raw_value):
+    """Parse optional HH:MM value."""
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+        return parsed.strftime("%H:%M")
+    except ValueError:
+        return None
+
+
+def combine_date_and_hhmm(target_date, hhmm_value, fallback_hhmm="09:00"):
+    """Combine date with HH:MM string into datetime."""
+    if not target_date:
+        return None
+    chosen_hhmm = parse_optional_hhmm(hhmm_value) or parse_optional_hhmm(fallback_hhmm) or "09:00"
+    hour, minute = chosen_hhmm.split(":")
+    return datetime.combine(target_date, time(int(hour), int(minute)))
+
+
+def calendar_sync_event_type_for_vendor(vendor_type):
+    normalized = normalize_vendor_type(vendor_type)
+    if normalized == "inspector":
+        return "inspection"
+    if normalized == "appraiser":
+        return "appraisal"
+    return ""
+
+
+def sync_vendor_appointment_to_calendar(
+    transaction_id,
+    vendor_type,
+    appointment_at,
+    vendor_name="",
+    vendor_phone="",
+    source_ref="",
+    source_id=0,
+    notes="",
+):
+    """Sync inspector/appraiser appointment to Google Calendar."""
+    event_type = calendar_sync_event_type_for_vendor(vendor_type)
+    if not event_type or not appointment_at:
+        return {"success": False, "skipped": "unsupported_vendor_or_missing_time"}
+
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return {"success": False, "error": "transaction_not_found"}
+
+    source_ref_value = source_ref or f"vendor:{normalize_vendor_type(vendor_type)}:{int(source_id or 0)}"
+    event_data = {
+        "property_address": transaction.get("property_address"),
+        "buyer_name": transaction.get("buyer_name"),
+        "contact_name": vendor_name or normalize_vendor_type(vendor_type).title(),
+        "contact_phone": vendor_phone or "",
+        "start_time": appointment_at,
+        "end_time": appointment_at + timedelta(minutes=45),
+        "duration_minutes": 45,
+        "notes": notes,
+        "source_ref": source_ref_value,
+        "source_id": int(source_id or 0),
+        "source_label": normalize_vendor_type(vendor_type).title(),
+        "summary_prefix": event_type.upper(),
+    }
+    result = sync_to_calendar(event_type=event_type, transaction_id=transaction_id, event_data=event_data)
+    if result.get("success"):
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', %s, 'calendar_sync', %s, %s)
+            """,
+            (
+                transaction_id,
+                normalize_vendor_type(vendor_type),
+                "Google Calendar synced for vendor appointment",
+                (
+                    f"event_type={event_type} appointment_at={appointment_at.isoformat()} "
+                    f"google_event_id={result.get('google_event_id') or 'n/a'}"
+                ),
+            ),
+        )
+    return result
+
+
+def _sync_closing_event_for_transaction(transaction_id, transaction_row=None, force_update=False):
+    """Sync one closing event for transaction if closing date is available."""
+    transaction = transaction_row or get_transaction_or_none(transaction_id)
+    if not transaction or not transaction.get("closing_date"):
+        return {"success": False, "skipped": "closing_date_missing"}
+
+    settings = fetch_calendar_sync_settings()
+    preferences = fetch_transaction_calendar_preferences(transaction_id) or {}
+    closing_dt = combine_date_and_hhmm(
+        transaction.get("closing_date"),
+        preferences.get("closing_time"),
+        fallback_hhmm=settings.get("closing_default_time") or "09:00",
+    )
+    duration_minutes = int(
+        preferences.get("closing_duration_minutes")
+        or settings.get("closing_duration_minutes")
+        or 60
+    )
+    location = (
+        (preferences.get("closing_location") or "").strip()
+        or (transaction.get("title_company") or "").strip()
+        or (transaction.get("property_address") or "").strip()
+    )
+    event_data = {
+        "property_address": transaction.get("property_address"),
+        "title_company_address": location,
+        "title_company": transaction.get("title_company"),
+        "buyer_name": transaction.get("buyer_name"),
+        "seller_name": transaction.get("seller_name"),
+        "agent_name": transaction.get("agent_name"),
+        "lender_name": transaction.get("lender_name"),
+        "closing_time": closing_dt,
+        "duration_minutes": duration_minutes,
+        "source_ref": "closing",
+        "source_id": 0,
+        "source_label": "Closing",
+        "summary_prefix": "CLOSING",
+    }
+    if force_update:
+        return update_calendar_event(event_type="closing", transaction_id=transaction_id, event_data=event_data)
+    return sync_to_calendar(event_type="closing", transaction_id=transaction_id, event_data=event_data)
+
+
+def sync_transaction_calendar_bundle(
+    transaction_id,
+    actor="system",
+    force_update=False,
+    include_deadlines=True,
+    include_closing=True,
+    include_vendor_events=True,
+):
+    """Sync deadlines, closing event, and known appointments for one transaction."""
+    ensure_calendar_sync_tables()
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return {"success": False, "error": "transaction_not_found"}
+
+    summary = {
+        "success": True,
+        "deadline_synced": 0,
+        "deadline_skipped": 0,
+        "deadline_failed": 0,
+        "deadline_deleted": 0,
+        "closing_synced": False,
+        "closing_skipped": False,
+        "closing_failed": False,
+        "vendor_synced": 0,
+        "vendor_failed": 0,
+    }
+
+    if include_deadlines:
+        deadline_rows = execute_query(
+            """
+            SELECT id, deadline_type, deadline_date, description, completed
+            FROM deadlines
+            WHERE transaction_id = %s
+            ORDER BY deadline_date ASC, id ASC
+            """,
+            (transaction_id,),
+            fetch=True,
+        ) or []
+        deadline_result = sync_all_deadlines(
+            transaction_id=transaction_id,
+            deadline_rows=deadline_rows,
+            transaction_row=transaction,
+        )
+        summary["deadline_synced"] = int(deadline_result.get("synced") or 0)
+        summary["deadline_skipped"] = int(deadline_result.get("skipped") or 0)
+        summary["deadline_failed"] = int(deadline_result.get("failed") or 0)
+        summary["deadline_deleted"] = int(deadline_result.get("stale_deleted") or 0)
+
+    if include_closing:
+        closing_result = _sync_closing_event_for_transaction(
+            transaction_id=transaction_id,
+            transaction_row=transaction,
+            force_update=force_update,
+        )
+        summary["closing_synced"] = bool(closing_result.get("success"))
+        summary["closing_skipped"] = bool(closing_result.get("skipped"))
+        summary["closing_failed"] = (not bool(closing_result.get("success"))) and not bool(
+            closing_result.get("skipped")
+        )
+
+    if include_vendor_events:
+        appointments = execute_query(
+            """
+            SELECT id, vendor_type, vendor_name, appointment_at, appointment_notes
+            FROM vendor_outreach
+            WHERE transaction_id = %s
+              AND appointment_at IS NOT NULL
+              AND COALESCE(response_status, '') <> 'unable'
+            ORDER BY appointment_at ASC, id ASC
+            """,
+            (transaction_id,),
+            fetch=True,
+        ) or []
+        for appointment in appointments:
+            vendor_result = sync_vendor_appointment_to_calendar(
+                transaction_id=transaction_id,
+                vendor_type=appointment.get("vendor_type"),
+                appointment_at=appointment.get("appointment_at"),
+                vendor_name=appointment.get("vendor_name") or "",
+                source_ref=f"vendor_outreach:{appointment['id']}",
+                source_id=appointment.get("id") or 0,
+                notes=appointment.get("appointment_notes") or "",
+            )
+            if vendor_result.get("success"):
+                summary["vendor_synced"] += 1
+            elif not vendor_result.get("skipped"):
+                summary["vendor_failed"] += 1
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'calendar_sync', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Google Calendar sync bundle executed",
+            (
+                f"actor={actor} deadlines={summary['deadline_synced']}/{summary['deadline_failed']} "
+                f"deadline_skipped={summary['deadline_skipped']} "
+                f"deadline_deleted={summary['deadline_deleted']} "
+                f"closing_synced={summary['closing_synced']} closing_skipped={summary['closing_skipped']} "
+                f"vendor_synced={summary['vendor_synced']} "
+                f"vendor_failed={summary['vendor_failed']}"
+            ),
+        ),
+    )
+    return summary
+
+
+def apply_calendar_webhook_update(payload):
+    """Apply two-way sync payload from Google Calendar webhook bridge."""
+    ensure_calendar_sync_tables()
+    event_id = (
+        (payload or {}).get("event_id")
+        or (payload or {}).get("id")
+        or ((payload or {}).get("event") or {}).get("id")
+        or ""
+    )
+    event_id = (event_id or "").strip()
+    if not event_id:
+        return {"success": False, "error": "missing_event_id"}
+
+    calendar_id = (
+        (payload or {}).get("calendar_id")
+        or (payload or {}).get("calendarId")
+        or os.getenv("GOOGLE_CALENDAR_ID")
+        or "primary"
+    )
+    mapping = fetch_calendar_mapping_by_event_id(event_id, calendar_id=calendar_id)
+    if not mapping:
+        return {"success": False, "error": "mapping_not_found"}
+
+    def _parse_calendar_webhook_datetime(raw_value):
+        if not raw_value:
+            return None
+        text = str(raw_value).strip().replace("Z", "+00:00")
+        if not text:
+            return None
+        try:
+            parsed_value = datetime.fromisoformat(text)
+        except ValueError:
+            try:
+                parsed_value = datetime.strptime(text, "%Y-%m-%d")
+            except ValueError:
+                return None
+        if parsed_value.tzinfo:
+            return parsed_value.astimezone().replace(tzinfo=None)
+        return parsed_value
+
+    start_input = (
+        (payload or {}).get("start_time")
+        or ((payload or {}).get("start") or {}).get("dateTime")
+        or ((payload or {}).get("start") or {}).get("date")
+    )
+    end_input = (
+        (payload or {}).get("end_time")
+        or ((payload or {}).get("end") or {}).get("dateTime")
+        or ((payload or {}).get("end") or {}).get("date")
+    )
+    start_dt = _parse_calendar_webhook_datetime(start_input)
+    end_dt = _parse_calendar_webhook_datetime(end_input)
+
+    transaction_id = mapping.get("transaction_id")
+    event_type = (mapping.get("event_type") or "").lower()
+    source_ref = (mapping.get("source_ref") or "").lower()
+
+    if event_type == "deadline" and start_dt:
+        deadline_type = source_ref.split("deadline:", 1)[1] if source_ref.startswith("deadline:") else ""
+        if deadline_type:
+            execute_query(
+                """
+                UPDATE deadlines
+                SET deadline_date = %s
+                WHERE transaction_id = %s
+                  AND deadline_type = %s
+                """,
+                (start_dt.date(), transaction_id, deadline_type),
+            )
+    elif event_type == "closing" and start_dt:
+        execute_query(
+            """
+            UPDATE transactions
+            SET closing_date = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (start_dt.date(), transaction_id),
+        )
+        execute_query(
+            """
+            UPDATE deadlines
+            SET deadline_date = %s
+            WHERE transaction_id = %s
+              AND deadline_type = 'closing'
+            """,
+            (start_dt.date(), transaction_id),
+        )
+        upsert_transaction_calendar_preferences(
+            transaction_id=transaction_id,
+            closing_time=start_dt.strftime("%H:%M"),
+            closing_duration_minutes=60 if not end_dt else max(30, int((end_dt - start_dt).total_seconds() / 60)),
+            closing_location=(payload or {}).get("location") or "",
+            updated_by="calendar_webhook",
+        )
+    elif event_type in {"inspection", "appraisal"} and start_dt:
+        vendor_id = mapping.get("source_id") or 0
+        if vendor_id:
+            execute_query(
+                """
+                UPDATE vendor_outreach
+                SET appointment_at = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (start_dt, vendor_id),
+            )
+            execute_query(
+                """
+                UPDATE calendar_events
+                SET starts_at = %s,
+                    ends_at = %s
+                WHERE vendor_outreach_id = %s
+                """,
+                (start_dt, end_dt or (start_dt + timedelta(minutes=45)), vendor_id),
+            )
+
+    log_calendar_sync_event(
+        action="webhook_update",
+        transaction_id=transaction_id,
+        mapping_id=mapping.get("id"),
+        event_type=event_type,
+        success=True,
+        details="Two-way calendar webhook update applied",
+        metadata={"event_id": event_id, "source_ref": source_ref},
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'calendar_webhook', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Calendar webhook update applied",
+            (
+                f"event_type={event_type} event_id={event_id} "
+                f"start={start_dt.isoformat() if start_dt else 'n/a'}"
+            ),
+        ),
+    )
+    return {"success": True, "transaction_id": transaction_id, "event_type": event_type}
+
+
 def file_extension(filename):
     """Return lower-cased extension for a filename."""
     if not filename or "." not in filename:
@@ -6104,7 +6500,16 @@ def create_deadlines(transaction_id, deadline_dates):
         transaction_id, deadline_type, deadline_date, description, is_critical
     ) VALUES {", ".join(values_sql)}
     """
-    return bool(execute_query(insert_query, tuple(params)))
+    inserted = bool(execute_query(insert_query, tuple(params)))
+    if not inserted:
+        return False
+
+    # Best-effort Google Calendar sync should never block deadline creation.
+    try:
+        sync_all_deadlines(transaction_id)
+    except Exception as exc:
+        log_system_error("calendar_sync", f"Deadline sync failed: {exc}", transaction_id)
+    return True
 
 
 def create_tasks(transaction_id, effective_date_value, closing_date_value):
@@ -6393,6 +6798,89 @@ def inbound_email_webhook():
             "message_id": result.get("message_id"),
         }
     )
+
+
+@app.route("/calendar-webhook", methods=["GET", "POST"])
+def calendar_webhook():
+    """
+    Receive Google Calendar two-way sync notifications.
+
+    Supports:
+    - Google channel ping headers (X-Goog-*)
+    - JSON payload bridge with event_id/start/end fields
+    """
+    ensure_calendar_sync_tables()
+    configured_secret = (os.getenv("CALENDAR_WEBHOOK_SECRET") or "").strip()
+    if configured_secret:
+        provided_secret = (
+            request.headers.get("X-Calendar-Secret")
+            or request.headers.get("X-Webhook-Secret")
+            or request.args.get("secret")
+            or request.form.get("secret")
+            or ""
+        ).strip()
+        if provided_secret != configured_secret:
+            log_calendar_sync_event(
+                action="webhook_unauthorized",
+                success=False,
+                details="Calendar webhook secret mismatch.",
+            )
+            return jsonify({"success": False, "error": "Unauthorized"}), 403
+
+    channel_id = (request.headers.get("X-Goog-Channel-ID") or "").strip()
+    resource_id = (request.headers.get("X-Goog-Resource-ID") or "").strip()
+    resource_uri = (request.headers.get("X-Goog-Resource-URI") or "").strip()
+    expiration_ms = (request.headers.get("X-Goog-Channel-Expiration-Millis") or "").strip()
+    resource_state = (request.headers.get("X-Goog-Resource-State") or "").strip().lower()
+    if channel_id:
+        upsert_calendar_webhook_channel(
+            channel_id=channel_id,
+            resource_id=resource_id,
+            resource_uri=resource_uri,
+            expiration_ms=expiration_ms or None,
+            active=(resource_state != "sync" and resource_state != "not_exists"),
+        )
+
+    if request.method == "GET":
+        return jsonify({"success": True, "message": "calendar webhook endpoint ready"}), 200
+
+    settings = fetch_calendar_sync_settings()
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = dict(request.form or {})
+
+    if not settings.get("two_way_sync_enabled"):
+        log_calendar_sync_event(
+            action="webhook_ignored",
+            event_type="calendar",
+            success=True,
+            details="Two-way sync disabled; payload ignored.",
+            metadata={"channel_id": channel_id, "resource_state": resource_state},
+        )
+        return jsonify({"success": True, "ignored": "two_way_sync_disabled"}), 202
+
+    if not payload:
+        log_calendar_sync_event(
+            action="webhook_ping",
+            event_type="calendar",
+            success=True,
+            details="Webhook ping received with no body payload.",
+            metadata={"channel_id": channel_id, "resource_state": resource_state},
+        )
+        return "", 204
+
+    result = apply_calendar_webhook_update(payload)
+    if not result.get("success"):
+        log_calendar_sync_event(
+            action="webhook_apply_failed",
+            event_type="calendar",
+            success=False,
+            details=result.get("error") or "Unknown webhook apply failure.",
+            metadata={"payload": payload},
+        )
+        return jsonify({"success": False, "error": result.get("error") or "webhook_apply_failed"}), 400
+
+    return jsonify({"success": True, "result": result}), 200
 
 
 @app.route("/health")
@@ -7858,6 +8346,242 @@ def tc_common_qa():
     )
 
 
+@app.route("/tc/calendar-sync", methods=["GET", "POST"])
+@login_required
+def tc_calendar_sync():
+    """Manage Google Calendar sync settings, metrics, and manual runs."""
+    ensure_calendar_sync_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        if action == "update_settings":
+            updated = update_calendar_sync_settings(
+                {
+                    "enabled": parse_bool_value(request.form.get("enabled"), default=False),
+                    "calendar_id": request.form.get("calendar_id"),
+                    "timezone": request.form.get("timezone"),
+                    "sync_deadlines": parse_bool_value(request.form.get("sync_deadlines"), default=False),
+                    "sync_inspections": parse_bool_value(request.form.get("sync_inspections"), default=False),
+                    "sync_closings": parse_bool_value(request.form.get("sync_closings"), default=False),
+                    "sync_appraisals": parse_bool_value(request.form.get("sync_appraisals"), default=False),
+                    "two_way_sync_enabled": parse_bool_value(request.form.get("two_way_sync_enabled"), default=False),
+                    "auto_delete_on_cancel": parse_bool_value(request.form.get("auto_delete_on_cancel"), default=True),
+                    "closing_default_time": request.form.get("closing_default_time"),
+                    "closing_duration_minutes": parse_optional_int(request.form.get("closing_duration_minutes")) or 60,
+                },
+                updated_by=session.get("tc_username", "margaret"),
+            )
+            next_notice = (
+                f"Calendar sync settings saved (calendar={updated.get('calendar_id')} timezone={updated.get('timezone')})."
+            )
+            return redirect(url_for("tc_calendar_sync", notice=next_notice, notice_type="success"))
+
+        if action == "sync_active_now":
+            rows = execute_query(
+                """
+                SELECT id
+                FROM transactions
+                WHERE status = 'ACTIVE'
+                ORDER BY COALESCE(closing_date, CURRENT_DATE + INTERVAL '365 days') ASC, id ASC
+                LIMIT 250
+                """,
+                fetch=True,
+            ) or []
+            synced_txn = 0
+            failed_txn = 0
+            for row in rows:
+                result = sync_transaction_calendar_bundle(
+                    transaction_id=row["id"],
+                    actor=session.get("tc_username", "margaret"),
+                    force_update=True,
+                    include_deadlines=True,
+                    include_closing=True,
+                    include_vendor_events=True,
+                )
+                if result.get("success"):
+                    synced_txn += 1
+                else:
+                    failed_txn += 1
+            next_notice = (
+                f"Calendar sync run complete. Active transactions synced: {synced_txn}; failed: {failed_txn}."
+            )
+            next_type = "success" if failed_txn == 0 else "warning"
+            return redirect(url_for("tc_calendar_sync", notice=next_notice, notice_type=next_type))
+
+        if action == "register_channel":
+            channel_id = (request.form.get("channel_id") or "").strip()
+            resource_id = (request.form.get("resource_id") or "").strip()
+            resource_uri = (request.form.get("resource_uri") or "").strip()
+            expiration_ms = request.form.get("expiration_ms")
+            if not channel_id:
+                return redirect(
+                    url_for(
+                        "tc_calendar_sync",
+                        notice="Channel ID is required.",
+                        notice_type="warning",
+                    )
+                )
+            upsert_calendar_webhook_channel(
+                channel_id=channel_id,
+                resource_id=resource_id,
+                resource_uri=resource_uri,
+                expiration_ms=expiration_ms,
+                active=True,
+            )
+            return redirect(
+                url_for(
+                    "tc_calendar_sync",
+                    notice="Webhook channel metadata stored.",
+                    notice_type="success",
+                )
+            )
+
+        return redirect(url_for("tc_calendar_sync", notice="Unknown calendar action.", notice_type="warning"))
+
+    settings = fetch_calendar_sync_settings()
+    metrics = fetch_calendar_sync_metrics(months=3)
+    recent_audit = execute_query(
+        """
+        SELECT
+            l.id, l.transaction_id, l.action, l.event_type, l.success, l.details, l.created_at,
+            t.property_address
+        FROM calendar_sync_audit_log l
+        LEFT JOIN transactions t ON t.id = l.transaction_id
+        ORDER BY l.created_at DESC, l.id DESC
+        LIMIT 60
+        """,
+        fetch=True,
+    ) or []
+    for row in recent_audit:
+        row["created_at_label"] = format_timestamp_label(row.get("created_at"))
+        row["status_label"] = "Success" if row.get("success") else "Failed"
+        row["event_type_label"] = (row.get("event_type") or "general").replace("_", " ").title()
+        row["action_label"] = (row.get("action") or "sync").replace("_", " ").title()
+
+    recent_channels = execute_query(
+        """
+        SELECT id, channel_id, resource_id, resource_uri, expiration_at, active, updated_at
+        FROM calendar_webhook_channels
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 30
+        """,
+        fetch=True,
+    ) or []
+    for row in recent_channels:
+        row["expiration_label"] = format_timestamp_label(row.get("expiration_at"))
+        row["updated_label"] = format_timestamp_label(row.get("updated_at"))
+
+    return render_template(
+        "tc_calendar_sync.html",
+        notice=notice,
+        notice_type=notice_type,
+        settings=settings,
+        metrics=metrics,
+        recent_audit=recent_audit,
+        recent_channels=recent_channels,
+    )
+
+
+@app.route("/tc/transaction/<int:transaction_id>/calendar-sync", methods=["POST"])
+@login_required
+def sync_transaction_calendar_now(transaction_id):
+    """Manual override to sync or clear transaction calendar events."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+
+    action = (request.form.get("action") or "sync").strip().lower()
+    if action == "delete_events":
+        deleted = delete_calendar_events(transaction_id=transaction_id, reason="manual_override")
+        notice = (
+            f"Calendar cleanup complete. Removed: {deleted.get('deleted', 0)}; "
+            f"failed: {deleted.get('failed', 0)}."
+        )
+        notice_type = "success" if deleted.get("failed", 0) == 0 else "warning"
+    else:
+        result = sync_transaction_calendar_bundle(
+            transaction_id=transaction_id,
+            actor=session.get("tc_username", "margaret"),
+            force_update=True,
+            include_deadlines=True,
+            include_closing=True,
+            include_vendor_events=True,
+        )
+        notice = (
+            "Calendar sync complete. "
+            f"Deadlines: {result.get('deadline_synced', 0)} synced / {result.get('deadline_skipped', 0)} skipped / {result.get('deadline_failed', 0)} failed; "
+            f"Closing synced: {'yes' if result.get('closing_synced') else 'no'}; "
+            f"Vendor events: {result.get('vendor_synced', 0)} synced / {result.get('vendor_failed', 0)} failed."
+        )
+        notice_type = (
+            "success"
+            if (
+                result.get("deadline_failed", 0) == 0
+                and result.get("vendor_failed", 0) == 0
+                and not result.get("closing_failed")
+            )
+            else "warning"
+        )
+
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice=notice,
+        doc_notice_type=notice_type,
+    )
+    return redirect(f"{redirect_url}#calendar-sync")
+
+
+@app.route("/tc/transaction/<int:transaction_id>/calendar-closing", methods=["POST"])
+@login_required
+def save_transaction_calendar_closing(transaction_id):
+    """Save closing calendar preferences and force-sync closing event."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+    if not transaction.get("closing_date"):
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Set closing date before saving calendar closing time.",
+            doc_notice_type="warning",
+        )
+        return redirect(f"{redirect_url}#calendar-sync")
+
+    closing_time = parse_optional_hhmm(request.form.get("closing_time")) or ""
+    closing_location = (request.form.get("closing_location") or "").strip()
+    duration = parse_optional_int(request.form.get("closing_duration_minutes")) or 60
+    upsert_transaction_calendar_preferences(
+        transaction_id=transaction_id,
+        closing_time=closing_time,
+        closing_duration_minutes=duration,
+        closing_location=closing_location,
+        updated_by=session.get("tc_username", "margaret"),
+    )
+    result = _sync_closing_event_for_transaction(
+        transaction_id=transaction_id,
+        transaction_row=transaction,
+        force_update=True,
+    )
+    notice = (
+        "Closing calendar preferences saved and synced."
+        if result.get("success")
+        else f"Preferences saved, but closing sync failed: {result.get('error') or result.get('skipped') or 'unknown'}"
+    )
+    notice_type = "success" if result.get("success") else "warning"
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice=notice,
+        doc_notice_type=notice_type,
+    )
+    return redirect(f"{redirect_url}#calendar-sync")
+
+
 @app.route("/tc/closing-checklists", methods=["GET", "POST"])
 @login_required
 def tc_closing_checklists():
@@ -9261,6 +9985,35 @@ def tc_transaction(transaction_id):
         closing_checklist["auto_send_after_label"] = format_timestamp_label(closing_checklist.get("auto_send_after"))
         closing_checklist["summary"] = closing_checklist.get("summary") or {}
 
+    ensure_calendar_sync_tables()
+    calendar_sync_settings = fetch_calendar_sync_settings()
+    calendar_preferences = fetch_transaction_calendar_preferences(transaction_id) or {}
+    calendar_mappings = fetch_calendar_mappings(transaction_id=transaction_id, limit=80)
+    for mapping in calendar_mappings:
+        mapping["event_type_label"] = (mapping.get("event_type") or "event").replace("_", " ").title()
+        mapping["status_label"] = (mapping.get("status") or "active").replace("_", " ").title()
+        mapping["updated_at_label"] = format_timestamp_label(mapping.get("updated_at"))
+        mapping["source_label"] = (
+            mapping.get("source_label")
+            or (mapping.get("source_ref") or "").replace("deadline:", "").replace("_", " ").title()
+        )
+    default_closing_time = (
+        parse_optional_hhmm(calendar_preferences.get("closing_time"))
+        or parse_optional_hhmm(calendar_sync_settings.get("closing_default_time"))
+        or "09:00"
+    )
+    calendar_preferences["closing_time_input"] = default_closing_time
+    calendar_preferences["closing_duration_minutes"] = int(
+        calendar_preferences.get("closing_duration_minutes")
+        or calendar_sync_settings.get("closing_duration_minutes")
+        or 60
+    )
+    calendar_preferences["closing_location"] = (
+        calendar_preferences.get("closing_location")
+        or transaction.get("title_company")
+        or ""
+    )
+
     task_preview = []
     task_total = 0
     if status == "ACTIVE":
@@ -9357,6 +10110,9 @@ def tc_transaction(transaction_id):
         timeline_recipients_label=timeline_recipients_label,
         closing_checklist=closing_checklist,
         closing_checklist_pdf_url=closing_checklist_pdf_url,
+        calendar_sync_settings=calendar_sync_settings,
+        calendar_preferences=calendar_preferences,
+        calendar_mappings=calendar_mappings,
         task_preview=task_preview,
         task_total=task_total,
         communications=communications,
@@ -9605,6 +10361,22 @@ def _persist_verified_contract_extractions(transaction, transaction_id):
         ),
     )
 
+    if (transaction.get("status") or "").upper() == "ACTIVE":
+        try:
+            _sync_closing_event_for_transaction(
+                transaction_id=transaction_id,
+                transaction_row={
+                    **transaction,
+                    "closing_date": parsed_dates["closing_date"],
+                    "buyer_name": verified_values["buyer_name"],
+                    "seller_name": verified_values["seller_name"],
+                    "property_address": verified_values["property_address"],
+                },
+                force_update=True,
+            )
+        except Exception as exc:
+            log_system_error("calendar_sync", f"Closing event update failed after extraction verify: {exc}", transaction_id)
+
 
 @app.route("/tc/transaction/<int:transaction_id>/verify-extraction", methods=["POST"])
 @login_required
@@ -9765,6 +10537,15 @@ def approve_transaction(transaction_id):
     if not create_tasks(transaction_id, effective_date_value, closing_date_value):
         return "Failed to create tasks.", 500
 
+    calendar_summary = sync_transaction_calendar_bundle(
+        transaction_id=transaction_id,
+        actor=session.get("tc_username", "margaret"),
+        force_update=True,
+        include_deadlines=False,
+        include_closing=True,
+        include_vendor_events=False,
+    )
+
     transaction["id"] = transaction_id
     transaction["property_address"] = verified_property_address
     transaction["buyer_phone"] = buyer_phone
@@ -9905,6 +10686,9 @@ def approve_transaction(transaction_id):
 
     dashboard_notice = "Transaction approved."
     dashboard_notice_type = "success"
+    calendar_warning = ""
+    if calendar_summary.get("closing_failed"):
+        calendar_warning = " Calendar sync failed for the closing event."
     try:
         vendor_result = send_vendor_requests(transaction_id)
         sent_count = vendor_result.get("sent_count", 0)
@@ -9932,6 +10716,10 @@ def approve_transaction(transaction_id):
 
     if timeline_warning:
         dashboard_notice = f"{dashboard_notice}{timeline_warning}"
+        if dashboard_notice_type == "success":
+            dashboard_notice_type = "warning"
+    if calendar_warning:
+        dashboard_notice = f"{dashboard_notice}{calendar_warning}"
         if dashboard_notice_type == "success":
             dashboard_notice_type = "warning"
 
@@ -10439,8 +11227,19 @@ def vendor_response_webhook(transaction_id, vendor_type):
         notes=notes,
     )
     completed_task_ids = complete_vendor_followup_tasks(transaction_id, normalized_vendor_type)
-
     vendor_display = "Surveyor" if normalized_vendor_type == "surveyor" else normalized_vendor_type.title()
+    calendar_sync_result = {"success": False, "skipped": "not_timed"}
+    if scheduled_at:
+        calendar_sync_result = sync_vendor_appointment_to_calendar(
+            transaction_id=transaction_id,
+            vendor_type=normalized_vendor_type,
+            appointment_at=scheduled_at,
+            vendor_name=vendor_display,
+            source_ref=f"vendor_webhook:{normalized_vendor_type}:{transaction_id}",
+            source_id=vendor_id or 0,
+            notes=notes,
+        )
+
     execute_query(
         """
         INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
@@ -10452,7 +11251,8 @@ def vendor_response_webhook(transaction_id, vendor_type):
             "Vendor scheduling webhook received",
             (
                 f"scheduled_date={scheduled_date.isoformat()} "
-                f"completed_tasks={','.join(str(task_id) for task_id in completed_task_ids) or 'none'}"
+                f"completed_tasks={','.join(str(task_id) for task_id in completed_task_ids) or 'none'} "
+                f"calendar_sync={calendar_sync_result.get('action') or calendar_sync_result.get('error') or calendar_sync_result.get('skipped') or 'n/a'}"
             ),
         ),
     )
@@ -10516,6 +11316,7 @@ def vendor_outreach_response(access_token):
     )
 
     calendar_event_id = None
+    calendar_sync_result = {"success": False, "skipped": "not_timed"}
     if appointment_at:
         calendar_event_id = execute_insert(
             """
@@ -10533,6 +11334,15 @@ def vendor_outreach_response(access_token):
                 appointment_at + timedelta(minutes=45),
                 notes or "Appointment confirmed by vendor via secure link.",
             ),
+        )
+        calendar_sync_result = sync_vendor_appointment_to_calendar(
+            transaction_id=outreach["transaction_id"],
+            vendor_type=outreach.get("vendor_type"),
+            appointment_at=appointment_at,
+            vendor_name=outreach.get("vendor_name") or "",
+            source_ref=f"vendor_outreach:{outreach['id']}",
+            source_id=outreach.get("id") or 0,
+            notes=notes,
         )
 
     completed_task_ids = complete_vendor_response_tasks(
@@ -10552,7 +11362,9 @@ def vendor_outreach_response(access_token):
             "Vendor responded via secure outreach link",
             (
                 f"status={response_status} appointment={appointment_at.isoformat() if appointment_at else 'none'} "
-                f"calendar_event_id={calendar_event_id or 'n/a'} completed_tasks={','.join(str(task_id) for task_id in completed_task_ids) or 'none'}"
+                f"calendar_event_id={calendar_event_id or 'n/a'} "
+                f"google_calendar={calendar_sync_result.get('action') or calendar_sync_result.get('error') or calendar_sync_result.get('skipped') or 'n/a'} "
+                f"completed_tasks={','.join(str(task_id) for task_id in completed_task_ids) or 'none'}"
             ),
         ),
     )
@@ -12018,6 +12830,29 @@ def cancel_transaction(transaction_id):
         WHERE id = %s
         """,
         (transaction_id,),
+    )
+    settings = fetch_calendar_sync_settings()
+    if settings.get("auto_delete_on_cancel"):
+        calendar_cleanup = delete_calendar_events(
+            transaction_id=transaction_id,
+            reason="transaction_cancelled",
+        )
+    else:
+        calendar_cleanup = {"candidate_count": 0, "deleted": 0, "failed": 0}
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'calendar_sync', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Calendar events cleanup on cancellation",
+            (
+                f"candidate={calendar_cleanup.get('candidate_count', 0)} "
+                f"deleted={calendar_cleanup.get('deleted', 0)} "
+                f"failed={calendar_cleanup.get('failed', 0)}"
+            ),
+        ),
     )
     return redirect(url_for("tc_dashboard"))
 

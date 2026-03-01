@@ -779,6 +779,73 @@
             </form>
         </article>
 
+        <article class="card" id="calendar-sync">
+            <h3>Google Calendar Sync</h3>
+            <p class="hint-text">
+                {% if calendar_sync_settings.enabled %}
+                Enabled · Calendar: {{ calendar_sync_settings.calendar_id }} · Timezone: {{ calendar_sync_settings.timezone }}
+                {% else %}
+                Disabled globally. Enable under Smart Calendar settings.
+                {% endif %}
+            </p>
+            <form method="post" action="{{ url_for('sync_transaction_calendar_now', transaction_id=transaction.id) }}">
+                <input type="hidden" name="action" value="sync">
+                <button type="submit" class="btn btn-secondary action-btn">Sync Calendar Now</button>
+            </form>
+            <form method="post" action="{{ url_for('sync_transaction_calendar_now', transaction_id=transaction.id) }}">
+                <input type="hidden" name="action" value="delete_events">
+                <button type="submit" class="btn btn-secondary action-btn">Delete Synced Events</button>
+            </form>
+
+            <details>
+                <summary class="summary-btn">Closing Event Preferences</summary>
+                <form method="post"
+                      action="{{ url_for('save_transaction_calendar_closing', transaction_id=transaction.id) }}"
+                      class="stack-form compact-form">
+                    <div class="grid-2">
+                        <div class="form-group">
+                            <label for="closing_time">Closing Time</label>
+                            <input type="time" id="closing_time" name="closing_time" value="{{ calendar_preferences.closing_time_input }}">
+                        </div>
+                        <div class="form-group">
+                            <label for="closing_duration_minutes">Duration (minutes)</label>
+                            <input type="number" id="closing_duration_minutes" name="closing_duration_minutes"
+                                   min="30" max="240" step="15"
+                                   value="{{ calendar_preferences.closing_duration_minutes }}">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="closing_location">Closing Location</label>
+                        <input type="text" id="closing_location" name="closing_location"
+                               value="{{ calendar_preferences.closing_location or '' }}"
+                               placeholder="Title office address or meeting location">
+                    </div>
+                    <button type="submit" class="btn btn-secondary btn-small">Save Closing Calendar Details</button>
+                </form>
+            </details>
+
+            {% if calendar_mappings %}
+            <details>
+                <summary class="summary-btn">Synced Event IDs ({{ calendar_mappings|length }})</summary>
+                <ul class="simple-list compact-list calendar-map-list">
+                    {% for mapping in calendar_mappings[:12] %}
+                    <li class="list-row">
+                        <div>
+                            <strong>{{ mapping.event_type_label }}</strong> - {{ mapping.source_label }}
+                            <small class="small-muted">
+                                {{ mapping.status_label }} · {{ mapping.updated_at_label }}
+                            </small>
+                        </div>
+                        <small>{{ mapping.google_event_id }}</small>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% else %}
+            <p class="hint-text">No Google Calendar events synced yet.</p>
+            {% endif %}
+        </article>
+
         <article class="card" id="payments">
             <h3>Payments</h3>
             <div class="payment-row">

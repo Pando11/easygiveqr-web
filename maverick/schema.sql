@@ -448,6 +448,76 @@ CREATE TABLE calendar_events (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE calendar_sync_settings (
+    id SERIAL PRIMARY KEY,
+    enabled BOOLEAN DEFAULT TRUE,
+    calendar_id VARCHAR(255) DEFAULT 'primary',
+    timezone VARCHAR(80) DEFAULT 'America/Chicago',
+    sync_deadlines BOOLEAN DEFAULT TRUE,
+    sync_inspections BOOLEAN DEFAULT TRUE,
+    sync_closings BOOLEAN DEFAULT TRUE,
+    sync_appraisals BOOLEAN DEFAULT TRUE,
+    two_way_sync_enabled BOOLEAN DEFAULT FALSE,
+    auto_delete_on_cancel BOOLEAN DEFAULT TRUE,
+    closing_default_time VARCHAR(5) DEFAULT '09:00',
+    closing_duration_minutes INT DEFAULT 60,
+    updated_by VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE transaction_calendar_preferences (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+    closing_time VARCHAR(5),
+    closing_duration_minutes INT,
+    closing_location TEXT,
+    updated_by VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE google_calendar_mappings (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    event_type VARCHAR(40) NOT NULL,
+    source_ref VARCHAR(120) NOT NULL DEFAULT '',
+    source_id INT DEFAULT 0,
+    source_label VARCHAR(80),
+    calendar_id VARCHAR(255) DEFAULT 'primary',
+    google_event_id VARCHAR(255) NOT NULL,
+    event_hash VARCHAR(64),
+    status VARCHAR(20) DEFAULT 'active',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    last_synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (transaction_id, event_type, source_ref, calendar_id)
+);
+
+CREATE TABLE calendar_sync_audit_log (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    mapping_id INT REFERENCES google_calendar_mappings(id) ON DELETE SET NULL,
+    action VARCHAR(40) NOT NULL,
+    event_type VARCHAR(40),
+    success BOOLEAN DEFAULT TRUE,
+    details TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE calendar_webhook_channels (
+    id SERIAL PRIMARY KEY,
+    channel_id VARCHAR(255) UNIQUE NOT NULL,
+    resource_id VARCHAR(255),
+    resource_uri TEXT,
+    expiration_at TIMESTAMP,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE common_qa (
     id SERIAL PRIMARY KEY,
     question_text TEXT NOT NULL,
@@ -923,6 +993,12 @@ CREATE UNIQUE INDEX idx_vendor_outreach_token ON vendor_outreach(outreach_token)
 CREATE INDEX idx_vendor_outreach_log_pending ON vendor_outreach_log(outreach_type, response_received, outreach_date);
 CREATE INDEX idx_vendor_outreach_log_transaction ON vendor_outreach_log(transaction_id, outreach_date DESC);
 CREATE INDEX idx_calendar_events_transaction ON calendar_events(transaction_id, starts_at DESC);
+CREATE UNIQUE INDEX idx_transaction_calendar_preferences_txn ON transaction_calendar_preferences(transaction_id);
+CREATE INDEX idx_google_calendar_mappings_txn_event ON google_calendar_mappings(transaction_id, event_type, status, updated_at DESC);
+CREATE UNIQUE INDEX idx_google_calendar_mappings_event_id ON google_calendar_mappings(google_event_id, calendar_id);
+CREATE INDEX idx_calendar_sync_audit_txn ON calendar_sync_audit_log(transaction_id, created_at DESC);
+CREATE INDEX idx_calendar_sync_audit_action ON calendar_sync_audit_log(action, success, created_at DESC);
+CREATE INDEX idx_calendar_webhook_channels_active ON calendar_webhook_channels(active, updated_at DESC);
 CREATE INDEX idx_inbound_email_messages_transaction ON inbound_email_messages(transaction_id, received_at DESC);
 CREATE INDEX idx_inbound_email_messages_qa ON inbound_email_messages(qa_decision, qa_match_id, received_at DESC);
 CREATE UNIQUE INDEX idx_inbound_email_rules_txn_role ON inbound_email_rules(transaction_id, sender_role);

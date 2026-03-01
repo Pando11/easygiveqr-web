@@ -309,6 +309,53 @@ Form `action` options:
   - can auto-answer by SMS when high confidence + auto-answer enabled
   - sends suggestion alert to Margaret when confidence is suggest-range
 
+## Google Calendar Integration
+
+### Management UI (TC)
+- `GET|POST /tc/calendar-sync`
+- Form actions:
+  - `update_settings` (enable/disable sync + per-event-type toggles)
+  - `sync_active_now` (bulk re-sync all active transactions)
+  - `register_channel` (store Google watch channel metadata)
+
+### Transaction-level controls
+- `POST /tc/transaction/<transaction_id>/calendar-sync`
+  - `action=sync` -> sync deadlines + closing + known vendor appointments
+  - `action=delete_events` -> delete mapped Google Calendar events
+- `POST /tc/transaction/<transaction_id>/calendar-closing`
+  - Save closing time/location/duration preferences
+  - Force update closing calendar event
+
+### Auto triggers
+- Deadline creation/rebuild flow:
+  - `create_deadlines(...)` calls `sync_all_deadlines(...)`
+- Vendor schedule events:
+  - `POST /vendor-response/<transaction_id>/<vendor_type>`
+  - `POST /vendor/outreach/<access_token>`
+- Closing event updates:
+  - transaction approval/verification flows and closing preference saves
+- Cancellation cleanup:
+  - `POST /tc/transaction/<transaction_id>/cancel`
+
+### Two-way webhook endpoint
+- `GET|POST /calendar-webhook`
+- Security:
+  - optional `CALENDAR_WEBHOOK_SECRET` via `X-Calendar-Secret` header (or `secret` param)
+- Supported payload fields:
+  - `event_id` (required for update matching)
+  - `calendar_id` (optional, defaults to configured calendar id)
+  - `start_time` / `end_time` or Google-style `start` / `end`
+- Behavior:
+  - resolves event in `google_calendar_mappings`
+  - applies date/time updates back to Maverick (deadlines, closing, inspection/appraisal appointments)
+  - writes audit + communication log entries
+
+### Event color coding defaults
+- Deadlines: Yellow (`colorId=5`, all-day events)
+- Inspections: Blue (`colorId=9`, timed)
+- Closings: Red (`colorId=11`, timed)
+- Appraisals: Green (`colorId=10`, timed)
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values

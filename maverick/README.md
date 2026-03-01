@@ -27,6 +27,7 @@ Core capabilities:
 - Automated weekly agent status updates (preview/edit/send controls, schedule choice, opt-out list)
 - Dynamic closing checklist generator (3-day trigger, Margaret review, 24-hour auto-send fallback, PDF + interactive + SMS)
 - Smart Q&A assistant with semantic matching, Margaret approval workflow, and auto-answer learning
+- Google Calendar sync for deadlines/inspections/appraisals/closings with color coding, manual overrides, and webhook updates
 - Automation scripts for reminders, closing protocol, problem detection, task auto-completion, closing checklists, and nightly backups
 
 ## Local setup instructions
@@ -120,6 +121,20 @@ COMMON_QA_SUGGEST_CONFIDENCE=75
 COMMON_QA_AUTO_CONFIDENCE=95
 COMMON_QA_AUTO_ENABLE_REUSE_COUNT=5
 COMMON_QA_VARIANT_SIMILARITY_THRESHOLD=0.82
+
+ENABLE_GOOGLE_CALENDAR_SYNC=true
+GOOGLE_CALENDAR_CREDENTIALS=
+GOOGLE_CALENDAR_ID=primary
+GOOGLE_CALENDAR_TIMEZONE=America/Chicago
+GOOGLE_CALENDAR_DELEGATED_USER=
+GOOGLE_CALENDAR_REFRESH_TOKEN=
+GOOGLE_CALENDAR_CLOSING_DEFAULT_TIME=09:00
+GOOGLE_CALENDAR_CLOSING_DURATION_MINUTES=60
+GOOGLE_CALENDAR_COLOR_DEADLINE=5
+GOOGLE_CALENDAR_COLOR_INSPECTION=9
+GOOGLE_CALENDAR_COLOR_CLOSING=11
+GOOGLE_CALENDAR_COLOR_APPRAISAL=10
+CALENDAR_WEBHOOK_SECRET=
 ```
 
 ## Run locally
@@ -273,6 +288,37 @@ Analytics:
 - monthly time saved estimate (hours)
 - most common question list
 - FAQ draft suggestion block for agent-facing documentation
+
+## Google Calendar Integration
+
+Maverick can sync key transaction events directly to Margaret's Google Calendar:
+
+- Management route: `GET|POST /tc/calendar-sync`
+- Transaction sync route: `POST /tc/transaction/<transaction_id>/calendar-sync`
+- Transaction closing preferences route: `POST /tc/transaction/<transaction_id>/calendar-closing`
+- Two-way webhook route: `GET|POST /calendar-webhook`
+
+OAuth setup:
+1. In Google Cloud Console, enable **Google Calendar API**.
+2. Create OAuth or service-account credentials with calendar write access.
+3. Put the credentials JSON into Railway env var `GOOGLE_CALENDAR_CREDENTIALS`.
+4. Set `GOOGLE_CALENDAR_ID` (`primary` or a shared calendar ID).
+5. (Optional) Configure `CALENDAR_WEBHOOK_SECRET` for webhook validation.
+
+Auto-sync triggers:
+- deadline creation/recreation -> all deadline events are synced as yellow all-day events
+- vendor inspection/appraisal scheduling -> timed blue/green events
+- closing date/time changes -> timed red closing event update
+- transaction cancellation -> synced events are deleted (when enabled)
+
+Color coding defaults:
+- Deadlines: yellow (`colorId=5`)
+- Inspections: blue (`colorId=9`)
+- Closings: red (`colorId=11`)
+- Appraisals: green (`colorId=10`)
+
+Two-way behavior:
+- when enabled, webhook payload updates can push event-time changes from Google Calendar back into Maverick deadlines, vendor appointment records, and closing timing preferences.
 
 ## Timeline Packet + Vendor Outreach Automation
 
