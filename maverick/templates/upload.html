@@ -507,7 +507,10 @@ uploadForm.addEventListener("submit", async (event) => {
             showError(payload.error || "Upload failed. Please review and try again.");
         }
     } catch (_error) {
-        showError("Network error. Please check your connection and try again.");
+        showError(
+            "Upload connection issue. Your contract may still have been received. "
+            + "Please check Margaret's dashboard before submitting again."
+        );
     } finally {
         setLoading(false);
         if (typeof window.hideLoading === "function") {
