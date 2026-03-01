@@ -1,5 +1,7 @@
 import os
 import re
+import csv
+import io
 import tempfile
 from datetime import date, datetime, timedelta
 from functools import wraps
@@ -8,7 +10,7 @@ from typing import Any
 
 import stripe
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
 from twilio.twiml.messaging_response import MessagingResponse
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
@@ -514,6 +516,307 @@ def get_email_notification_status(transaction_id, lender_email, title_email):
     return {
         "lender": status_for(lender_email, row.get("lender_sent_at"), row.get("lender_failed_at")),
         "title": status_for(title_email, row.get("title_sent_at"), row.get("title_failed_at")),
+    }
+
+
+def commission_base_fee(rush_service):
+    """Return standard/rush per-phase fee."""
+    return 300.0 if rush_service else 200.0
+
+
+def normalize_referral_credit(value):
+    """Clamp referral credit to expected reporting values (0 or 50)."""
+    try:
+        numeric = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return 50.0 if numeric > 0 else 0.0
+
+
+def ensure_commission_tracking_table():
+    """Ensure commission tracking schema exists for revenue reporting."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS commission_tracking (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+            upfront_fee DECIMAL(10,2) NOT NULL,
+            closing_fee DECIMAL(10,2) NOT NULL,
+            referral_credit_given DECIMAL(10,2) NOT NULL DEFAULT 0,
+            total_revenue DECIMAL(10,2) NOT NULL,
+            upfront_paid_date TIMESTAMP,
+            closing_paid_date TIMESTAMP,
+            month VARCHAR(7) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_commission_tracking_transaction
+        ON commission_tracking(transaction_id)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_commission_tracking_month
+        ON commission_tracking(month)
+        """
+    )
+
+
+def upsert_commission_tracking(transaction_id, referral_credit_override=None):
+    """Create/update commission tracking row from current transaction state."""
+    ensure_commission_tracking_table()
+    rows = execute_query(
+        """
+        SELECT id, rush_service, created_at, payment_upfront_date, payment_closing_date
+        FROM transactions
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return False
+
+    transaction = rows[0]
+    existing_rows = execute_query(
+        "SELECT referral_credit_given FROM commission_tracking WHERE transaction_id = %s",
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    existing_credit = existing_rows[0]["referral_credit_given"] if existing_rows else 0
+
+    if referral_credit_override is None:
+        referral_credit_given = normalize_referral_credit(existing_credit)
+    else:
+        referral_credit_given = normalize_referral_credit(referral_credit_override)
+
+    upfront_fee = commission_base_fee(bool(transaction.get("rush_service")))
+    closing_fee = commission_base_fee(bool(transaction.get("rush_service")))
+    total_revenue = round(upfront_fee + closing_fee - referral_credit_given, 2)
+    created_at_value = transaction.get("created_at") or datetime.now()
+    month_label = created_at_value.strftime("%Y-%m")
+
+    return bool(
+        execute_query(
+            """
+            INSERT INTO commission_tracking (
+                transaction_id,
+                upfront_fee,
+                closing_fee,
+                referral_credit_given,
+                total_revenue,
+                upfront_paid_date,
+                closing_paid_date,
+                month,
+                updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (transaction_id)
+            DO UPDATE SET
+                upfront_fee = EXCLUDED.upfront_fee,
+                closing_fee = EXCLUDED.closing_fee,
+                referral_credit_given = EXCLUDED.referral_credit_given,
+                total_revenue = EXCLUDED.total_revenue,
+                upfront_paid_date = EXCLUDED.upfront_paid_date,
+                closing_paid_date = EXCLUDED.closing_paid_date,
+                month = EXCLUDED.month,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                transaction_id,
+                round(upfront_fee, 2),
+                round(closing_fee, 2),
+                round(referral_credit_given, 2),
+                total_revenue,
+                transaction.get("payment_upfront_date"),
+                transaction.get("payment_closing_date"),
+                month_label,
+            ),
+        )
+    )
+
+
+def parse_revenue_filters():
+    """Parse month/quarter/year filter selections from request args."""
+    today = date.today()
+    selected_period = (request.args.get("period") or "month").strip().lower()
+    if selected_period not in {"month", "quarter", "year"}:
+        selected_period = "month"
+
+    month_value = (request.args.get("month") or today.strftime("%Y-%m")).strip()
+    if not re.match(r"^\d{4}-\d{2}$", month_value):
+        month_value = today.strftime("%Y-%m")
+
+    default_quarter = f"{today.year}-Q{((today.month - 1) // 3) + 1}"
+    quarter_value = (request.args.get("quarter") or default_quarter).strip().upper()
+    quarter_match = re.match(r"^(\d{4})-Q([1-4])$", quarter_value)
+    if not quarter_match:
+        quarter_value = default_quarter
+        quarter_match = re.match(r"^(\d{4})-Q([1-4])$", quarter_value)
+
+    year_value_raw = (request.args.get("year") or str(today.year)).strip()
+    year_value = int(year_value_raw) if re.match(r"^\d{4}$", year_value_raw) else today.year
+
+    if selected_period == "month":
+        months = [month_value]
+        label = month_value
+    elif selected_period == "quarter":
+        quarter_year = int(quarter_match.group(1))
+        quarter_num = int(quarter_match.group(2))
+        start_month = (quarter_num - 1) * 3 + 1
+        months = [f"{quarter_year}-{month:02d}" for month in range(start_month, start_month + 3)]
+        label = f"{quarter_year} Q{quarter_num}"
+    else:
+        months = [f"{year_value}-{month:02d}" for month in range(1, 13)]
+        label = str(year_value)
+
+    return {
+        "period": selected_period,
+        "month": month_value,
+        "quarter": quarter_value,
+        "year": str(year_value),
+        "months": months,
+        "label": label,
+    }
+
+
+def fetch_commission_rows(months):
+    """Fetch commission rows for selected month labels."""
+    if not months:
+        return []
+    placeholders = ", ".join(["%s"] * len(months))
+    query = f"""
+        SELECT
+            ct.transaction_id, ct.month, ct.upfront_fee, ct.closing_fee, ct.referral_credit_given,
+            ct.total_revenue, ct.upfront_paid_date, ct.closing_paid_date,
+            t.property_address, t.agent_name, t.status
+        FROM commission_tracking ct
+        JOIN transactions t ON t.id = ct.transaction_id
+        WHERE ct.month IN ({placeholders})
+          AND t.status <> 'CANCELLED'
+        ORDER BY ct.month ASC, ct.transaction_id ASC
+    """
+    return execute_query(query, tuple(months), fetch=True) or []
+
+
+def build_revenue_summary(rows, selected_months):
+    """Build totals and chart payloads for revenue dashboard."""
+    month_buckets = {
+        month: {"revenue": 0.0, "pending": 0.0, "referrals": 0.0}
+        for month in selected_months
+    }
+
+    total_revenue = 0.0
+    total_pending = 0.0
+    total_referrals = 0.0
+    paid_upfront_count = 0
+    paid_closing_count = 0
+    pending_upfront_count = 0
+    pending_closing_count = 0
+
+    formatted_rows = []
+    for row in rows:
+        upfront_fee = float(row.get("upfront_fee") or 0)
+        closing_fee = float(row.get("closing_fee") or 0)
+        referral_credit = float(row.get("referral_credit_given") or 0)
+        total_value = float(row.get("total_revenue") or 0)
+        upfront_due = max(upfront_fee - referral_credit, 0.0)
+        closing_due = closing_fee
+        upfront_paid = bool(row.get("upfront_paid_date"))
+        closing_paid = bool(row.get("closing_paid_date"))
+        pending_value = (0.0 if upfront_paid else upfront_due) + (0.0 if closing_paid else closing_due)
+
+        month_key = row.get("month")
+        if month_key not in month_buckets:
+            month_buckets[month_key] = {"revenue": 0.0, "pending": 0.0, "referrals": 0.0}
+        month_buckets[month_key]["revenue"] += total_value
+        month_buckets[month_key]["pending"] += pending_value
+        month_buckets[month_key]["referrals"] += referral_credit
+
+        total_revenue += total_value
+        total_pending += pending_value
+        total_referrals += referral_credit
+        if upfront_paid:
+            paid_upfront_count += 1
+        else:
+            pending_upfront_count += 1
+        if closing_paid:
+            paid_closing_count += 1
+        else:
+            pending_closing_count += 1
+
+        formatted_rows.append(
+            {
+                "transaction_id": row.get("transaction_id"),
+                "month": month_key,
+                "property_address": row.get("property_address"),
+                "agent_name": row.get("agent_name"),
+                "status": row.get("status"),
+                "upfront_fee": round(upfront_fee, 2),
+                "closing_fee": round(closing_fee, 2),
+                "referral_credit_given": round(referral_credit, 2),
+                "total_revenue": round(total_value, 2),
+                "pending_amount": round(pending_value, 2),
+                "upfront_paid_date": row.get("upfront_paid_date"),
+                "closing_paid_date": row.get("closing_paid_date"),
+            }
+        )
+
+    month_labels = list(month_buckets.keys())
+    chart_payload = {
+        "kpi": {
+            "labels": ["Total Revenue", "Payments Pending", "Referral Credits"],
+            "series": [
+                {
+                    "name": "Current Selection",
+                    "color": "#1d4ed8",
+                    "values": [
+                        round(total_revenue, 2),
+                        round(total_pending, 2),
+                        round(total_referrals, 2),
+                    ],
+                }
+            ],
+        },
+        "monthly": {
+            "labels": month_labels,
+            "series": [
+                {
+                    "name": "Revenue",
+                    "color": "#10b981",
+                    "values": [round(month_buckets[label]["revenue"], 2) for label in month_labels],
+                },
+                {
+                    "name": "Pending",
+                    "color": "#f59e0b",
+                    "values": [round(month_buckets[label]["pending"], 2) for label in month_labels],
+                },
+                {
+                    "name": "Referral Credits",
+                    "color": "#ef4444",
+                    "values": [round(month_buckets[label]["referrals"], 2) for label in month_labels],
+                },
+            ],
+        },
+    }
+
+    return {
+        "rows": formatted_rows,
+        "totals": {
+            "total_revenue": round(total_revenue, 2),
+            "payments_pending": round(total_pending, 2),
+            "referral_credits": round(total_referrals, 2),
+            "transaction_count": len(rows),
+            "paid_upfront_count": paid_upfront_count,
+            "pending_upfront_count": pending_upfront_count,
+            "paid_closing_count": paid_closing_count,
+            "pending_closing_count": pending_closing_count,
+        },
+        "chart_payload": chart_payload,
     }
 
 
@@ -1082,6 +1385,89 @@ def tc_dashboard():
         needs_review=needs_review,
         active_transactions=active_transactions,
         completed_transactions=completed_transactions,
+    )
+
+
+@app.route("/tc/revenue")
+@login_required
+def tc_revenue():
+    """Render commission/revenue dashboard with month/quarter/year filters."""
+    ensure_commission_tracking_table()
+    filters = parse_revenue_filters()
+    rows = fetch_commission_rows(filters["months"])
+    revenue_summary = build_revenue_summary(rows, filters["months"])
+    export_url = url_for(
+        "export_revenue_csv",
+        period=filters["period"],
+        month=filters["month"],
+        quarter=filters["quarter"],
+        year=filters["year"],
+    )
+
+    return render_template(
+        "tc_revenue.html",
+        filters=filters,
+        totals=revenue_summary["totals"],
+        rows=revenue_summary["rows"],
+        chart_payload=revenue_summary["chart_payload"],
+        export_url=export_url,
+    )
+
+
+@app.route("/tc/revenue/export")
+@login_required
+def export_revenue_csv():
+    """Export filtered revenue rows as CSV."""
+    ensure_commission_tracking_table()
+    filters = parse_revenue_filters()
+    rows = fetch_commission_rows(filters["months"])
+    revenue_summary = build_revenue_summary(rows, filters["months"])
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "period",
+            "month",
+            "transaction_id",
+            "property_address",
+            "agent_name",
+            "status",
+            "upfront_fee",
+            "closing_fee",
+            "referral_credit_given",
+            "total_revenue",
+            "pending_amount",
+            "upfront_paid_date",
+            "closing_paid_date",
+        ]
+    )
+    for row in revenue_summary["rows"]:
+        writer.writerow(
+            [
+                filters["label"],
+                row["month"],
+                row["transaction_id"],
+                row["property_address"],
+                row["agent_name"],
+                row["status"],
+                f"{row['upfront_fee']:.2f}",
+                f"{row['closing_fee']:.2f}",
+                f"{row['referral_credit_given']:.2f}",
+                f"{row['total_revenue']:.2f}",
+                f"{row['pending_amount']:.2f}",
+                row["upfront_paid_date"].isoformat() if row.get("upfront_paid_date") else "",
+                row["closing_paid_date"].isoformat() if row.get("closing_paid_date") else "",
+            ]
+        )
+
+    filename = f"maverick_revenue_{filters['period']}_{filters['label'].replace(' ', '_')}.csv"
+    csv_payload = output.getvalue()
+    output.close()
+    return Response(
+        csv_payload,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1912,6 +2298,8 @@ def approve_transaction(transaction_id):
     if not updated:
         return "Failed to activate transaction.", 500
 
+    upsert_commission_tracking(transaction_id)
+
     if not create_deadlines(transaction_id, deadline_dates):
         return "Failed to create deadlines.", 500
     if not create_tasks(transaction_id, effective_date_value, closing_date_value):
@@ -2196,6 +2584,9 @@ def mark_transaction_payment(transaction_id):
         return "Invalid payment type.", 400
 
     if payment_type == "upfront":
+        upfront_breakdown = calculate_payment_breakdown(transaction, "upfront")
+        referral_credit_used = float(upfront_breakdown.get("referral_credit", 0) or 0)
+        amount_marked = float(upfront_breakdown["amount"])
         execute_query(
             """
             UPDATE transactions
@@ -2207,8 +2598,9 @@ def mark_transaction_payment(transaction_id):
             (transaction_id,),
         )
         mark_referral_credit_used_if_needed(transaction_id, transaction.get("agent_name"))
-        amount_marked = calculate_payment_breakdown(transaction, "upfront")["amount"]
+        upsert_commission_tracking(transaction_id, referral_credit_override=referral_credit_used)
     else:
+        amount_marked = calculate_payment_breakdown(transaction, "closing")["amount"]
         execute_query(
             """
             UPDATE transactions
@@ -2219,7 +2611,7 @@ def mark_transaction_payment(transaction_id):
             """,
             (transaction_id,),
         )
-        amount_marked = calculate_payment_breakdown(transaction, "closing")["amount"]
+        upsert_commission_tracking(transaction_id)
 
     send_sms(
         transaction.get("agent_phone"),
@@ -2366,6 +2758,7 @@ def upload_contract_route():
         WHERE id = %s
         """
         execute_query(update_query, (s3_key, safe_filename, transaction_id))
+        upsert_commission_tracking(transaction_id, referral_credit_override=0)
         run_contract_extraction_async(transaction_id, s3_key, property_address)
 
         confirmation_message = f"""Contract received for {property_address}!
@@ -2531,6 +2924,10 @@ def process_payment(transaction_id, payment_type):
             if not updated:
                 return jsonify({"success": False, "error": "Failed to record payment"}), 500
             mark_referral_credit_used_if_needed(transaction_id, transaction.get("agent_name"))
+            upsert_commission_tracking(
+                transaction_id,
+                referral_credit_override=float(breakdown.get("referral_credit", 0) or 0),
+            )
         else:
             updated = execute_query(
                 """
@@ -2544,6 +2941,7 @@ def process_payment(transaction_id, payment_type):
             )
             if not updated:
                 return jsonify({"success": False, "error": "Failed to record payment"}), 500
+            upsert_commission_tracking(transaction_id)
 
         if transaction.get("agent_phone"):
             send_sms(
@@ -2620,6 +3018,19 @@ def stripe_webhook():
                 """,
                 (transaction_id,),
             )
+            rows = execute_query(
+                """
+                SELECT id, agent_name, rush_service, referred_by_agent
+                FROM transactions
+                WHERE id = %s
+                """,
+                (transaction_id,),
+                fetch=True,
+            ) or []
+            if rows:
+                referral_credit = calculate_payment_breakdown(rows[0], "upfront").get("referral_credit", 0)
+                mark_referral_credit_used_if_needed(transaction_id, rows[0].get("agent_name"))
+                upsert_commission_tracking(transaction_id, referral_credit_override=referral_credit)
         else:
             execute_query(
                 """
@@ -2631,6 +3042,7 @@ def stripe_webhook():
                 """,
                 (transaction_id,),
             )
+            upsert_commission_tracking(transaction_id)
 
         execute_query(
             """

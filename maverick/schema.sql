@@ -269,6 +269,20 @@ CREATE TABLE extracted_contract_data (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE commission_tracking (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+    upfront_fee DECIMAL(10,2) NOT NULL,
+    closing_fee DECIMAL(10,2) NOT NULL,
+    referral_credit_given DECIMAL(10,2) NOT NULL DEFAULT 0,
+    total_revenue DECIMAL(10,2) NOT NULL,
+    upfront_paid_date TIMESTAMP,
+    closing_paid_date TIMESTAMP,
+    month VARCHAR(7) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -287,3 +301,5 @@ CREATE INDEX idx_access_logs_timestamp ON document_access_logs(timestamp);
 CREATE UNIQUE INDEX idx_predictive_alerts_txn_alert_date ON predictive_alerts(transaction_id, alert_date);
 CREATE INDEX idx_predictive_alerts_open ON predictive_alerts(transaction_id, resolved_date);
 CREATE UNIQUE INDEX idx_extracted_contract_data_transaction ON extracted_contract_data(transaction_id);
+CREATE UNIQUE INDEX idx_commission_tracking_transaction ON commission_tracking(transaction_id);
+CREATE INDEX idx_commission_tracking_month ON commission_tracking(month);
