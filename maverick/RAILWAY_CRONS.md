@@ -66,6 +66,22 @@ Use these schedules and commands in Railway Cron.
   - confidence scoring + review flags below 80%
   - high-stakes task exclusion (never auto-complete)
 
+## Intelligent Morning Briefing
+- Schedule: `30 7 * * *`
+- Command: `cd maverick && python3 automation/morning_briefing.py --mode morning`
+- Includes:
+  - AI-prioritized morning action board (SMS + detailed email)
+  - pattern highlights + batching suggestions
+  - interactive `/tc/morning-briefing` checklist population
+
+## Evening Recap
+- Schedule: `0 14 * * *`
+- Command: `cd maverick && python3 automation/morning_briefing.py --mode evening`
+- Includes:
+  - 2 PM progress summary (done vs pending/deferred)
+  - rollover-to-tomorrow view
+  - completion celebration highlights
+
 ## Database Backup
 - Schedule: `0 2 * * *`
 - Command: `bash backup_db.sh`

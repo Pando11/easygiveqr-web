@@ -135,6 +135,10 @@ GOOGLE_CALENDAR_COLOR_INSPECTION=9
 GOOGLE_CALENDAR_COLOR_CLOSING=11
 GOOGLE_CALENDAR_COLOR_APPRAISAL=10
 CALENDAR_WEBHOOK_SECRET=
+MORNING_BRIEFING_SEND_TIME=07:30
+EVENING_RECAP_SEND_TIME=14:00
+MORNING_BRIEFING_TIMEZONE=America/Chicago
+MORNING_BRIEFING_MODEL=claude-sonnet-4-20250514
 ```
 
 ## Run locally
@@ -319,6 +323,38 @@ Color coding defaults:
 
 Two-way behavior:
 - when enabled, webhook payload updates can push event-time changes from Google Calendar back into Maverick deadlines, vendor appointment records, and closing timing preferences.
+
+## Intelligent Morning Briefing + 2 PM Recap
+
+Maverick now supports an AI-powered briefing workflow tailored to Margaret:
+
+- Interactive route: `GET|POST /tc/morning-briefing`
+- Item update route: `POST /tc/morning-briefing/item/<item_id>/update`
+- Reorder route: `POST /tc/morning-briefing/item/<item_id>/move`
+- Automation script: `python3 automation/morning_briefing.py`
+  - Morning mode: `--mode morning`
+  - Evening recap mode: `--mode evening`
+  - Both: `--mode both`
+  - Preview without send: `--dry-run`
+
+Morning briefing behavior:
+- gathers active transactions, urgent problem-detector items, calls, overdue/due-today tasks, pending decisions, and good-news wins
+- learns Margaret's prioritization patterns from prior interactive completion/defer behavior
+- generates:
+  - SMS summary (urgent + actionable)
+  - detailed email briefing (priority order, pattern highlights, batching suggestions, time estimate)
+- stores an interactive item list where Margaret can:
+  - check off completed items
+  - reorder priorities
+  - add notes
+  - defer tasks to tomorrow
+  - use one-click call/text/email links
+
+2 PM recap behavior:
+- summarizes what was completed vs. still pending
+- highlights rollover items for tomorrow
+- includes completion celebrations
+- sends via SMS + email
 
 ## Timeline Packet + Vendor Outreach Automation
 

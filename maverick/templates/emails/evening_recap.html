@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>2 PM Recap</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">{{ subject or "2 PM Recap" }}</h2>
+                <p style="margin:8px 0 0; color:#334155;">Briefing date: {{ briefing_date }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse; margin-bottom:14px;">
+                    <tr>
+                        <td style="padding:6px; border:1px solid #e2e8f0;"><strong>Completed</strong><br>{{ completed_count or 0 }}</td>
+                        <td style="padding:6px; border:1px solid #e2e8f0;"><strong>Pending</strong><br>{{ pending_count or 0 }}</td>
+                        <td style="padding:6px; border:1px solid #e2e8f0;"><strong>Deferred</strong><br>{{ deferred_count or 0 }}</td>
+                    </tr>
+                </table>
+
+                {% if celebration_lines %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">Wins to Celebrate</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for line in celebration_lines %}
+                    <li>{{ line }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if rollover_lines %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">Rolling to Tomorrow</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for row in rollover_lines %}
+                    <li>
+                        {{ row.title }}
+                        {% if row.transaction_id %}(Transaction #{{ row.transaction_id }}){% endif %}
+                        {% if row.deferred_to %} → {{ row.deferred_to }}{% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if completed_items %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">Completed Priority Items</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for row in completed_items %}
+                    <li>{{ row.title }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if brief_url %}
+                <p style="margin:16px 0 0;">
+                    Open full interactive brief:
+                    <a href="{{ brief_url }}" target="_blank" rel="noopener">{{ brief_url }}</a>
+                </p>
+                {% endif %}
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

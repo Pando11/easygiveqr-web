@@ -223,6 +223,72 @@ CREATE TABLE website_reviews (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE morning_briefing_settings (
+    id SERIAL PRIMARY KEY,
+    enabled BOOLEAN DEFAULT TRUE,
+    send_time VARCHAR(5) DEFAULT '07:30',
+    recap_enabled BOOLEAN DEFAULT TRUE,
+    recap_time VARCHAR(5) DEFAULT '14:00',
+    timezone VARCHAR(80) DEFAULT 'America/Chicago',
+    ai_enabled BOOLEAN DEFAULT TRUE,
+    updated_by VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE morning_briefings (
+    id SERIAL PRIMARY KEY,
+    briefing_date DATE UNIQUE NOT NULL,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(20) DEFAULT 'ready',
+    total_transactions INT DEFAULT 0,
+    closing_today_count INT DEFAULT 0,
+    closing_week_count INT DEFAULT 0,
+    urgent_count INT DEFAULT 0,
+    estimated_day_minutes INT DEFAULT 0,
+    sms_version TEXT,
+    email_subject VARCHAR(255),
+    email_opening TEXT,
+    payload JSONB DEFAULT '{}'::jsonb,
+    sent_sms BOOLEAN DEFAULT FALSE,
+    sent_email BOOLEAN DEFAULT FALSE,
+    sms_sid VARCHAR(120),
+    email_message_id VARCHAR(255),
+    send_error TEXT,
+    recap_generated_at TIMESTAMP,
+    recap_payload JSONB DEFAULT '{}'::jsonb,
+    recap_sms TEXT,
+    recap_sent_sms BOOLEAN DEFAULT FALSE,
+    recap_sent_email BOOLEAN DEFAULT FALSE,
+    recap_sms_sid VARCHAR(120),
+    recap_email_message_id VARCHAR(255),
+    recap_send_error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE morning_briefing_items (
+    id SERIAL PRIMARY KEY,
+    briefing_id INT REFERENCES morning_briefings(id) ON DELETE CASCADE,
+    transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+    item_type VARCHAR(50) NOT NULL,
+    category VARCHAR(50),
+    priority VARCHAR(20) DEFAULT 'medium',
+    title TEXT NOT NULL,
+    details TEXT,
+    contact_phone VARCHAR(25),
+    contact_email VARCHAR(255),
+    status VARCHAR(20) DEFAULT 'pending',
+    display_order INT DEFAULT 999,
+    estimated_minutes INT DEFAULT 10,
+    deferred_to_date DATE,
+    notes TEXT,
+    source_data JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
 CREATE TABLE document_classification_corrections (
     id SERIAL PRIMARY KEY,
     document_id INT REFERENCES documents(id) ON DELETE SET NULL,
@@ -1074,3 +1140,6 @@ CREATE INDEX idx_closing_checklists_status ON closing_checklists(status, auto_se
 CREATE INDEX idx_closing_checklist_items_checklist ON closing_checklist_items(checklist_id, section_title, sort_order, id);
 CREATE INDEX idx_closing_checklist_recipients_checklist ON closing_checklist_recipients(checklist_id, party_role, recipient_email);
 CREATE INDEX idx_closing_lender_requirements_active ON closing_lender_requirements(active, lender_name);
+CREATE INDEX idx_morning_briefings_date ON morning_briefings(briefing_date DESC, generated_at DESC);
+CREATE INDEX idx_morning_briefing_items_briefing ON morning_briefing_items(briefing_id, display_order, id);
+CREATE INDEX idx_morning_briefing_items_status ON morning_briefing_items(status, deferred_to_date, updated_at DESC);

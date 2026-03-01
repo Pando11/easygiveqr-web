@@ -356,6 +356,39 @@ Form `action` options:
 - Closings: Red (`colorId=11`, timed)
 - Appraisals: Green (`colorId=10`, timed)
 
+## Intelligent Morning Briefing
+
+### Interactive routes (TC)
+- `GET|POST /tc/morning-briefing`
+  - Form actions:
+    - `update_settings` (enable/disable, set morning send time + recap send time + timezone + AI toggle)
+    - `generate_now` (force-generate morning briefing; optional send toggle)
+    - `send_recap_now` (force-generate 2 PM recap; optional send toggle)
+- `POST /tc/morning-briefing/item/<item_id>/update`
+  - Actions:
+    - `complete`
+    - `reopen`
+    - `defer` (with optional `deferred_to_date`)
+  - Supports notes updates
+- `POST /tc/morning-briefing/item/<item_id>/move`
+  - `direction=up|down`
+
+### Automation script
+- `python3 automation/morning_briefing.py`
+  - `--mode morning` (default)
+  - `--mode evening`
+  - `--mode both`
+  - `--force`
+  - `--dry-run`
+
+### Data sources used
+- Active transactions (`transactions.status='ACTIVE'`)
+- Urgent problem detector rows (`problem_detection_results.bucket='urgent'`)
+- Overdue + due-today tasks
+- Pending decisions (intake approvals, analysis reviews, payment confirmations)
+- Critical call queue from deadline windows
+- Recent good news (completions, completed tasks, positive reviews)
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values

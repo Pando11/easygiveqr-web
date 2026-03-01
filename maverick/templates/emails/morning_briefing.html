@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Morning Briefing</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:760px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">{{ subject or "Morning Briefing" }}</h2>
+                <p style="margin:8px 0 0; color:#334155;">{{ workload_tone or "Daily briefing" }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                {% if opening %}
+                <p style="margin:0 0 14px;">{{ opening }}</p>
+                {% endif %}
+
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse; margin-bottom:14px;">
+                    <tr>
+                        <td style="padding:6px; border:1px solid #e2e8f0;"><strong>Active</strong><br>{{ total_transactions or 0 }}</td>
+                        <td style="padding:6px; border:1px solid #e2e8f0;"><strong>Closing today</strong><br>{{ closing_today_count or 0 }}</td>
+                        <td style="padding:6px; border:1px solid #e2e8f0;"><strong>Closing this week</strong><br>{{ closing_week_count or 0 }}</td>
+                        <td style="padding:6px; border:1px solid #e2e8f0;"><strong>Urgent</strong><br>{{ urgent_count or 0 }}</td>
+                        <td style="padding:6px; border:1px solid #e2e8f0;"><strong>Est. time</strong><br>{{ estimated_day_label or (estimated_day_minutes|string ~ " min") }}</td>
+                    </tr>
+                </table>
+
+                {% if pattern_highlights %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">Pattern Highlights</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for line in pattern_highlights %}
+                    <li>{{ line }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if batching_suggestions %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">Batching Suggestions</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for line in batching_suggestions %}
+                    <li>{{ line }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if recommended_order %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">Recommended Task Order</h3>
+                <ol style="margin:0 0 14px; padding-left:18px;">
+                    {% for item in recommended_order %}
+                    <li>
+                        {{ item.title }}
+                        {% if item.estimated_minutes %} ({{ item.estimated_minutes }} min){% endif %}
+                        {% if item.transaction_id %} — Transaction #{{ item.transaction_id }}{% endif %}
+                    </li>
+                    {% endfor %}
+                </ol>
+                {% endif %}
+
+                {% if priority_items %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">Priority Items</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for item in priority_items %}
+                    <li>
+                        <strong>{{ item.title }}</strong>
+                        {% if item.priority %} ({{ item.priority }}){% endif %}
+                        {% if item.estimated_minutes %} · {{ item.estimated_minutes }} min{% endif %}
+                        {% if item.details %}<br><small>{{ item.details }}</small>{% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if calls_needed %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">Calls Needed</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for call in calls_needed %}
+                    <li>
+                        {{ call.property_address }} — {{ call.contact_type|default("contact")|title }}
+                        {% if call.contact_phone %} ({{ call.contact_phone }}){% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if good_news %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">Good News</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for item in good_news %}
+                    <li>{{ item.label }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if brief_url %}
+                <p style="margin:16px 0 0;">
+                    Open interactive brief:
+                    <a href="{{ brief_url }}" target="_blank" rel="noopener">{{ brief_url }}</a>
+                </p>
+                {% endif %}
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

@@ -44,6 +44,18 @@ from automation.problem_detector import (
     update_problem_detection_settings,
     upsert_problem_detection_whitelist,
 )
+from automation.morning_briefing import (
+    ensure_morning_briefing_tables,
+    fetch_latest_morning_briefing,
+    fetch_morning_briefing_by_date,
+    fetch_morning_briefing_items,
+    fetch_morning_briefing_settings,
+    generate_evening_recap,
+    generate_morning_briefing,
+    move_morning_briefing_item,
+    update_morning_briefing_item,
+    update_morning_briefing_settings,
+)
 from config import Config
 from utils.bulk_messaging import (
     SMART_TEMPLATE_VARIABLES,
@@ -10638,6 +10650,178 @@ def toggle_call_made(deadline_id):
     except Exception as exc:
         print(f"Call toggle error: {exc}")
         return jsonify({"success": False, "error": "Unable to update call status"}), 500
+
+
+def _morning_briefing_notice_type(value):
+    normalized = (value or "success").strip().lower()
+    return normalized if normalized in {"success", "warning", "error"} else "success"
+
+
+def _morning_briefing_target_date(raw_value):
+    parsed = parse_optional_date(raw_value)
+    return parsed or date.today()
+
+
+@app.route("/tc/morning-briefing", methods=["GET", "POST"])
+@login_required
+def tc_morning_briefing():
+    """Interactive morning briefing workspace with configurable schedule."""
+    ensure_morning_briefing_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = _morning_briefing_notice_type(request.args.get("notice_type"))
+    selected_date = _morning_briefing_target_date(request.args.get("date"))
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        selected_date = _morning_briefing_target_date(request.form.get("selected_date"))
+        notice = "Morning briefing updated."
+        notice_type = "success"
+        if action == "update_settings":
+            updated_settings = update_morning_briefing_settings(
+                {
+                    "enabled": parse_bool_value(request.form.get("enabled"), default=False),
+                    "send_time": request.form.get("send_time"),
+                    "recap_enabled": parse_bool_value(request.form.get("recap_enabled"), default=False),
+                    "recap_time": request.form.get("recap_time"),
+                    "timezone": request.form.get("timezone"),
+                    "ai_enabled": parse_bool_value(request.form.get("ai_enabled"), default=False),
+                },
+                updated_by=session.get("tc_username", "margaret"),
+            )
+            notice = (
+                f"Morning briefing settings saved "
+                f"({updated_settings.get('send_time')} morning / {updated_settings.get('recap_time')} recap)."
+            )
+        elif action == "generate_now":
+            result = generate_morning_briefing(
+                force=True,
+                send_messages=parse_bool_value(request.form.get("send_messages"), default=False),
+            )
+            if result.get("success"):
+                selected_date = _morning_briefing_target_date(result.get("briefing_date"))
+                notice = (
+                    "Morning briefing generated."
+                    if not result.get("reused_existing")
+                    else "Morning briefing already existed; loaded latest."
+                )
+            else:
+                notice = f"Morning briefing was not generated: {result.get('skipped') or result.get('error') or 'unknown'}"
+                notice_type = "warning"
+        elif action == "send_recap_now":
+            result = generate_evening_recap(
+                force=True,
+                send_messages=parse_bool_value(request.form.get("send_messages"), default=False),
+            )
+            if result.get("success"):
+                notice = "2 PM recap generated and delivered."
+            else:
+                notice = f"Recap was not generated: {result.get('skipped') or result.get('error') or 'unknown'}"
+                notice_type = "warning"
+        else:
+            notice = "Unknown morning briefing action."
+            notice_type = "warning"
+
+        return redirect(
+            url_for(
+                "tc_morning_briefing",
+                date=selected_date.isoformat(),
+                notice=notice,
+                notice_type=notice_type,
+            )
+        )
+
+    settings = fetch_morning_briefing_settings()
+    briefing = fetch_morning_briefing_by_date(selected_date)
+    if not briefing:
+        briefing = fetch_latest_morning_briefing(days_back=21)
+    items = fetch_morning_briefing_items(briefing["id"], include_completed=True) if briefing else []
+
+    for item in items:
+        transaction_id = item.get("transaction_id")
+        item["transaction_url"] = url_for("tc_transaction", transaction_id=transaction_id) if transaction_id else ""
+        digits = re.sub(r"\D", "", item.get("contact_phone") or "")
+        item["phone_link"] = f"tel:{digits}" if digits else ""
+        item["sms_link"] = f"sms:{digits}" if digits else ""
+        item["email_link"] = f"mailto:{item.get('contact_email')}" if item.get("contact_email") else ""
+        item["priority_label"] = (item.get("priority") or "medium").title()
+        item["status_label"] = (item.get("status") or "pending").replace("_", " ").title()
+        item["deferred_label"] = format_date_label(item.get("deferred_to_date"))
+
+    item_summary = {
+        "pending_count": len([item for item in items if item.get("status") == "pending"]),
+        "completed_count": len([item for item in items if item.get("status") == "completed"]),
+        "deferred_count": len([item for item in items if item.get("status") == "deferred"]),
+    }
+    email_payload = (briefing or {}).get("payload", {}).get("email_version", {}) if briefing else {}
+    return render_template(
+        "tc_morning_briefing.html",
+        notice=notice,
+        notice_type=notice_type,
+        settings=settings,
+        selected_date=selected_date,
+        briefing=briefing,
+        briefing_email=email_payload,
+        items=items,
+        item_summary=item_summary,
+    )
+
+
+@app.route("/tc/morning-briefing/item/<int:item_id>/update", methods=["POST"])
+@login_required
+def update_morning_briefing_item_route(item_id):
+    """Update completion state, notes, or defer date for a briefing item."""
+    action = (request.form.get("action") or "").strip().lower()
+    notes = (request.form.get("notes") or "").strip()
+    selected_date = _morning_briefing_target_date(request.form.get("selected_date"))
+    deferred_to = parse_optional_date(request.form.get("deferred_to_date"))
+
+    if action == "complete":
+        status = "completed"
+    elif action == "defer":
+        status = "deferred"
+        if deferred_to is None:
+            deferred_to = date.today() + timedelta(days=1)
+    elif action == "reopen":
+        status = "pending"
+        deferred_to = None
+    else:
+        status = request.form.get("status") or "pending"
+
+    ok = update_morning_briefing_item(
+        item_id=item_id,
+        status=status,
+        notes=notes,
+        deferred_to_date=deferred_to,
+    )
+    notice = "Briefing item updated." if ok else "Unable to update briefing item."
+    notice_type = "success" if ok else "warning"
+    return redirect(
+        url_for(
+            "tc_morning_briefing",
+            date=selected_date.isoformat(),
+            notice=notice,
+            notice_type=notice_type,
+        )
+    )
+
+
+@app.route("/tc/morning-briefing/item/<int:item_id>/move", methods=["POST"])
+@login_required
+def move_morning_briefing_item_route(item_id):
+    """Move briefing item up/down in suggested task order."""
+    direction = (request.form.get("direction") or "up").strip().lower()
+    selected_date = _morning_briefing_target_date(request.form.get("selected_date"))
+    moved = move_morning_briefing_item(item_id=item_id, direction=direction)
+    notice = "Priority order updated." if moved else "Could not reorder this item."
+    notice_type = "success" if moved else "warning"
+    return redirect(
+        url_for(
+            "tc_morning_briefing",
+            date=selected_date.isoformat(),
+            notice=notice,
+            notice_type=notice_type,
+        )
+    )
 
 
 @app.route("/tc/daily-checklist")
