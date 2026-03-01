@@ -421,6 +421,57 @@
 
         <article class="card" id="communications">
             <h3>Communication Log</h3>
+            <div class="inbound-alias-box">
+                <p><strong>Inbound Alias Addresses</strong></p>
+                <ul class="simple-list compact-list">
+                    <li><code>{{ inbound_aliases.buyer }}</code></li>
+                    <li><code>{{ inbound_aliases.seller }}</code></li>
+                    <li><code>{{ inbound_aliases.lender }}</code></li>
+                </ul>
+            </div>
+            <details>
+                <summary class="summary-btn">Inbound Routing Rules</summary>
+                <form method="post"
+                      action="{{ url_for('save_inbound_email_rule', transaction_id=transaction.id) }}"
+                      class="stack-form compact-form">
+                    <div class="grid-2">
+                        <div class="form-group">
+                            <label>Sender Role</label>
+                            <select name="sender_role" required>
+                                <option value="lender">Lender</option>
+                                <option value="buyer">Buyer</option>
+                                <option value="seller">Seller</option>
+                                <option value="inspector">Inspector</option>
+                                <option value="title_company">Title Company</option>
+                                <option value="agent">Agent</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Forward Policy</label>
+                            <select name="forward_policy">
+                                <option value="default">Default routing</option>
+                                <option value="all">Always forward awareness</option>
+                                <option value="never">Never auto-forward</option>
+                            </select>
+                        </div>
+                    </div>
+                    <label class="checkbox-row">
+                        <input type="checkbox" name="always_notify_margaret" value="true">
+                        Always notify Margaret (SMS) for this sender role
+                    </label>
+                    <p class="small-muted">
+                        Current lender rule: notify={{ "yes" if inbound_rules.lender.always_notify_margaret else "no" }},
+                        policy={{ inbound_rules.lender.forward_policy }}
+                    </p>
+                    <button type="submit" class="btn btn-secondary">Save Inbound Rule</button>
+                </form>
+            </details>
+            {% if risk_state.is_at_risk %}
+            <div class="notice-banner notice-error" style="margin-top:12px;">
+                <strong>At Risk:</strong> {{ risk_state.reason or "Sensitive concern detected." }}
+                {% if risk_state.flagged_at_label %}<small>(flagged {{ risk_state.flagged_at_label }})</small>{% endif %}
+            </div>
+            {% endif %}
             <details open>
                 <summary class="summary-btn">Log Call/Email</summary>
                 <form method="post" action="{{ url_for('log_transaction_communication', transaction_id=transaction.id) }}"
@@ -459,6 +510,71 @@
                     <button type="submit" class="btn btn-secondary">Save Communication</button>
                 </form>
             </details>
+
+            <h4 style="margin-top:14px;">Inbound Email Timeline</h4>
+            {% if inbound_messages %}
+            <ul class="simple-list inbound-list">
+                {% for msg in inbound_messages %}
+                <li class="list-row inbound-{{ msg.urgency }}">
+                    <div>
+                        <strong>{{ msg.subject or "(No subject)" }}</strong>
+                        <p>
+                            From {{ msg.sender_email }} ({{ msg.sender_role_label }}) →
+                            {{ msg.mailbox_role_label }} alias
+                        </p>
+                        <small>
+                            Urgency: {{ msg.urgency_label }} |
+                            Category: {{ msg.category_label }} |
+                            Action Required: {{ "Yes" if msg.action_required else "No" }} |
+                            Route: {{ (msg.applied_route or msg.recommended_route or "log_only").replace('_', ' ').title() }}
+                        </small>
+                        {% if msg.sms_sent %}
+                        <small class="pill-status">Margaret alerted via SMS</small>
+                        {% endif %}
+                        {% if msg.at_risk %}
+                        <small class="pill-risk">At Risk</small>
+                        {% endif %}
+                        {% if msg.forwarded_to %}
+                        <small>Forwarded to:
+                            {% for target in msg.forwarded_to %}
+                                {{ target.role|replace('_', ' ')|title }}{% if not loop.last %}, {% endif %}
+                            {% endfor %}
+                        </small>
+                        {% endif %}
+                        <details>
+                            <summary class="summary-btn">Override Routing</summary>
+                            <form method="post"
+                                  action="{{ url_for('override_inbound_email_routing', transaction_id=transaction.id, message_id=msg.id) }}"
+                                  class="stack-form compact-form inline-override-form">
+                                <div class="grid-2">
+                                    <div class="form-group">
+                                        <label>Override Route</label>
+                                        <select name="override_route" required>
+                                            <option value="log_only">Log only</option>
+                                            <option value="medium_awareness">Forward relevant parties</option>
+                                            <option value="high_action">High urgency (SMS + broad forward)</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Override Notes</label>
+                                        <input type="text" name="override_notes" maxlength="240">
+                                    </div>
+                                </div>
+                                <label class="checkbox-row">
+                                    <input type="checkbox" name="clear_risk" value="true">
+                                    Clear At-Risk flag for this transaction
+                                </label>
+                                <button type="submit" class="btn btn-secondary btn-small">Apply Override</button>
+                            </form>
+                        </details>
+                    </div>
+                    <small>{{ msg.received_at_label }}</small>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty-box">No inbound mailbox messages yet.</div>
+            {% endif %}
 
             {% if communications %}
             <ul class="simple-list">
@@ -1152,6 +1268,73 @@
 
 .compact-form {
     margin-top: 10px;
+}
+
+.inbound-alias-box {
+    border: 1px solid #dbeafe;
+    background: #f8fbff;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.compact-list li {
+    padding: 4px 0;
+}
+
+.small-muted {
+    color: #475569;
+    font-size: 12px;
+    margin: 6px 0 0;
+}
+
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+    font-size: 13px;
+}
+
+.inbound-list .list-row {
+    align-items: flex-start;
+}
+
+.inbound-low {
+    border-left: 3px solid #10b981;
+}
+
+.inbound-medium {
+    border-left: 3px solid #f59e0b;
+}
+
+.inbound-high {
+    border-left: 3px solid #ef4444;
+}
+
+.pill-status,
+.pill-risk {
+    display: inline-block;
+    margin-top: 6px;
+    margin-right: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.pill-status {
+    background: #e0f2fe;
+    color: #0c4a6e;
+}
+
+.pill-risk {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.inline-override-form {
+    margin-top: 8px;
 }
 
 .payment-row {

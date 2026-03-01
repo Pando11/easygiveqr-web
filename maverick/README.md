@@ -16,6 +16,7 @@ Core capabilities:
 - Automated HOA/Inspection/Appraisal document analysis with action-item automation
 - Auto-generated timeline PDF packet (with milestone chart) + multi-party email distribution
 - Vendor outreach automation (inspector/appraiser/survey/title) with secure confirmation links
+- Transaction-specific inbound email aliases with AI urgency/category routing
 - Automation scripts for reminders, closing protocol, problem detection, and nightly backups
 
 ## Local setup instructions
@@ -57,6 +58,8 @@ TWILIO_PHONE_NUMBER=
 HEIDI_PHONE=
 MARGARET_PHONE=
 MARGARET_EMAIL=
+INBOUND_EMAIL_DOMAIN=getmaverick.com
+INBOUND_EMAIL_WEBHOOK_SECRET=
 
 AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=
@@ -170,6 +173,23 @@ After Margaret approves and activates a transaction, Maverick:
 Relevant routes:
 - `POST /tc/transaction/<transaction_id>/resend-timeline`
 - `GET|POST /vendor/outreach/<access_token>`
+
+## Inbound Email AI Routing
+
+Each transaction exposes unique mailbox aliases:
+- `transaction-<id>-buyer@<INBOUND_EMAIL_DOMAIN>`
+- `transaction-<id>-seller@<INBOUND_EMAIL_DOMAIN>`
+- `transaction-<id>-lender@<INBOUND_EMAIL_DOMAIN>`
+
+Inbound webhook route:
+- `POST /webhooks/inbound-email`
+
+Behavior:
+- Logs inbound email to transaction communication timeline
+- Classifies urgency/category/action-required
+- Routes by severity (log-only, relevant forward, or high-action alert)
+- Supports sensitive handling (e.g., buyer concerns not forwarded to seller)
+- Supports per-transaction routing rules (e.g., always notify Margaret for lender emails)
 
 ## Deploy to Railway
 

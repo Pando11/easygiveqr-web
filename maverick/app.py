@@ -32,6 +32,12 @@ from utils.contract_extraction import (
     extract_via_pypdf,
 )
 from utils.document_analysis import analyze_appraisal, analyze_hoa_documents, analyze_inspection_report
+from utils.inbound_email import (
+    classify_inbound_email,
+    extract_email_address,
+    parse_transaction_alias,
+    split_recipient_addresses,
+)
 from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document, upload_local_file
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 from utils.timeline_pdf import build_timeline_pdf
@@ -88,6 +94,18 @@ APPRAISAL_ANALYSIS_DOCUMENT_TYPES = {"appraisal", "appraisal_report"}
 
 TIMELINE_VENDOR_TYPES = ("inspector", "appraiser", "survey", "title")
 TIMELINE_MAJOR_DEADLINE_TYPES = {"option_fee", "earnest_money", "option_period_end", "financing_approval", "closing"}
+INBOUND_MAILBOX_ROLES = ("buyer", "seller", "lender")
+INBOUND_SENDER_ROLES = (
+    "agent",
+    "buyer",
+    "seller",
+    "lender",
+    "title_company",
+    "inspector",
+    "appraiser",
+    "survey",
+    "external",
+)
 
 DOCUMENT_REQUEST_TARGET = {
     "contract": "seller",
@@ -2006,6 +2024,773 @@ def ensure_timeline_automation_tables():
     ensure_calendar_events_table()
 
 
+def inbound_email_domain():
+    """Resolve domain used for transaction inbound mailbox aliases."""
+    configured = (os.getenv("INBOUND_EMAIL_DOMAIN") or "getmaverick.com").strip().lower()
+    return configured.lstrip("@")
+
+
+def transaction_inbound_aliases(transaction_id):
+    """Build unique buyer/seller/lender mailbox addresses for one transaction."""
+    safe_id = int(transaction_id)
+    domain = inbound_email_domain()
+    return {
+        role: f"transaction-{safe_id}-{role}@{domain}"
+        for role in INBOUND_MAILBOX_ROLES
+    }
+
+
+def ensure_inbound_email_messages_table():
+    """Store inbound message analysis/routing decisions per transaction."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS inbound_email_messages (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            mailbox_role VARCHAR(20) NOT NULL,
+            mailbox_address VARCHAR(255) NOT NULL,
+            sender_email VARCHAR(255) NOT NULL,
+            sender_role VARCHAR(50) NOT NULL,
+            subject TEXT,
+            body_text TEXT,
+            urgency VARCHAR(20),
+            category VARCHAR(50),
+            action_required BOOLEAN DEFAULT FALSE,
+            sensitive_content BOOLEAN DEFAULT FALSE,
+            at_risk BOOLEAN DEFAULT FALSE,
+            recommended_route VARCHAR(30),
+            applied_route VARCHAR(30),
+            forwarded_to JSONB,
+            sms_sent BOOLEAN DEFAULT FALSE,
+            task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+            status_notes TEXT,
+            provider_message_id VARCHAR(255),
+            provider_payload JSONB,
+            override_route VARCHAR(30),
+            override_notes TEXT,
+            override_by VARCHAR(100),
+            override_at TIMESTAMP,
+            received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_inbound_email_messages_transaction
+        ON inbound_email_messages(transaction_id, received_at DESC)
+        """
+    )
+
+
+def ensure_inbound_email_rules_table():
+    """Store per-transaction sender-role routing preferences."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS inbound_email_rules (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            sender_role VARCHAR(50) NOT NULL,
+            always_notify_margaret BOOLEAN DEFAULT FALSE,
+            forward_policy VARCHAR(20) DEFAULT 'default',
+            updated_by VARCHAR(100),
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_email_rules_txn_role
+        ON inbound_email_rules(transaction_id, sender_role)
+        """
+    )
+
+
+def ensure_transaction_risk_flags_table():
+    """Track transaction-level risk signals from sensitive communications."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS transaction_risk_flags (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+            is_at_risk BOOLEAN DEFAULT TRUE,
+            reason TEXT,
+            latest_message_id INT REFERENCES inbound_email_messages(id) ON DELETE SET NULL,
+            flagged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_transaction_risk_flags_txn
+        ON transaction_risk_flags(transaction_id)
+        """
+    )
+
+
+def ensure_inbound_email_tables():
+    """Ensure inbound email ingestion/routing tables exist."""
+    ensure_inbound_email_messages_table()
+    ensure_inbound_email_rules_table()
+    ensure_transaction_risk_flags_table()
+
+
+def fetch_inbound_email_rule(transaction_id, sender_role):
+    """Fetch one sender-role rule row with defaults."""
+    ensure_inbound_email_rules_table()
+    normalized_role = (sender_role or "external").strip().lower()
+    rows = execute_query(
+        """
+        SELECT id, transaction_id, sender_role, always_notify_margaret, forward_policy, updated_by, updated_at
+        FROM inbound_email_rules
+        WHERE transaction_id = %s
+          AND sender_role = %s
+        LIMIT 1
+        """,
+        (transaction_id, normalized_role),
+        fetch=True,
+    ) or []
+    if rows:
+        return rows[0]
+    return {
+        "sender_role": normalized_role,
+        "always_notify_margaret": False,
+        "forward_policy": "default",
+    }
+
+
+def fetch_inbound_email_rules_map(transaction_id):
+    """Return routing-rule map for UI controls."""
+    ensure_inbound_email_rules_table()
+    rows = execute_query(
+        """
+        SELECT sender_role, always_notify_margaret, forward_policy
+        FROM inbound_email_rules
+        WHERE transaction_id = %s
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    result = {
+        role: {
+            "always_notify_margaret": False,
+            "forward_policy": "default",
+        }
+        for role in INBOUND_SENDER_ROLES
+    }
+    for row in rows:
+        role = (row.get("sender_role") or "").strip().lower()
+        if role in result:
+            result[role] = {
+                "always_notify_margaret": bool(row.get("always_notify_margaret")),
+                "forward_policy": (row.get("forward_policy") or "default").strip().lower(),
+            }
+    return result
+
+
+def upsert_inbound_email_rule(transaction_id, sender_role, always_notify_margaret=False, forward_policy="default"):
+    """Create/update one sender-role routing rule."""
+    ensure_inbound_email_rules_table()
+    normalized_role = (sender_role or "").strip().lower()
+    if normalized_role not in INBOUND_SENDER_ROLES:
+        return False
+    normalized_policy = (forward_policy or "default").strip().lower()
+    if normalized_policy not in {"default", "all", "never"}:
+        normalized_policy = "default"
+    execute_query(
+        """
+        INSERT INTO inbound_email_rules (
+            transaction_id, sender_role, always_notify_margaret, forward_policy, updated_by, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (transaction_id, sender_role)
+        DO UPDATE SET
+            always_notify_margaret = EXCLUDED.always_notify_margaret,
+            forward_policy = EXCLUDED.forward_policy,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            transaction_id,
+            normalized_role,
+            bool(always_notify_margaret),
+            normalized_policy,
+            session.get("tc_username", "margaret") if has_request_context() else "system",
+        ),
+    )
+    return True
+
+
+def fetch_transaction_risk_state(transaction_id):
+    """Return current risk-flag state for transaction detail UI."""
+    ensure_transaction_risk_flags_table()
+    rows = execute_query(
+        """
+        SELECT id, transaction_id, is_at_risk, reason, latest_message_id, flagged_at, resolved_at, updated_at
+        FROM transaction_risk_flags
+        WHERE transaction_id = %s
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return {
+            "is_at_risk": False,
+            "reason": "",
+            "flagged_at_label": "",
+            "resolved_at_label": "",
+        }
+    row = rows[0]
+    return {
+        "is_at_risk": bool(row.get("is_at_risk")),
+        "reason": row.get("reason") or "",
+        "flagged_at_label": format_timestamp_label(row.get("flagged_at")),
+        "resolved_at_label": format_timestamp_label(row.get("resolved_at")),
+        "latest_message_id": row.get("latest_message_id"),
+    }
+
+
+def set_transaction_risk_state(transaction_id, is_at_risk, reason, latest_message_id=None):
+    """Upsert risk state, including resolve timestamps when cleared."""
+    ensure_transaction_risk_flags_table()
+    execute_query(
+        """
+        INSERT INTO transaction_risk_flags (
+            transaction_id, is_at_risk, reason, latest_message_id, flagged_at, resolved_at, updated_at
+        )
+        VALUES (
+            %s, %s, %s, %s,
+            CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END,
+            CASE WHEN %s THEN NULL ELSE CURRENT_TIMESTAMP END,
+            CURRENT_TIMESTAMP
+        )
+        ON CONFLICT (transaction_id)
+        DO UPDATE SET
+            is_at_risk = EXCLUDED.is_at_risk,
+            reason = EXCLUDED.reason,
+            latest_message_id = COALESCE(EXCLUDED.latest_message_id, transaction_risk_flags.latest_message_id),
+            flagged_at = CASE
+                WHEN EXCLUDED.is_at_risk THEN COALESCE(transaction_risk_flags.flagged_at, CURRENT_TIMESTAMP)
+                ELSE transaction_risk_flags.flagged_at
+            END,
+            resolved_at = CASE
+                WHEN EXCLUDED.is_at_risk THEN NULL
+                ELSE CURRENT_TIMESTAMP
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            transaction_id,
+            bool(is_at_risk),
+            (reason or "").strip() or None,
+            latest_message_id,
+            bool(is_at_risk),
+            bool(is_at_risk),
+        ),
+    )
+
+
+def fetch_inbound_email_messages(transaction_id, limit=20):
+    """Load recent inbound-email timeline rows for transaction detail view."""
+    ensure_inbound_email_messages_table()
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            mailbox_role,
+            mailbox_address,
+            sender_email,
+            sender_role,
+            subject,
+            body_text,
+            urgency,
+            category,
+            action_required,
+            sensitive_content,
+            at_risk,
+            recommended_route,
+            applied_route,
+            forwarded_to,
+            sms_sent,
+            task_id,
+            status_notes,
+            override_route,
+            override_notes,
+            override_by,
+            override_at,
+            received_at
+        FROM inbound_email_messages
+        WHERE transaction_id = %s
+        ORDER BY received_at DESC, id DESC
+        LIMIT %s
+        """,
+        (transaction_id, limit),
+        fetch=True,
+    ) or []
+    for row in rows:
+        row["forwarded_to"] = parse_json_field(row.get("forwarded_to"), [])
+        row["received_at_label"] = format_timestamp_label(row.get("received_at"))
+        row["override_at_label"] = format_timestamp_label(row.get("override_at"))
+        row["sender_role_label"] = (row.get("sender_role") or "").replace("_", " ").title()
+        row["mailbox_role_label"] = (row.get("mailbox_role") or "").replace("_", " ").title()
+        row["urgency_label"] = (row.get("urgency") or "low").title()
+        row["category_label"] = (row.get("category") or "general").replace("_", " ").title()
+    return rows
+
+
+def fetch_inbound_email_message(transaction_id, message_id):
+    """Fetch one inbound email row for override actions."""
+    ensure_inbound_email_messages_table()
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            transaction_id,
+            mailbox_role,
+            mailbox_address,
+            sender_email,
+            sender_role,
+            subject,
+            body_text,
+            urgency,
+            category,
+            action_required,
+            sensitive_content,
+            at_risk,
+            recommended_route,
+            applied_route,
+            forwarded_to,
+            sms_sent,
+            task_id,
+            status_notes
+        FROM inbound_email_messages
+        WHERE transaction_id = %s
+          AND id = %s
+        LIMIT 1
+        """,
+        (transaction_id, message_id),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    row["forwarded_to"] = parse_json_field(row.get("forwarded_to"), [])
+    return row
+
+
+def infer_inbound_sender_role(sender_email, transaction):
+    """Infer sender role based on known transaction addresses and email patterns."""
+    normalized_sender = normalize_email(sender_email)
+    if not normalized_sender:
+        return "external"
+
+    if normalized_sender == normalize_email(transaction.get("agent_email")):
+        return "agent"
+    if normalized_sender == normalize_email(transaction.get("lender_email")):
+        return "lender"
+    if normalized_sender == normalize_email(transaction.get("title_officer_email")):
+        return "title_company"
+
+    client_email_map = fetch_client_email_map(transaction["id"])
+    if normalized_sender == normalize_email(client_email_map.get("buyer")):
+        return "buyer"
+    if normalized_sender == normalize_email(client_email_map.get("seller")):
+        return "seller"
+
+    lower_sender = normalized_sender.lower()
+    if "inspect" in lower_sender:
+        return "inspector"
+    if "apprais" in lower_sender:
+        return "appraiser"
+    if "survey" in lower_sender:
+        return "survey"
+    return "external"
+
+
+def inbound_forward_email_map(transaction):
+    """Resolve forwarding email addresses for known transaction parties."""
+    client_email_map = fetch_client_email_map(transaction["id"])
+    return {
+        "buyer": normalize_email(client_email_map.get("buyer")),
+        "seller": normalize_email(client_email_map.get("seller")),
+        "agent": normalize_email(transaction.get("agent_email")),
+        "lender": normalize_email(transaction.get("lender_email")),
+        "title_company": normalize_email(transaction.get("title_officer_email")),
+    }
+
+
+def inbound_forward_roles_for_category(category):
+    """Default relevant-party routing map for medium-priority updates."""
+    normalized_category = (category or "general").strip().lower()
+    if normalized_category == "inspection":
+        return {"agent", "buyer", "seller"}
+    if normalized_category == "appraisal":
+        return {"agent", "lender", "buyer"}
+    if normalized_category == "repairs":
+        return {"agent", "buyer", "seller"}
+    if normalized_category == "closing":
+        return {"agent", "lender", "title_company", "buyer", "seller"}
+    return {"agent"}
+
+
+def resolve_inbound_route(analysis, rule_row):
+    """Resolve route + Margaret notification intent from analysis + overrides."""
+    urgency = (analysis.get("urgency") or "low").strip().lower()
+    action_required = bool(analysis.get("action_required"))
+    route = "log_only"
+    if urgency == "high" and action_required:
+        route = "high_action"
+    elif urgency in {"medium", "high"} or action_required:
+        route = "medium_awareness"
+
+    normalized_policy = (rule_row.get("forward_policy") or "default").strip().lower()
+    if normalized_policy == "never":
+        route = "log_only"
+    elif normalized_policy == "all" and route == "log_only":
+        route = "medium_awareness"
+
+    notify_margaret = bool(rule_row.get("always_notify_margaret")) or route == "high_action"
+    if analysis.get("at_risk"):
+        notify_margaret = True
+    return route, notify_margaret
+
+
+def build_inbound_forward_roles(route, category, sender_role, sensitive_content=False):
+    """Determine recipient roles for forwarding decisions."""
+    sender = (sender_role or "external").strip().lower()
+    if route == "high_action":
+        roles = {"buyer", "seller", "agent", "lender", "title_company"}
+    elif route == "medium_awareness":
+        roles = set(inbound_forward_roles_for_category(category))
+    else:
+        roles = set()
+
+    if sender in roles:
+        roles.discard(sender)
+    if sender == "title":
+        roles.discard("title_company")
+    if sender == "title_company":
+        roles.discard("title_company")
+    if sensitive_content and sender == "buyer":
+        roles.discard("seller")
+    return sorted(roles)
+
+
+def append_task_note(task_id, note_line):
+    """Append one timestamped note line to an existing task."""
+    if not task_id:
+        return
+    note_text = (note_line or "").strip()
+    if not note_text:
+        return
+    stamped = f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {note_text}"
+    execute_query(
+        """
+        UPDATE tasks
+        SET notes = CASE
+            WHEN COALESCE(notes, '') = '' THEN %s
+            ELSE notes || E'\n' || %s
+        END
+        WHERE id = %s
+        """,
+        (stamped, stamped, task_id),
+    )
+
+
+def update_appraisal_task_from_email(transaction_id, subject, body_text):
+    """Mark appraisal verification task as in-progress when lender reports ordering."""
+    rows = execute_query(
+        """
+        SELECT id
+        FROM tasks
+        WHERE transaction_id = %s
+          AND LOWER(task_description) LIKE 'verify appraisal completed%%'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    task_id = rows[0]["id"]
+    execute_query(
+        """
+        UPDATE tasks
+        SET status = CASE
+                WHEN completed = TRUE THEN status
+                ELSE 'in_progress'
+            END
+        WHERE id = %s
+        """,
+        (task_id,),
+    )
+    append_task_note(
+        task_id,
+        f"Lender inbound update: {(subject or 'Appraisal update')[:160]} | {(body_text or '')[:220]}",
+    )
+    return task_id
+
+
+def create_inbound_coordination_task(transaction_id, description, priority="medium", due_days=1, body_excerpt=""):
+    """Create one coordination task from inbound routing actions."""
+    due_days_int = 0
+    try:
+        due_days_int = int(due_days)
+    except (TypeError, ValueError):
+        due_days_int = 1
+    due_days_int = max(due_days_int, 0)
+    due_date = date.today() + timedelta(days=due_days_int)
+    rows = execute_query(
+        """
+        INSERT INTO tasks (
+            transaction_id, task_description, task_category, due_date,
+            priority, status, completed, display_order, notes, created_at
+        )
+        VALUES (%s, %s, 'coordination', %s, %s, 'pending', FALSE, 62, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            transaction_id,
+            description[:300],
+            (priority or "medium").lower(),
+            f"Auto-created from inbound email routing.\n{(body_excerpt or '')[:420]}",
+        ),
+        fetch=True,
+    ) or []
+    return rows[0]["id"] if rows else None
+
+
+def apply_inbound_task_effects(transaction_id, analysis, route, subject, body_text):
+    """Apply task updates/creations for inbound message processing."""
+    hint = (analysis.get("status_update_hint") or "").strip().lower()
+    if hint == "appraisal_ordered":
+        updated_task_id = update_appraisal_task_from_email(transaction_id, subject, body_text)
+        return updated_task_id
+
+    if route == "log_only":
+        return None
+
+    recommended_task = (analysis.get("recommended_task") or "").strip()
+    if recommended_task:
+        description = recommended_task
+    else:
+        category_label = (analysis.get("category") or "general").replace("_", " ").title()
+        description = f"Review inbound {category_label} update: {(subject or 'No subject')[:120]}"
+
+    priority = "high" if route == "high_action" else "medium"
+    due_days = 0 if route == "high_action" else 1
+    return create_inbound_coordination_task(
+        transaction_id=transaction_id,
+        description=description,
+        priority=priority,
+        due_days=due_days,
+        body_excerpt=body_text,
+    )
+
+
+def inbound_email_excerpt(text, max_chars=800):
+    """Normalize and trim inbound body text for storage/display."""
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return f"{cleaned[:max_chars].rstrip()}..."
+
+
+def send_inbound_forward_notifications(transaction, sender_email, sender_role, subject, body_text, analysis, recipient_roles):
+    """Forward inbound email updates to selected parties and log outcomes."""
+    email_map = inbound_forward_email_map(transaction)
+    forwarded = []
+    for role in recipient_roles:
+        recipient_email = normalize_email(email_map.get(role))
+        if not recipient_email or not is_email_valid(recipient_email):
+            continue
+        context = {
+            "transaction_id": transaction["id"],
+            "property_address": transaction.get("property_address"),
+            "sender_email": sender_email,
+            "sender_role_label": (sender_role or "external").replace("_", " ").title(),
+            "subject": subject or "(No subject)",
+            "body_excerpt": inbound_email_excerpt(body_text, max_chars=1000),
+            "urgency": (analysis.get("urgency") or "low").title(),
+            "category": (analysis.get("category") or "general").replace("_", " ").title(),
+            "action_required": bool(analysis.get("action_required")),
+        }
+        html_body = render_template("emails/inbound_email_forward.html", data=context)
+        message_id = send_html_email(
+            to_email=recipient_email,
+            subject=f"Maverick Inbound Update - {transaction.get('property_address')}",
+            html_body=html_body,
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'email', %s, %s, %s, %s)
+            """,
+            (
+                transaction["id"],
+                role,
+                role.replace("_", " ").title(),
+                "Inbound email forwarded" if message_id else "Inbound email forward failed",
+                f"to={recipient_email} sender={sender_email} message_id={message_id or 'failed'}",
+            ),
+        )
+        if message_id:
+            forwarded.append(
+                {
+                    "role": role,
+                    "email": recipient_email,
+                    "message_id": message_id,
+                }
+            )
+    return forwarded
+
+
+def process_inbound_email_message(
+    transaction,
+    mailbox_role,
+    mailbox_address,
+    sender_email,
+    sender_role,
+    subject,
+    body_text,
+    provider_message_id="",
+    provider_payload=None,
+):
+    """Classify, route, log, and persist one inbound email event."""
+    ensure_inbound_email_tables()
+    analysis = classify_inbound_email(subject, body_text, sender_role=sender_role)
+    rule = fetch_inbound_email_rule(transaction["id"], sender_role)
+    route, notify_margaret = resolve_inbound_route(analysis, rule)
+    recipient_roles = build_inbound_forward_roles(
+        route=route,
+        category=analysis.get("category"),
+        sender_role=sender_role,
+        sensitive_content=bool(analysis.get("sensitive_content")),
+    )
+
+    task_id = apply_inbound_task_effects(
+        transaction_id=transaction["id"],
+        analysis=analysis,
+        route=route,
+        subject=subject,
+        body_text=body_text,
+    )
+    forwarded_to = send_inbound_forward_notifications(
+        transaction=transaction,
+        sender_email=sender_email,
+        sender_role=sender_role,
+        subject=subject,
+        body_text=body_text,
+        analysis=analysis,
+        recipient_roles=recipient_roles,
+    )
+    sms_sent = False
+    if notify_margaret:
+        margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE") or "")
+        if margaret_phone:
+            alert_message = (
+                analysis.get("margaret_alert")
+                or f"⚠️ {analysis.get('urgency', 'medium').title()} inbound email - {transaction.get('property_address')}"
+            )
+            send_sms_async(margaret_phone, alert_message)
+            sms_sent = True
+
+    message_id = execute_insert(
+        """
+        INSERT INTO inbound_email_messages (
+            transaction_id,
+            mailbox_role,
+            mailbox_address,
+            sender_email,
+            sender_role,
+            subject,
+            body_text,
+            urgency,
+            category,
+            action_required,
+            sensitive_content,
+            at_risk,
+            recommended_route,
+            applied_route,
+            forwarded_to,
+            sms_sent,
+            task_id,
+            status_notes,
+            provider_message_id,
+            provider_payload,
+            received_at,
+            updated_at
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+        RETURNING id
+        """,
+        (
+            transaction["id"],
+            mailbox_role,
+            mailbox_address,
+            sender_email,
+            sender_role,
+            (subject or "").strip() or "(No subject)",
+            body_text or "",
+            analysis.get("urgency") or "low",
+            analysis.get("category") or "general",
+            bool(analysis.get("action_required")),
+            bool(analysis.get("sensitive_content")),
+            bool(analysis.get("at_risk")),
+            route,
+            route,
+            json.dumps(forwarded_to or [], default=str),
+            sms_sent,
+            task_id,
+            f"rule_notify={bool(rule.get('always_notify_margaret'))} forward_policy={rule.get('forward_policy', 'default')}",
+            (provider_message_id or "").strip()[:255] or None,
+            json.dumps(provider_payload or {}, default=str),
+        ),
+    )
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'email', %s, %s, %s, %s)
+        """,
+        (
+            transaction["id"],
+            sender_role,
+            sender_email,
+            f"Inbound email: {(subject or '(No subject)')[:160]}",
+            (
+                f"mailbox={mailbox_role} urgency={analysis.get('urgency')} "
+                f"category={analysis.get('category')} route={route} "
+                f"forwarded={len(forwarded_to)} sms_sent={sms_sent} task_id={task_id or 'n/a'}"
+            ),
+        ),
+    )
+
+    if analysis.get("at_risk"):
+        set_transaction_risk_state(
+            transaction_id=transaction["id"],
+            is_at_risk=True,
+            reason=analysis.get("margaret_alert") or "Sensitive inbound concern detected",
+            latest_message_id=message_id,
+        )
+
+    return {
+        "message_id": message_id,
+        "analysis": analysis,
+        "route": route,
+        "forwarded_to": forwarded_to,
+        "sms_sent": sms_sent,
+        "task_id": task_id,
+    }
+
+
 def parse_vendor_datetime(raw_value):
     """Parse vendor appointment datetime from form input."""
     value = (raw_value or "").strip()
@@ -3816,6 +4601,120 @@ def index():
     return render_template("upload.html")
 
 
+def parse_inbound_recipients_from_payload(payload):
+    """Extract potential recipient addresses from provider payload formats."""
+    recipients = []
+    for key in ("to", "recipient", "delivered_to", "envelope_to", "X-Envelope-To"):
+        recipients.extend(split_recipient_addresses(payload.get(key)))
+
+    envelope_raw = payload.get("envelope")
+    if envelope_raw:
+        try:
+            envelope_json = json.loads(envelope_raw) if isinstance(envelope_raw, str) else envelope_raw
+            if isinstance(envelope_json, dict):
+                recipients.extend(split_recipient_addresses(envelope_json.get("to")))
+        except Exception:
+            pass
+
+    unique = []
+    for email in recipients:
+        if email not in unique:
+            unique.append(email)
+    return unique
+
+
+def parse_inbound_sender_from_payload(payload):
+    """Extract sender email from common inbound provider fields."""
+    for key in ("from", "sender", "sender_email", "From"):
+        sender = extract_email_address(payload.get(key))
+        if sender:
+            return sender
+    return ""
+
+
+@app.route("/webhooks/inbound-email", methods=["POST"])
+def inbound_email_webhook():
+    """Receive inbound transaction mailbox emails and apply AI routing."""
+    ensure_inbound_email_tables()
+    configured_secret = (os.getenv("INBOUND_EMAIL_WEBHOOK_SECRET") or "").strip()
+    if configured_secret:
+        provided_secret = (
+            request.headers.get("X-Inbound-Secret")
+            or request.headers.get("X-Webhook-Secret")
+            or request.args.get("secret")
+            or request.form.get("secret")
+            or ""
+        ).strip()
+        if provided_secret != configured_secret:
+            return jsonify({"success": False, "error": "Unauthorized"}), 403
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = dict(request.form or {})
+
+    recipient_addresses = parse_inbound_recipients_from_payload(payload)
+    alias_match = None
+    for recipient in recipient_addresses:
+        parsed = parse_transaction_alias(recipient, inbound_email_domain())
+        if parsed:
+            alias_match = parsed
+            break
+
+    if not alias_match:
+        return jsonify({"success": True, "ignored": "recipient_not_mapped"}), 200
+
+    transaction = fetch_timeline_transaction(alias_match["transaction_id"])
+    if not transaction:
+        return jsonify({"success": False, "error": "Transaction not found"}), 404
+
+    sender_email = parse_inbound_sender_from_payload(payload)
+    sender_role = infer_inbound_sender_role(sender_email, transaction)
+    if sender_role == "external" and alias_match["mailbox_role"] in INBOUND_MAILBOX_ROLES:
+        sender_role = alias_match["mailbox_role"]
+    subject = (payload.get("subject") or payload.get("Subject") or "").strip()
+    body_text = (
+        payload.get("text")
+        or payload.get("body-plain")
+        or payload.get("stripped-text")
+        or payload.get("body")
+        or payload.get("TextBody")
+        or ""
+    )
+    body_text = str(body_text or "").strip()
+    if not body_text:
+        body_text = str(payload.get("html") or payload.get("stripped-html") or "")[:2000]
+    provider_message_id = (
+        payload.get("message_id")
+        or payload.get("Message-Id")
+        or payload.get("Message-ID")
+        or payload.get("message-id")
+        or ""
+    )
+
+    result = process_inbound_email_message(
+        transaction=transaction,
+        mailbox_role=alias_match["mailbox_role"],
+        mailbox_address=alias_match["mailbox_address"],
+        sender_email=sender_email or "unknown-sender",
+        sender_role=sender_role,
+        subject=subject or "(No subject)",
+        body_text=body_text,
+        provider_message_id=str(provider_message_id or "")[:255],
+        provider_payload=payload,
+    )
+    return jsonify(
+        {
+            "success": True,
+            "transaction_id": transaction["id"],
+            "mailbox_role": alias_match["mailbox_role"],
+            "route": result.get("route"),
+            "urgency": result.get("analysis", {}).get("urgency"),
+            "category": result.get("analysis", {}).get("category"),
+            "message_id": result.get("message_id"),
+        }
+    )
+
+
 @app.route("/health")
 def health():
     """Basic health check for Railway and uptime monitors."""
@@ -5216,16 +6115,20 @@ def tc_transaction(transaction_id):
             task["due_label"] = format_date_label(task.get("due_date"))
             task["category_label"] = (task.get("task_category") or "").replace("_", " ").title()
 
-    communication_limit = 100 if mode == "completed" else 5
+    ensure_inbound_email_tables()
+    inbound_aliases = transaction_inbound_aliases(transaction_id)
+    inbound_rules = fetch_inbound_email_rules_map(transaction_id)
+    inbound_messages = fetch_inbound_email_messages(transaction_id, limit=20)
+    risk_state = fetch_transaction_risk_state(transaction_id)
+
     communications = execute_query(
         """
         SELECT id, communication_type, contact_party, contact_name, summary, outcome, created_at
         FROM communications
         WHERE transaction_id = %s
         ORDER BY created_at DESC
-        LIMIT %s
         """,
-        (transaction_id, communication_limit),
+        (transaction_id,),
         fetch=True,
     ) or []
     for entry in communications:
@@ -5262,6 +6165,10 @@ def tc_transaction(transaction_id):
         task_preview=task_preview,
         task_total=task_total,
         communications=communications,
+        inbound_aliases=inbound_aliases,
+        inbound_rules=inbound_rules,
+        inbound_messages=inbound_messages,
+        risk_state=risk_state,
         payment_context=payment_context,
         extracted_data=extracted_context,
         extraction_review=extraction_review,
@@ -6423,6 +7330,171 @@ def download_document(document_id):
         ip_address=request.remote_addr or "",
     )
     return redirect(url)
+
+
+@app.route("/tc/transaction/<int:transaction_id>/inbound-email-rule", methods=["POST"])
+@login_required
+def save_inbound_email_rule(transaction_id):
+    """Save Margaret routing preference for inbound sender role."""
+    if not get_transaction_or_none(transaction_id):
+        return "Transaction not found", 404
+
+    sender_role = (request.form.get("sender_role") or "").strip().lower()
+    if sender_role not in INBOUND_SENDER_ROLES:
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Invalid sender role for inbound rule.",
+            doc_notice_type="error",
+        )
+        return redirect(f"{redirect_url}#communications")
+
+    always_notify = parse_bool_value(request.form.get("always_notify_margaret"), default=False)
+    forward_policy = (request.form.get("forward_policy") or "default").strip().lower()
+    upsert_inbound_email_rule(
+        transaction_id=transaction_id,
+        sender_role=sender_role,
+        always_notify_margaret=always_notify,
+        forward_policy=forward_policy,
+    )
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice=f"Inbound rule saved for {sender_role.replace('_', ' ').title()}.",
+        doc_notice_type="success",
+    )
+    return redirect(f"{redirect_url}#communications")
+
+
+@app.route("/tc/transaction/<int:transaction_id>/inbound-email/<int:message_id>/override", methods=["POST"])
+@login_required
+def override_inbound_email_routing(transaction_id, message_id):
+    """Allow Margaret to override one inbound-email routing decision."""
+    transaction = fetch_timeline_transaction(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+    inbound_row = fetch_inbound_email_message(transaction_id, message_id)
+    if not inbound_row:
+        return "Inbound message not found", 404
+
+    override_route = (request.form.get("override_route") or "").strip().lower()
+    if override_route not in {"log_only", "medium_awareness", "high_action"}:
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Invalid override route selected.",
+            doc_notice_type="error",
+        )
+        return redirect(f"{redirect_url}#communications")
+
+    override_notes = (request.form.get("override_notes") or "").strip()
+    clear_risk = parse_bool_value(request.form.get("clear_risk"), default=False)
+
+    analysis = {
+        "urgency": inbound_row.get("urgency") or "low",
+        "category": inbound_row.get("category") or "general",
+        "action_required": bool(inbound_row.get("action_required")),
+        "sensitive_content": bool(inbound_row.get("sensitive_content")),
+        "recommended_task": "",
+    }
+    forward_roles = build_inbound_forward_roles(
+        route=override_route,
+        category=analysis.get("category"),
+        sender_role=inbound_row.get("sender_role"),
+        sensitive_content=bool(analysis.get("sensitive_content")),
+    )
+    forwarded = send_inbound_forward_notifications(
+        transaction=transaction,
+        sender_email=inbound_row.get("sender_email") or "unknown-sender",
+        sender_role=inbound_row.get("sender_role") or "external",
+        subject=inbound_row.get("subject") or "(No subject)",
+        body_text=inbound_row.get("body_text") or "",
+        analysis=analysis,
+        recipient_roles=forward_roles,
+    )
+    sms_sent = bool(inbound_row.get("sms_sent"))
+    if override_route == "high_action":
+        margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE") or "")
+        if margaret_phone:
+            send_sms_async(
+                margaret_phone,
+                f"🚨 Manual override: urgent inbound email on {transaction.get('property_address')}",
+            )
+            sms_sent = True
+
+    task_id = inbound_row.get("task_id")
+    if not task_id and override_route in {"medium_awareness", "high_action"}:
+        task_id = apply_inbound_task_effects(
+            transaction_id=transaction_id,
+            analysis=analysis,
+            route=override_route,
+            subject=inbound_row.get("subject") or "(No subject)",
+            body_text=inbound_row.get("body_text") or "",
+        )
+
+    combined_forwarded = list(inbound_row.get("forwarded_to") or [])
+    for item in forwarded:
+        if item not in combined_forwarded:
+            combined_forwarded.append(item)
+
+    execute_query(
+        """
+        UPDATE inbound_email_messages
+        SET applied_route = %s,
+            forwarded_to = %s::jsonb,
+            sms_sent = %s,
+            task_id = COALESCE(%s, task_id),
+            override_route = %s,
+            override_notes = %s,
+            override_by = %s,
+            override_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+          AND transaction_id = %s
+        """,
+        (
+            override_route,
+            json.dumps(combined_forwarded, default=str),
+            sms_sent,
+            task_id,
+            override_route,
+            override_notes or None,
+            session.get("tc_username", "margaret"),
+            message_id,
+            transaction_id,
+        ),
+    )
+
+    if clear_risk:
+        set_transaction_risk_state(
+            transaction_id=transaction_id,
+            is_at_risk=False,
+            reason="Risk cleared by Margaret override.",
+            latest_message_id=message_id,
+        )
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', %s, %s, %s)
+        """,
+        (
+            transaction_id,
+            session.get("tc_username", "margaret"),
+            "Inbound routing overridden",
+            (
+                f"message_id={message_id} route={override_route} "
+                f"forwarded_now={len(forwarded)} clear_risk={clear_risk}"
+            ),
+        ),
+    )
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice="Inbound routing override saved.",
+        doc_notice_type="success",
+    )
+    return redirect(f"{redirect_url}#communications")
 
 
 @app.route("/tc/transaction/<int:transaction_id>/log-communication", methods=["POST"])

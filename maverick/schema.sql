@@ -380,6 +380,57 @@ CREATE TABLE calendar_events (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE inbound_email_messages (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    mailbox_role VARCHAR(20) NOT NULL,
+    mailbox_address VARCHAR(255) NOT NULL,
+    sender_email VARCHAR(255) NOT NULL,
+    sender_role VARCHAR(50) NOT NULL,
+    subject TEXT,
+    body_text TEXT,
+    urgency VARCHAR(20),
+    category VARCHAR(50),
+    action_required BOOLEAN DEFAULT FALSE,
+    sensitive_content BOOLEAN DEFAULT FALSE,
+    at_risk BOOLEAN DEFAULT FALSE,
+    recommended_route VARCHAR(30),
+    applied_route VARCHAR(30),
+    forwarded_to JSONB,
+    sms_sent BOOLEAN DEFAULT FALSE,
+    task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+    status_notes TEXT,
+    provider_message_id VARCHAR(255),
+    provider_payload JSONB,
+    override_route VARCHAR(30),
+    override_notes TEXT,
+    override_by VARCHAR(100),
+    override_at TIMESTAMP,
+    received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE inbound_email_rules (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    sender_role VARCHAR(50) NOT NULL,
+    always_notify_margaret BOOLEAN DEFAULT FALSE,
+    forward_policy VARCHAR(20) DEFAULT 'default',
+    updated_by VARCHAR(100),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE transaction_risk_flags (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+    is_at_risk BOOLEAN DEFAULT TRUE,
+    reason TEXT,
+    latest_message_id INT REFERENCES inbound_email_messages(id) ON DELETE SET NULL,
+    flagged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -411,3 +462,6 @@ CREATE UNIQUE INDEX idx_timeline_packets_transaction ON timeline_packets(transac
 CREATE INDEX idx_vendor_outreach_transaction ON vendor_outreach(transaction_id, vendor_type, sent_at DESC);
 CREATE UNIQUE INDEX idx_vendor_outreach_token ON vendor_outreach(outreach_token);
 CREATE INDEX idx_calendar_events_transaction ON calendar_events(transaction_id, starts_at DESC);
+CREATE INDEX idx_inbound_email_messages_transaction ON inbound_email_messages(transaction_id, received_at DESC);
+CREATE UNIQUE INDEX idx_inbound_email_rules_txn_role ON inbound_email_rules(transaction_id, sender_role);
+CREATE UNIQUE INDEX idx_transaction_risk_flags_txn ON transaction_risk_flags(transaction_id);

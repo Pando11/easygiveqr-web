@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Maverick Inbound Email Update</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:700px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Maverick Inbound Email Update</h2>
+                <p style="margin:8px 0 0; color:#334155;">
+                    Transaction #{{ data.transaction_id }} - {{ data.property_address }}
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                <p style="margin:0 0 12px;"><strong>From:</strong> {{ data.sender_email }} ({{ data.sender_role_label }})</p>
+                <p style="margin:0 0 12px;"><strong>Subject:</strong> {{ data.subject }}</p>
+                <p style="margin:0 0 12px;">
+                    <strong>Urgency:</strong> {{ data.urgency }} |
+                    <strong>Category:</strong> {{ data.category }} |
+                    <strong>Action Required:</strong> {{ "Yes" if data.action_required else "No" }}
+                </p>
+                <div style="border:1px solid #e2e8f0; border-radius:8px; background:#f8fafc; padding:12px;">
+                    <p style="margin:0; white-space:pre-wrap;">{{ data.body_excerpt }}</p>
+                </div>
+                <p style="margin:14px 0 0; color:#475569;">
+                    This message was routed automatically by Maverick inbound email triage.
+                </p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

@@ -272,6 +272,34 @@ You will now see system-created entries for:
 - Vendor outreach email sent/failed
 - Vendor secure-link response received
 - Auto follow-up task creation after 24h no response
+- Inbound mailbox routing decisions (urgency/category/forwarding/SMS alerts)
+
+### Inbound Mailbox Workflow (New)
+
+Each transaction now has unique inbound addresses:
+- `transaction-<id>-buyer@getmaverick.com`
+- `transaction-<id>-seller@getmaverick.com`
+- `transaction-<id>-lender@getmaverick.com`
+
+When an inbound message is received, Maverick:
+1. Logs it to communication timeline
+2. Classifies urgency/category/action needed
+3. Auto-routes:
+   - Low informational -> log only
+   - Medium awareness -> forwards to relevant parties + timeline task
+   - High action required -> SMS alert to Margaret + broad forwarding
+
+Sensitive handling:
+- Buyer concern/cold-feet messages are flagged **At Risk** and not auto-forwarded to seller.
+
+Override controls:
+- In transaction -> Communication Log -> Inbound Email Timeline -> Override Routing
+- Use this to force log-only, relevant-forward, or high-action behavior
+- Optional checkbox clears At-Risk flag after resolution
+
+Rule setting:
+- Inbound Routing Rules supports preferences like:
+  - "Always notify Margaret for lender emails"
 
 ### Logging Best Practice
 

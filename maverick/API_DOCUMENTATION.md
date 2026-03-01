@@ -159,3 +159,31 @@ Timeline packet dispatch is signature-driven:
 - Initial send on transaction approval
 - Automatic re-send when tracked milestone signature changes (closing date, major deadlines, repair timeline additions)
 - Stored in `timeline_packets` for idempotency and audit trail
+
+## Inbound Email AI Routing Endpoints
+
+### Inbound webhook receiver
+- `POST /webhooks/inbound-email`
+- Auth:
+  - Optional shared secret via `INBOUND_EMAIL_WEBHOOK_SECRET`
+  - Pass as header `X-Inbound-Secret` (or query/form `secret`)
+
+Accepted payload fields (provider-dependent):
+- Recipient fields: `to`, `recipient`, `delivered_to`, `envelope_to`, `envelope`
+- Sender fields: `from`, `sender`
+- Message fields: `subject`, `text` / `body-plain` / `stripped-text` / `body`
+- Optional provider message id: `message_id`, `Message-Id`, `Message-ID`
+
+### Save inbound routing rule (TC)
+- `POST /tc/transaction/<transaction_id>/inbound-email-rule`
+- Form fields:
+  - `sender_role` (`lender`, `buyer`, `seller`, `agent`, `inspector`, `title_company`, etc.)
+  - `always_notify_margaret` (`true`/`false`)
+  - `forward_policy` (`default`, `all`, `never`)
+
+### Override one inbound message route (TC)
+- `POST /tc/transaction/<transaction_id>/inbound-email/<message_id>/override`
+- Form fields:
+  - `override_route` (`log_only`, `medium_awareness`, `high_action`)
+  - `override_notes` (optional)
+  - `clear_risk` (`true` to clear at-risk state)
