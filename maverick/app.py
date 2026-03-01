@@ -9007,6 +9007,27 @@ def mark_vendor_outreach_scheduled_route(outreach_id):
     if not result.get("success"):
         notice = f"Could not mark scheduled: {result.get('error', 'unknown error')}"
         notice_type = "warning"
+    else:
+        scheduled_at = parse_schedule_datetime(scheduled_input)
+        if scheduled_at:
+            if len(scheduled_input) <= 10:
+                scheduled_at = scheduled_at.replace(hour=9, minute=0, second=0, microsecond=0)
+            calendar_sync_result = sync_vendor_appointment_to_calendar(
+                transaction_id=result.get("transaction_id"),
+                vendor_type=result.get("vendor_type"),
+                appointment_at=scheduled_at,
+                source_ref=f"vendor_outreach:{outreach_id}",
+                source_id=outreach_id,
+                notes=notes,
+            )
+            if not calendar_sync_result.get("success"):
+                sync_reason = (
+                    calendar_sync_result.get("error")
+                    or calendar_sync_result.get("skipped")
+                    or "unknown"
+                )
+                notice = f"Vendor marked scheduled, but calendar sync was skipped/failed: {sync_reason}"
+                notice_type = "warning"
     return redirect(url_for("tc_daily_checklist", notice=notice, notice_type=notice_type))
 
 
