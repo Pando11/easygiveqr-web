@@ -97,6 +97,27 @@ Client portal uses a unique token URL and does not require login credentials.
 - Form body:
   - `task_id`
 
+### Smart document upload processing
+- Applies to:
+  - `POST /tc/transaction/<transaction_id>/upload-document`
+  - `POST /client/<access_token>/upload`
+- Behavior before S3 save:
+  - extracts first-page text
+  - classifies document type via Claude + heuristic fallback
+  - generates normalized filename (`<type>_<property>_<date>.pdf`)
+  - uploads with smart filename
+  - triggers task/deadline actions by type (e.g., earnest receipt, inspection report)
+
+### Classification correction (TC)
+- `POST /tc/document/<document_id>/classification-correction`
+- Form fields:
+  - `corrected_document_type` (required)
+  - `correction_reason` (optional)
+- Behavior:
+  - updates `documents.document_type`
+  - logs correction in `document_classification_corrections`
+  - retriggers document analysis pipeline for corrected type
+
 ## Bulk SMS Broadcasting (TC)
 
 ### Bulk messaging workspace

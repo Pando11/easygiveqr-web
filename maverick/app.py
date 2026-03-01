@@ -63,6 +63,12 @@ from utils.contract_extraction import (
     extract_via_pypdf,
 )
 from utils.document_analysis import analyze_appraisal, analyze_hoa_documents, analyze_inspection_report
+from utils.document_processing import (
+    ensure_document_classification_corrections_table,
+    extract_earnest_amount,
+    normalize_document_type,
+    process_uploaded_document,
+)
 from utils.heads_up import (
     HEADS_UP_PATTERN_META,
     accept_heads_up_signal,
@@ -79,7 +85,7 @@ from utils.inbound_email import (
     parse_transaction_alias,
     split_recipient_addresses,
 )
-from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document, upload_local_file
+from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_local_file
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 from utils.timeline_generator import (
     generate_transaction_timeline_pdf,
@@ -156,6 +162,27 @@ CLIENT_UPLOAD_DOCUMENT_TYPES = {
     "settlement_statement",
     "other",
 }
+
+DOCUMENT_CLASSIFICATION_OVERRIDE_TYPES = sorted(
+    {
+        "earnest_receipt",
+        "option_receipt",
+        "seller_disclosure",
+        "survey",
+        "hoa_docs",
+        "title_commitment",
+        "inspection_report",
+        "appraisal",
+        "loan_approval",
+        "insurance_binder",
+        "settlement_statement",
+        "signed_amendment",
+        "signed_disclosure",
+        "signed_addendum",
+        "other",
+        "unknown",
+    }
+)
 
 HOA_ANALYSIS_DOCUMENT_TYPES = {"hoa", "hoa_documents", "hoa_docs"}
 INSPECTION_ANALYSIS_DOCUMENT_TYPES = {"inspection", "inspection_report"}
@@ -1657,6 +1684,199 @@ def run_document_analysis_async(document_id, transaction_id, document_type, s3_k
             print(f"Async document analysis error (txn#{transaction_id}, doc#{document_id}): {exc}")
 
     Thread(target=_run, daemon=True).start()
+
+
+def _transaction_column_exists(column_name):
+    """Return whether a transactions column exists."""
+    rows = execute_query(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'transactions'
+          AND column_name = %s
+        LIMIT 1
+        """,
+        ((column_name or "").strip().lower(),),
+        fetch=True,
+    ) or []
+    return bool(rows)
+
+
+def complete_tasks_for_document_event(transaction_id, description_fragments, note_line, completed_by="document-smart-processor"):
+    """Complete pending tasks that match one or more description fragments."""
+    completed_ids = []
+    for fragment in description_fragments or []:
+        snippet = (fragment or "").strip().lower()
+        if len(snippet) < 3:
+            continue
+        rows = execute_query(
+            """
+            SELECT id
+            FROM tasks
+            WHERE transaction_id = %s
+              AND completed = FALSE
+              AND COALESCE(status, 'pending') <> 'completed'
+              AND LOWER(COALESCE(task_description, '')) LIKE %s
+            ORDER BY due_date ASC NULLS LAST, id ASC
+            LIMIT 1
+            """,
+            (transaction_id, f"%{snippet}%"),
+            fetch=True,
+        ) or []
+        if not rows:
+            continue
+        task_id = rows[0]["id"]
+        if task_id in completed_ids:
+            continue
+        execute_query(
+            """
+            UPDATE tasks
+            SET completed = TRUE,
+                status = 'completed',
+                completed_at = CURRENT_TIMESTAMP,
+                completed_by = %s
+            WHERE id = %s
+            """,
+            ((completed_by or "document-smart-processor")[:100], task_id),
+        )
+        append_task_note(task_id, note_line)
+        completed_ids.append(task_id)
+    return completed_ids
+
+
+def apply_document_post_upload_actions(
+    transaction_id,
+    document_type,
+    first_page_text,
+    key_info_extracted,
+    uploaded_by="margaret",
+):
+    """Apply smart action hooks based on detected document type."""
+    normalized_type = normalize_document_type(document_type, fallback="other")
+    actor = (uploaded_by or "margaret")[:100]
+    summary_bits = []
+    completed_task_ids = []
+
+    if normalized_type == "inspection_report":
+        completed_task_ids = complete_tasks_for_document_event(
+            transaction_id=transaction_id,
+            description_fragments=["get inspection report", "upload inspection report"],
+            note_line="Auto-completed from smart document processing: inspection report uploaded.",
+            completed_by=actor,
+        )
+        summary_bits.append(f"inspection_tasks_completed={len(completed_task_ids)}")
+
+    elif normalized_type == "earnest_receipt":
+        amount = extract_earnest_amount(first_page_text, key_info_extracted=key_info_extracted)
+        completed_task_ids = complete_tasks_for_document_event(
+            transaction_id=transaction_id,
+            description_fragments=["verify earnest money receipt", "earnest money receipt"],
+            note_line="Auto-completed from smart document processing: earnest receipt uploaded.",
+            completed_by=actor,
+        )
+        execute_query(
+            """
+            UPDATE deadlines
+            SET completed = TRUE,
+                completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+            WHERE transaction_id = %s
+              AND deadline_type = 'earnest_money'
+              AND completed = FALSE
+            """,
+            (transaction_id,),
+        )
+        if amount is not None and _transaction_column_exists("earnest_amount"):
+            execute_query(
+                """
+                UPDATE transactions
+                SET earnest_amount = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (amount, transaction_id),
+            )
+        if _transaction_column_exists("earnest_received"):
+            execute_query(
+                """
+                UPDATE transactions
+                SET earnest_received = TRUE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (transaction_id,),
+            )
+        if amount is not None:
+            summary_bits.append(f"earnest_amount={amount:.2f}")
+        summary_bits.append(f"earnest_tasks_completed={len(completed_task_ids)}")
+
+    elif normalized_type == "title_commitment":
+        completed_task_ids = complete_tasks_for_document_event(
+            transaction_id=transaction_id,
+            description_fragments=["get title commitment", "verify title opened"],
+            note_line="Auto-completed from smart document processing: title commitment uploaded.",
+            completed_by=actor,
+        )
+        summary_bits.append(f"title_tasks_completed={len(completed_task_ids)}")
+
+    elif normalized_type == "survey":
+        completed_task_ids = complete_tasks_for_document_event(
+            transaction_id=transaction_id,
+            description_fragments=["get survey", "request survey from seller"],
+            note_line="Auto-completed from smart document processing: survey uploaded.",
+            completed_by=actor,
+        )
+        summary_bits.append(f"survey_tasks_completed={len(completed_task_ids)}")
+
+    elif normalized_type == "hoa_docs":
+        completed_task_ids = complete_tasks_for_document_event(
+            transaction_id=transaction_id,
+            description_fragments=["get hoa documents", "order hoa documents if applicable"],
+            note_line="Auto-completed from smart document processing: HOA docs uploaded.",
+            completed_by=actor,
+        )
+        summary_bits.append(f"hoa_tasks_completed={len(completed_task_ids)}")
+
+    elif normalized_type == "appraisal":
+        completed_task_ids = complete_tasks_for_document_event(
+            transaction_id=transaction_id,
+            description_fragments=["verify appraisal completed"],
+            note_line="Auto-completed from smart document processing: appraisal uploaded.",
+            completed_by=actor,
+        )
+        summary_bits.append(f"appraisal_tasks_completed={len(completed_task_ids)}")
+
+    elif normalized_type == "loan_approval":
+        completed_task_ids = complete_tasks_for_document_event(
+            transaction_id=transaction_id,
+            description_fragments=["get loan approval letter"],
+            note_line="Auto-completed from smart document processing: loan approval uploaded.",
+            completed_by=actor,
+        )
+        summary_bits.append(f"loan_tasks_completed={len(completed_task_ids)}")
+
+    elif normalized_type == "insurance_binder":
+        completed_task_ids = complete_tasks_for_document_event(
+            transaction_id=transaction_id,
+            description_fragments=["verify insurance binder received by lender"],
+            note_line="Auto-completed from smart document processing: insurance binder uploaded.",
+            completed_by=actor,
+        )
+        summary_bits.append(f"insurance_tasks_completed={len(completed_task_ids)}")
+
+    elif normalized_type == "settlement_statement":
+        completed_task_ids = complete_tasks_for_document_event(
+            transaction_id=transaction_id,
+            description_fragments=["get final settlement statement"],
+            note_line="Auto-completed from smart document processing: settlement statement uploaded.",
+            completed_by=actor,
+        )
+        summary_bits.append(f"settlement_tasks_completed={len(completed_task_ids)}")
+
+    return {
+        "document_type": normalized_type,
+        "completed_task_ids": completed_task_ids,
+        "summary": " ".join(summary_bits).strip(),
+    }
 
 
 def document_request_status_label(status_value):
@@ -8025,6 +8245,7 @@ def tc_transaction(transaction_id):
         title_email=normalize_email(transaction.get("title_officer_email")),
     )
 
+    ensure_document_classification_corrections_table()
     documents = execute_query(
         """
         SELECT id, document_type, filename, file_size, uploaded_by, uploaded_at
@@ -8039,6 +8260,26 @@ def tc_transaction(transaction_id):
         document["uploaded_at_label"] = (
             document["uploaded_at"].strftime("%b %d, %Y %I:%M %p") if document.get("uploaded_at") else "Unknown"
         )
+
+    correction_rows = execute_query(
+        """
+        SELECT DISTINCT ON (document_id)
+               id, document_id, original_document_type, corrected_document_type,
+               correction_reason, corrected_by, created_at
+        FROM document_classification_corrections
+        WHERE transaction_id = %s
+        ORDER BY document_id, created_at DESC, id DESC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    correction_by_document = {row["document_id"]: row for row in correction_rows}
+    for document in documents:
+        correction = correction_by_document.get(document["id"])
+        document["classification_correction"] = correction
+        document["was_reclassified"] = bool(correction)
+        document["original_document_type"] = correction.get("original_document_type") if correction else None
+        document["correction_note"] = correction.get("correction_reason") if correction else ""
 
     analysis_rows = get_document_analysis_rows(transaction_id)
     analysis_by_document = {}
@@ -8241,6 +8482,7 @@ def tc_transaction(transaction_id):
             "pending_review_count": analysis_pending_review_count,
             "action_item_count": analysis_action_item_count,
         },
+        document_classification_types=DOCUMENT_CLASSIFICATION_OVERRIDE_TYPES,
     )
 
 
@@ -8807,7 +9049,8 @@ def approve_transaction(transaction_id):
 @login_required
 def upload_transaction_document(transaction_id):
     """Upload a transaction document to S3 and track it in DB."""
-    if not get_transaction_or_none(transaction_id):
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
         return "Transaction not found", 404
 
     if "document_file" not in request.files:
@@ -8821,19 +9064,30 @@ def upload_transaction_document(transaction_id):
     if extension not in ALLOWED_DOCUMENT_EXTENSIONS:
         return "Invalid file type. Allowed: PDF, JPG, JPEG, PNG.", 400
 
-    file.seek(0, os.SEEK_END)
-    file_size = file.tell()
+    file_bytes = file.read()
+    file_size = len(file_bytes or b"")
     if file_size > MAX_FILE_SIZE:
         return "File exceeds 16MB upload limit.", 400
-    file.seek(0)
 
-    document_type = (request.form.get("document_type") or "other").strip().lower()
-    if not document_type:
-        document_type = "other"
-
-    s3_key = upload_document(file, transaction_id, document_type, safe_filename)
-    if not s3_key:
+    selected_document_type = normalize_document_type(request.form.get("document_type"), fallback="other")
+    uploaded_by = session.get("tc_username", "margaret")
+    processed = process_uploaded_document(
+        file_bytes=file_bytes,
+        transaction_id=transaction_id,
+        uploaded_by=uploaded_by,
+        original_filename=safe_filename,
+        extension=extension,
+        transaction_context=transaction,
+        suggested_document_type=selected_document_type,
+    )
+    if not processed.get("success"):
         return "Failed to upload document.", 500
+    document_type = normalize_document_type(processed.get("document_type"), fallback=selected_document_type or "other")
+    predicted_type = normalize_document_type(processed.get("predicted_type"), fallback="unknown")
+    document_filename = processed.get("filename") or safe_filename
+    s3_key = processed.get("s3_key")
+    classification = processed.get("analysis") or {}
+    first_page_text = processed.get("first_page_text") or ""
 
     document_id = execute_insert(
         """
@@ -8845,14 +9099,62 @@ def upload_transaction_document(transaction_id):
         (
             transaction_id,
             document_type,
-            safe_filename,
+            document_filename,
             s3_key,
             file_size,
-            session.get("tc_username", "margaret"),
+            uploaded_by,
         ),
     )
     if not document_id:
         return "Failed to save document record.", 500
+
+    key_info = classification.get("key_info_extracted")
+    post_actions = apply_document_post_upload_actions(
+        transaction_id=transaction_id,
+        document_type=document_type,
+        first_page_text=first_page_text,
+        key_info_extracted=(key_info if isinstance(key_info, dict) else {}),
+        uploaded_by=uploaded_by,
+    )
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'document_processor', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Smart document classification completed",
+            (
+                f"doc_id={document_id} selected_type={selected_document_type} "
+                f"predicted_type={predicted_type} final_type={document_type} "
+                f"confidence={int(classification.get('confidence') or 0)} "
+                f"source={(classification.get('source') or 'heuristic')} "
+                f"actions={post_actions.get('summary') or 'none'}"
+            )[:1800],
+        ),
+    )
+
+    if predicted_type != "unknown" and predicted_type != document_type:
+        execute_query(
+            """
+            INSERT INTO document_classification_corrections (
+                document_id, transaction_id, original_document_type, corrected_document_type,
+                first_page_signature, first_page_excerpt, correction_reason, corrected_by
+            )
+            VALUES (%s, %s, %s, %s, md5(%s), %s, %s, %s)
+            """,
+            (
+                document_id,
+                transaction_id,
+                predicted_type,
+                document_type,
+                first_page_text[:3000],
+                first_page_text[:600],
+                "Auto fallback from unknown prediction to selected upload type",
+                "system",
+            ),
+        )
 
     ensure_document_requests_table()
     execute_query(
@@ -9063,8 +9365,8 @@ def client_portal_upload(access_token):
         )
         return redirect(redirect_url)
 
-    file.seek(0, os.SEEK_END)
-    file_size = file.tell()
+    file_bytes = file.read()
+    file_size = len(file_bytes or b"")
     if file_size > MAX_FILE_SIZE:
         redirect_url = url_for(
             "client_portal_documents",
@@ -9073,15 +9375,23 @@ def client_portal_upload(access_token):
             notice_type="error",
         )
         return redirect(redirect_url)
-    file.seek(0)
 
-    document_type = (request.form.get("document_type") or "other").strip().lower()
+    document_type = normalize_document_type(request.form.get("document_type"), fallback="other")
     valid_upload_types = CLIENT_UPLOAD_DOCUMENT_TYPES | REQUIRED_DOCUMENT_TYPES
     if document_type not in valid_upload_types:
         document_type = "other"
 
-    s3_key = upload_document(file, transaction["id"], document_type, safe_filename)
-    if not s3_key:
+    uploaded_by = f"client_{access_row.get('client_type')}"
+    processed = process_uploaded_document(
+        file_bytes=file_bytes,
+        transaction_id=transaction["id"],
+        uploaded_by=uploaded_by,
+        original_filename=safe_filename,
+        extension=extension,
+        transaction_context=transaction,
+        suggested_document_type=document_type,
+    )
+    if not processed.get("success"):
         redirect_url = url_for(
             "client_portal_documents",
             access_token=access_token,
@@ -9089,6 +9399,12 @@ def client_portal_upload(access_token):
             notice_type="error",
         )
         return redirect(redirect_url)
+    final_document_type = normalize_document_type(processed.get("document_type"), fallback=document_type or "other")
+    predicted_type = normalize_document_type(processed.get("predicted_type"), fallback="unknown")
+    s3_key = processed.get("s3_key")
+    filename_for_storage = processed.get("filename") or safe_filename
+    classification = processed.get("analysis") or {}
+    first_page_text = processed.get("first_page_text") or ""
 
     document_id = execute_insert(
         """
@@ -9099,18 +9415,65 @@ def client_portal_upload(access_token):
         """,
         (
             transaction["id"],
-            document_type,
-            safe_filename,
+            final_document_type,
+            filename_for_storage,
             s3_key,
             file_size,
-            f"client_{access_row.get('client_type')}",
+            uploaded_by,
         ),
     )
     if document_id:
+        key_info = classification.get("key_info_extracted")
+        post_actions = apply_document_post_upload_actions(
+            transaction_id=transaction["id"],
+            document_type=final_document_type,
+            first_page_text=first_page_text,
+            key_info_extracted=(key_info if isinstance(key_info, dict) else {}),
+            uploaded_by=uploaded_by,
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', 'system', 'document_processor', %s, %s)
+            """,
+            (
+                transaction["id"],
+                "Smart document classification completed (client upload)",
+                (
+                    f"doc_id={document_id} selected_type={document_type} "
+                    f"predicted_type={predicted_type} final_type={final_document_type} "
+                    f"confidence={int(classification.get('confidence') or 0)} "
+                    f"source={(classification.get('source') or 'heuristic')} "
+                    f"actions={post_actions.get('summary') or 'none'}"
+                )[:1800],
+            ),
+        )
+
+        if predicted_type != "unknown" and predicted_type != final_document_type:
+            execute_query(
+                """
+                INSERT INTO document_classification_corrections (
+                    document_id, transaction_id, original_document_type, corrected_document_type,
+                    first_page_signature, first_page_excerpt, correction_reason, corrected_by
+                )
+                VALUES (%s, %s, %s, %s, md5(%s), %s, %s, %s)
+                """,
+                (
+                    document_id,
+                    transaction["id"],
+                    predicted_type,
+                    final_document_type,
+                    first_page_text[:3000],
+                    first_page_text[:600],
+                    "Auto fallback from unknown prediction to selected upload type",
+                    "system",
+                ),
+            )
+
         run_document_analysis_async(
             document_id=document_id,
             transaction_id=transaction["id"],
-            document_type=document_type,
+            document_type=final_document_type,
             s3_key=s3_key,
             extension=extension,
         )
@@ -9126,7 +9489,7 @@ def client_portal_upload(access_token):
           AND document_type = %s
           AND status <> 'received'
         """,
-        (transaction["id"], document_type),
+        (transaction["id"], final_document_type),
     )
 
     mark_client_accessed(access_row["id"])
@@ -9134,7 +9497,7 @@ def client_portal_upload(access_token):
     redirect_url = url_for(
         "client_portal_documents",
         access_token=access_token,
-        notice=f"Uploaded {document_type_label(document_type)} successfully.",
+        notice=f"Uploaded {document_type_label(final_document_type)} successfully.",
         notice_type="success",
     )
     return redirect(redirect_url)
@@ -9527,6 +9890,116 @@ def download_document(document_id):
         ip_address=request.remote_addr or "",
     )
     return redirect(url)
+
+
+@app.route("/tc/document/<int:document_id>/classification-correction", methods=["POST"])
+@login_required
+def correct_document_classification(document_id):
+    """Allow Margaret to correct smart document classification labels."""
+    ensure_document_classification_corrections_table()
+    corrected_type = normalize_document_type(request.form.get("corrected_document_type"), fallback="unknown")
+    if corrected_type not in DOCUMENT_CLASSIFICATION_OVERRIDE_TYPES:
+        return "Invalid document type override.", 400
+
+    correction_reason = (request.form.get("correction_reason") or "").strip()
+    correction_reason = correction_reason[:800] if correction_reason else ""
+
+    rows = execute_query(
+        """
+        SELECT id, transaction_id, document_type, filename, s3_key
+        FROM documents
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (document_id,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return "Document not found.", 404
+
+    document = rows[0]
+    transaction_id = document["transaction_id"]
+    original_type = normalize_document_type(document.get("document_type"), fallback="other")
+    if original_type == corrected_type:
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Document type is already set to that value.",
+            doc_notice_type="warning",
+        )
+        return redirect(f"{redirect_url}#documents")
+
+    execute_query(
+        """
+        UPDATE documents
+        SET document_type = %s
+        WHERE id = %s
+        """,
+        (corrected_type, document_id),
+    )
+    execute_query(
+        """
+        INSERT INTO document_classification_corrections (
+            document_id, transaction_id, original_document_type, corrected_document_type,
+            first_page_signature, first_page_excerpt, correction_reason, corrected_by
+        )
+        VALUES (%s, %s, %s, %s, md5(%s), %s, %s, %s)
+        """,
+        (
+            document_id,
+            transaction_id,
+            original_type,
+            corrected_type,
+            f"{document.get('filename') or ''}|{document.get('s3_key') or ''}",
+            (document.get("filename") or "")[:500],
+            correction_reason or "Manual classification correction by Margaret",
+            session.get("tc_username", "margaret"),
+        ),
+    )
+
+    action_result = apply_document_post_upload_actions(
+        transaction_id=transaction_id,
+        document_type=corrected_type,
+        first_page_text="",
+        key_info_extracted={},
+        uploaded_by=session.get("tc_username", "margaret"),
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', %s, %s, %s)
+        """,
+        (
+            transaction_id,
+            session.get("tc_username", "margaret"),
+            "Document classification corrected",
+            (
+                f"document_id={document_id} original_type={original_type} corrected_type={corrected_type} "
+                f"reason={(correction_reason or 'n/a')[:280]} "
+                f"actions={action_result.get('summary') or 'none'}"
+            )[:1800],
+        ),
+    )
+
+    extension = file_extension(document.get("filename") or "")
+    if document.get("s3_key"):
+        run_document_analysis_async(
+            document_id=document_id,
+            transaction_id=transaction_id,
+            document_type=corrected_type,
+            s3_key=document["s3_key"],
+            extension=extension,
+        )
+
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice=(
+            f"Document type corrected to {document_type_label(corrected_type)}."
+        ),
+        doc_notice_type="success",
+    )
+    return redirect(f"{redirect_url}#documents")
 
 
 @app.route("/tc/voice-note/<int:voice_note_id>/audio")

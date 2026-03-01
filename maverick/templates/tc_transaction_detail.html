@@ -400,12 +400,33 @@
                 <li class="list-row">
                     <span>
                         <strong>{{ doc.document_type.replace('_', ' ').title() }}:</strong> {{ doc.filename }}
+                        {% if doc.was_reclassified %}
+                        <small class="doc-classification-pill">
+                            Reclassified from {{ doc.original_document_type|replace('_', ' ')|title }}
+                        </small>
+                        {% endif %}
                         <small class="doc-analysis-status status-{{ 'reviewed' if doc.analysis_reviewed else ('pending' if doc.analysis_available else 'none') }}">
                             Analysis: {{ doc.analysis_status_label }}
                             {% if doc.analysis_action_count %}
                             ({{ doc.analysis_action_count }} actions)
                             {% endif %}
                         </small>
+                        <form method="post"
+                              action="{{ url_for('correct_document_classification', document_id=doc.id) }}"
+                              class="doc-correction-form">
+                            <label class="small-muted">Correct document type</label>
+                            <div class="doc-correction-row">
+                                <select name="corrected_document_type" required>
+                                    {% for doc_type in document_classification_types %}
+                                    <option value="{{ doc_type }}" {% if doc.document_type == doc_type %}selected{% endif %}>
+                                        {{ doc_type|replace('_', ' ')|title }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <input type="text" name="correction_reason" maxlength="180" placeholder="Reason (optional)">
+                                <button type="submit" class="btn btn-small btn-secondary">Update</button>
+                            </div>
+                        </form>
                     </span>
                     <div class="actions-inline">
                         <a href="{{ url_for('view_document', document_id=doc.id) }}" title="View">View</a>
@@ -1296,6 +1317,29 @@
     color: #64748b;
 }
 
+.doc-classification-pill {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
+.doc-correction-form {
+    margin-top: 8px;
+}
+
+.doc-correction-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+    align-items: center;
+    margin-top: 4px;
+}
+
 .doc-requests-box h4 {
     margin-bottom: 8px;
     color: #0f172a;
@@ -1496,7 +1540,8 @@
 
     .grid-2,
     .upload-row,
-    .email-status-grid {
+    .email-status-grid,
+    .doc-correction-row {
         grid-template-columns: 1fr;
     }
 }

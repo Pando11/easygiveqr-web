@@ -23,6 +23,7 @@ Core capabilities:
 - Bulk SMS broadcasting with smart variables, preview, filtering, and paced queue sends
 - Rule-based auto-task completion with confidence safeguards, undo tracking, and weekly time-saved metrics
 - Twilio voice-note capture with transcription, auto task actions, and communication-log playback
+- Smart document classification + renaming before S3 save, with Margaret correction learning loop
 - Automation scripts for reminders, closing protocol, problem detection, task auto-completion, and nightly backups
 
 ## Local setup instructions
@@ -97,6 +98,7 @@ STRIPE_SECRET_KEY=
 STRIPE_PUBLISHABLE_KEY=
 STRIPE_WEBHOOK_SECRET=
 ANTHROPIC_API_KEY=
+DOCUMENT_CLASSIFIER_MODEL=claude-sonnet-4-20250514
 
 VENMO_HANDLE=@GetMaverick
 PAYPAL_EMAIL=pay@getmaverick.com
@@ -179,6 +181,20 @@ Dashboard route:
 Review/action routes:
 - `POST /tc/transaction/<transaction_id>/document-analysis/<analysis_id>/review`
 - `POST /tc/transaction/<transaction_id>/document-analysis/override-task`
+
+## Smart Document Processing
+
+On document upload, Maverick now:
+
+1. extracts first-page text
+2. classifies document type using Claude (with heuristic fallback)
+3. renames file using a standard pattern before S3 upload
+4. auto-executes document-specific actions (task completion, earnest receipt updates, analysis triggers)
+
+Margaret override route:
+- `POST /tc/document/<document_id>/classification-correction`
+
+Corrections are stored in `document_classification_corrections` and used to improve future type mapping.
 
 ## Timeline Packet + Vendor Outreach Automation
 

@@ -186,6 +186,19 @@ CREATE TABLE communications (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE document_classification_corrections (
+    id SERIAL PRIMARY KEY,
+    document_id INT REFERENCES documents(id) ON DELETE SET NULL,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    original_document_type VARCHAR(100) NOT NULL,
+    corrected_document_type VARCHAR(100) NOT NULL,
+    first_page_signature VARCHAR(64),
+    first_page_excerpt TEXT,
+    correction_reason TEXT,
+    corrected_by VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE voice_notes (
     id SERIAL PRIMARY KEY,
     call_sid VARCHAR(80),
@@ -714,6 +727,9 @@ CREATE INDEX idx_tasks_due_date ON tasks(due_date);
 CREATE INDEX idx_documents_transaction ON documents(transaction_id);
 CREATE INDEX idx_documents_type ON documents(document_type);
 CREATE INDEX idx_communications_transaction ON communications(transaction_id);
+CREATE INDEX idx_doc_classification_corrections_doc ON document_classification_corrections(document_id, created_at DESC);
+CREATE INDEX idx_doc_classification_corrections_type_map ON document_classification_corrections(original_document_type, corrected_document_type, created_at DESC);
+CREATE INDEX idx_doc_classification_corrections_txn ON document_classification_corrections(transaction_id, created_at DESC);
 CREATE INDEX idx_voice_notes_recording_sid ON voice_notes(recording_sid);
 CREATE INDEX idx_voice_notes_transaction ON voice_notes(transaction_id, created_at DESC);
 CREATE INDEX idx_voice_notes_status ON voice_notes(status, created_at DESC);
