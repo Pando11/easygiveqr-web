@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+
+{% block title %}Problem Detection Settings - Maverick TC{% endblock %}
+{% block subtitle %}Sensitivity, Notifications, Auto-Actions, Whitelist{% endblock %}
+
+{% block content %}
+<section class="card top-row">
+    <div>
+        <a class="text-link" href="{{ url_for('tc_dashboard') }}">&larr; Back to Dashboard</a>
+        <h2>Problem Detection Settings</h2>
+        <p class="subtle">Configure how aggressively Maverick flags issues and what gets auto-executed.</p>
+    </div>
+    <div class="top-actions">
+        <a class="btn btn-secondary" href="{{ url_for('tc_health_report') }}">Open Health Report</a>
+    </div>
+</section>
+
+{% if notice %}
+<section class="card">
+    <div class="notice notice-{{ notice_type }}">{{ notice }}</div>
+</section>
+{% endif %}
+
+<section class="card">
+    <h3>Detection Controls</h3>
+    <form method="post" class="stack-form">
+        <input type="hidden" name="action" value="update_settings">
+
+        <div class="grid-2">
+            <div class="form-group">
+                <label for="sensitivity_level">Sensitivity Level</label>
+                <select id="sensitivity_level" name="sensitivity_level">
+                    <option value="relaxed" {% if settings.sensitivity_level == "relaxed" %}selected{% endif %}>Relaxed (fewer flags)</option>
+                    <option value="standard" {% if settings.sensitivity_level == "standard" %}selected{% endif %}>Standard</option>
+                    <option value="aggressive" {% if settings.sensitivity_level == "aggressive" %}selected{% endif %}>Aggressive (more flags)</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="notification_mode">Notification Preference</label>
+                <select id="notification_mode" name="notification_mode">
+                    <option value="urgent_only" {% if settings.notification_mode == "urgent_only" %}selected{% endif %}>SMS/Email for urgent only</option>
+                    <option value="all" {% if settings.notification_mode == "all" %}selected{% endif %}>SMS/Email for all runs</option>
+                    <option value="none" {% if settings.notification_mode == "none" %}selected{% endif %}>Do not send notifications</option>
+                </select>
+            </div>
+        </div>
+
+        <label class="checkbox-row">
+            <input type="hidden" name="ai_enabled" value="false">
+            <input type="checkbox" name="ai_enabled" value="true" {% if settings.ai_enabled %}checked{% endif %}>
+            Enable Claude-powered recommendation generation
+        </label>
+
+        <div class="form-group">
+            <label>Auto-execute these suggestion types</label>
+            <div class="checkbox-grid">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="auto_execute_actions" value="send_draft_extension"
+                        {% if "send_draft_extension" in settings.auto_execute_actions %}checked{% endif %}>
+                    Always send draft extension/addendum suggestions
+                </label>
+                <label class="checkbox-row">
+                    <input type="checkbox" name="auto_execute_actions" value="schedule_conference_call"
+                        {% if "schedule_conference_call" in settings.auto_execute_actions %}checked{% endif %}>
+                    Always schedule conference call suggestions
+                </label>
+                <label class="checkbox-row">
+                    <input type="checkbox" name="auto_execute_actions" value="call_lender"
+                        {% if "call_lender" in settings.auto_execute_actions %}checked{% endif %}>
+                    Always execute call lender suggestions
+                </label>
+            </div>
+        </div>
+
+        <button class="btn" type="submit">Save Settings</button>
+    </form>
+</section>
+
+<section class="card">
+    <h3>Whitelist Transactions</h3>
+    <p class="subtle">Transactions in this list are excluded from automated health analysis.</p>
+
+    <form method="post" class="inline-form">
+        <input type="hidden" name="action" value="add_whitelist">
+        <select name="transaction_id" required>
+            <option value="">Select active transaction...</option>
+            {% for txn in active_transactions %}
+            <option value="{{ txn.id }}">
+                #{{ txn.id }} - {{ txn.property_address }}{% if txn.closing_date %} (closes {{ txn.closing_date.strftime("%b %d") }}){% endif %}
+            </option>
+            {% endfor %}
+        </select>
+        <input type="text" name="reason" maxlength="180" placeholder="Reason (optional)">
+        <button class="btn btn-secondary" type="submit">Add to Whitelist</button>
+    </form>
+
+    {% if whitelist_rows %}
+    <ul class="simple-list">
+        {% for row in whitelist_rows %}
+        <li class="list-row">
+            <div>
+                <strong>{{ row.property_address }}</strong>
+                <p class="subtle">Transaction #{{ row.transaction_id }} · Closing {{ row.closing_label }}</p>
+                {% if row.reason %}<small>Reason: {{ row.reason }}</small>{% endif %}
+            </div>
+            {% if row.active %}
+            <form method="post">
+                <input type="hidden" name="action" value="remove_whitelist">
+                <input type="hidden" name="whitelist_id" value="{{ row.id }}">
+                <button class="btn btn-small btn-secondary" type="submit">Remove</button>
+            </form>
+            {% else %}
+            <small>Inactive</small>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty-box">No whitelisted transactions.</div>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>Run Detector Now</h3>
+    <form method="post">
+        <input type="hidden" name="action" value="run_now">
+        <button class="btn" type="submit">Run Analysis (No Notifications)</button>
+    </form>
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.top-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.top-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.stack-form {
+    display: grid;
+    gap: 10px;
+}
+
+.grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+.form-group input,
+.form-group select {
+    width: 100%;
+}
+
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.checkbox-grid {
+    display: grid;
+    gap: 8px;
+}
+
+.inline-form {
+    display: grid;
+    grid-template-columns: 2fr 1fr auto;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.notice {
+    border-radius: 8px;
+    padding: 10px;
+    font-weight: 600;
+}
+
+.notice-success { background: #dcfce7; color: #166534; }
+.notice-warning { background: #fef3c7; color: #92400e; }
+.notice-error { background: #fee2e2; color: #991b1b; }
+
+@media (max-width: 1024px) {
+    .grid-2,
+    .inline-form {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}

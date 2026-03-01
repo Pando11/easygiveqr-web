@@ -173,6 +173,8 @@ def get_active_transactions(limit=500):
             id,
             property_address,
             contract_price,
+            effective_date,
+            closing_date,
             agent_name,
             agent_phone,
             agent_email,
@@ -186,6 +188,8 @@ def get_active_transactions(limit=500):
             title_company,
             title_officer_phone,
             title_officer_email,
+            payment_upfront_paid,
+            payment_closing_paid,
             rush_service,
             status
         FROM transactions

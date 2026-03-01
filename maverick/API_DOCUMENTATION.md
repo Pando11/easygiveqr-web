@@ -221,6 +221,52 @@ When submitted, Maverick:
   - `add_whitelist` (skip nudges for specific agents)
   - `remove_whitelist` (disable whitelist entry)
 
+## AI Problem Detection + Health Report
+
+### 6-hour problem detection automation
+- `python3 automation/problem_detector.py`
+- Typical cron schedule: `0 */6 * * *`
+- Behavior:
+  - scans active transactions for schedule, lender, appraisal, inspection, closing-risk, payment, and missing-document patterns
+  - computes per-transaction health score (healthy/watch/urgent)
+  - generates actionable recommendations (Claude when enabled, deterministic fallback when unavailable)
+  - persists results for dashboard review and follow-up actions
+  - sends summary SMS/email based on configured notification preference
+
+### Health report dashboard (TC)
+- `GET /tc/health-report`
+- Query params:
+  - `refresh=1` (optional force refresh without notifications)
+- Shows:
+  - healthy/watch/urgent counts
+  - issues + suggested actions grouped by severity
+  - one-click action execution and issue dismissal
+
+### Accept suggestion action
+- `POST /tc/suggestion/<transaction_id>/accept`
+- Alias: `POST /tc/suggestion/accept`
+- JSON/form body:
+  - `action` (required suggestion text)
+  - `transaction_id` (required for alias route only)
+- Behavior:
+  - executes mapped automations (call lender, send draft action, schedule conference call)
+  - logs communication outcomes
+  - creates a follow-up task for next-day confirmation
+
+### Mark health issue handled
+- `POST /tc/health-report/transaction/<transaction_id>/dismiss`
+- JSON/form body (optional):
+  - `run_id`
+  - `notes`
+
+### Problem detection settings (TC)
+- `GET|POST /tc/problem-detection-settings`
+- Actions via form `action`:
+  - `update_settings` (sensitivity, notification mode, AI enabled, auto-execute actions)
+  - `add_whitelist` (exclude transaction from analysis)
+  - `remove_whitelist` (deactivate whitelist entry)
+  - `run_now` (manual analysis run without notifications)
+
 ## Timeline Packet Automation Notes
 
 Timeline packet dispatch is signature-driven:

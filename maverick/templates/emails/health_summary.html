@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Daily Transaction Health Summary</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px; margin:0 auto; background:#fff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Daily Transaction Health Summary</h2>
+                <p style="margin:8px 0 0; color:#334155;">{{ date }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                <p style="margin:0 0 12px;">
+                    <strong>Healthy:</strong> {{ healthy_count }} |
+                    <strong>Watch:</strong> {{ watch_count }} |
+                    <strong>Urgent:</strong> {{ urgent_count }}
+                </p>
+
+                {% if urgent_items %}
+                <h3 style="margin:16px 0 8px; color:#991b1b;">Urgent Items</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for item in urgent_items %}
+                    <li style="margin-bottom:8px;">
+                        <strong>{{ item.transaction.property_address }}</strong>
+                        {% if item.issues and item.issues[0].details %}<br>{{ item.issues[0].details }}{% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if watch_items %}
+                <h3 style="margin:16px 0 8px; color:#92400e;">Watch Items</h3>
+                <ul style="margin:0 0 14px; padding-left:18px;">
+                    {% for item in watch_items %}
+                    <li style="margin-bottom:8px;">
+                        <strong>{{ item.transaction.property_address }}</strong>
+                        {% if item.issues and item.issues[0].details %}<br>{{ item.issues[0].details }}{% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+
+                {% if app_base_url %}
+                <p style="margin:14px 0 0;">
+                    Open full dashboard:
+                    <a href="{{ app_base_url }}/tc/health-report" target="_blank" rel="noopener">
+                        {{ app_base_url }}/tc/health-report
+                    </a>
+                </p>
+                {% endif %}
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

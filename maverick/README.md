@@ -19,6 +19,7 @@ Core capabilities:
 - Transaction-specific inbound email aliases with AI urgency/category routing
 - Proactive deadline nudges with two-step escalation and SMS YES inspector recommendations
 - Intelligent nudge automation with configurable timing/templates + response analytics
+- AI-powered problem detection with health scoring, recommendations, and one-click action execution
 - Automation scripts for reminders, closing protocol, problem detection, and nightly backups
 
 ## Local setup instructions
@@ -187,6 +188,21 @@ Relevant routes:
 - `POST /vendor-response/<transaction_id>/<vendor_type>` (vendor scheduling webhook)
 - `GET|POST /tc/vendors` (vendor directory + performance management)
 
+## AI Problem Detection + Health Report
+
+Maverick runs an AI-backed risk scan every 6 hours to detect transactions that are:
+- behind schedule
+- at appraisal risk
+- inspection-risk prone
+- lender-stalled
+- closing at risk
+- payment/document constrained
+
+Routes:
+- `GET /tc/health-report`
+- `POST /tc/suggestion/<transaction_id>/accept`
+- `GET|POST /tc/problem-detection-settings`
+
 ## Inbound Email AI Routing
 
 Each transaction exposes unique mailbox aliases:
@@ -246,7 +262,7 @@ Deployment steps:
 See `RAILWAY_CRONS.md` for copy/paste schedules and commands for:
 - `send_reminders.py`
 - `closing_protocol.py`
-- `check_problems.py`
+- `automation/problem_detector.py`
 - `backup_db.sh`
 
 `send_reminders.py` now also runs the proactive deadline nudge engine:

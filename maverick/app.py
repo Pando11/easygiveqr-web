@@ -20,6 +20,19 @@ from twilio.twiml.messaging_response import MessagingResponse
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
 
+from automation.problem_detector import (
+    analyze_transaction_health,
+    deactivate_problem_detection_whitelist,
+    ensure_problem_detection_tables,
+    execute_suggestion_action,
+    fetch_latest_health_report,
+    fetch_problem_detection_settings,
+    fetch_problem_detection_whitelist,
+    mark_problem_result_handled,
+    run_problem_detection_if_stale,
+    update_problem_detection_settings,
+    upsert_problem_detection_whitelist,
+)
 from config import Config
 from utils.db import execute_insert, execute_query
 from utils.email import send_email, send_html_email
@@ -888,6 +901,13 @@ def normalize_phone(phone_number):
 def normalize_email(raw_value):
     """Normalize email value for storage and delivery."""
     return (raw_value or "").strip().lower()
+
+
+@app.template_filter("format_issue_type")
+def format_issue_type(issue_type):
+    """Format machine issue keys into readable labels."""
+    key = (issue_type or "").strip().replace("_", " ")
+    return key.title() if key else "Issue"
 
 
 def is_email_valid(raw_value):
@@ -6612,6 +6632,196 @@ def save_tc_heads_up_preferences():
         notice_type=("success" if ok else "error"),
     )
     return redirect(redirect_url)
+
+
+@app.route("/tc/health-report")
+@login_required
+def tc_health_report():
+    """Render AI-powered transaction health report for Margaret."""
+    ensure_problem_detection_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    refresh_flag = (request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes"}
+    if refresh_flag:
+        analyze_transaction_health(send_notifications=False)
+        if not notice:
+            notice = "Health report refreshed."
+            notice_type = "success"
+    else:
+        try:
+            run_problem_detection_if_stale(max_age_minutes=360, send_notifications=False)
+        except Exception as exc:
+            log_system_error("problem_detector", str(exc))
+
+    report = fetch_latest_health_report(include_handled=False)
+    if not report.get("run_id"):
+        analyze_transaction_health(send_notifications=False)
+        report = fetch_latest_health_report(include_handled=False)
+
+    generated_at = report.get("generated_at")
+    generated_at_ago = format_time_ago(generated_at) if generated_at else ""
+    return render_template(
+        "tc_health_report.html",
+        notice=notice,
+        notice_type=notice_type,
+        report=report,
+        healthy_count=report.get("healthy_count", 0),
+        watch_count=report.get("watch_count", 0),
+        urgent_count=report.get("urgent_count", 0),
+        healthy_items=report.get("healthy_items") or [],
+        watch_items=report.get("watch_items") or [],
+        urgent_items=report.get("urgent_items") or [],
+        generated_at_label=report.get("generated_at_label") or "",
+        generated_at_ago=generated_at_ago,
+    )
+
+
+@app.route("/tc/suggestion/<int:transaction_id>/accept", methods=["POST"])
+@login_required
+def accept_suggestion(transaction_id):
+    """
+    Execute suggested action automatically from the health dashboard.
+    """
+    payload = request.get_json(silent=True) or request.form
+    suggestion_action = (payload.get("action") or "").strip()
+    if not suggestion_action:
+        return jsonify({"success": False, "error": "missing_action"}), 400
+
+    result = execute_suggestion_action(
+        transaction_id=transaction_id,
+        suggestion_action=suggestion_action,
+        actor=session.get("tc_username", "margaret"),
+    )
+    if not result.get("success"):
+        return jsonify(result), 400
+    return jsonify(result), 200
+
+
+@app.route("/tc/suggestion/accept", methods=["POST"])
+@login_required
+def accept_suggestion_alias():
+    """Alias route: accept suggestion using JSON body transaction_id."""
+    payload = request.get_json(silent=True) or request.form
+    transaction_id = parse_optional_int(payload.get("transaction_id"))
+    if not transaction_id:
+        return jsonify({"success": False, "error": "missing_transaction_id"}), 400
+    suggestion_action = (payload.get("action") or "").strip()
+    if not suggestion_action:
+        return jsonify({"success": False, "error": "missing_action"}), 400
+
+    result = execute_suggestion_action(
+        transaction_id=transaction_id,
+        suggestion_action=suggestion_action,
+        actor=session.get("tc_username", "margaret"),
+    )
+    if not result.get("success"):
+        return jsonify(result), 400
+    return jsonify(result), 200
+
+
+@app.route("/tc/health-report/transaction/<int:transaction_id>/dismiss", methods=["POST"])
+@login_required
+def dismiss_health_report_transaction(transaction_id):
+    """Mark current report issues for one transaction as handled."""
+    payload = request.get_json(silent=True) or request.form
+    run_id = parse_optional_int(payload.get("run_id"))
+    ok = mark_problem_result_handled(
+        transaction_id=transaction_id,
+        run_id=run_id,
+        handled_by=session.get("tc_username", "margaret"),
+        notes=(payload.get("notes") or "").strip(),
+    )
+    if not ok:
+        return jsonify({"success": False, "error": "not_found"}), 404
+    return jsonify({"success": True}), 200
+
+
+@app.route("/tc/problem-detection-settings", methods=["GET", "POST"])
+@login_required
+def tc_problem_detection_settings():
+    """Configure sensitivity, notifications, auto-actions, and whitelist."""
+    ensure_problem_detection_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        next_notice = "Problem detection settings updated."
+        next_type = "success"
+
+        if action == "update_settings":
+            update_problem_detection_settings(
+                sensitivity_level=request.form.get("sensitivity_level"),
+                notification_mode=request.form.get("notification_mode"),
+                ai_enabled=parse_bool_value(request.form.get("ai_enabled"), default=False),
+                auto_execute_actions=request.form.getlist("auto_execute_actions"),
+                updated_by=session.get("tc_username", "margaret"),
+            )
+        elif action == "add_whitelist":
+            transaction_id = parse_optional_int(request.form.get("transaction_id"))
+            if transaction_id:
+                upsert_problem_detection_whitelist(
+                    transaction_id=transaction_id,
+                    reason=request.form.get("reason") or "",
+                    active=True,
+                )
+                next_notice = "Transaction added to problem-detection whitelist."
+            else:
+                next_notice = "Select a transaction to whitelist."
+                next_type = "warning"
+        elif action == "remove_whitelist":
+            whitelist_id = parse_optional_int(request.form.get("whitelist_id"))
+            if whitelist_id:
+                deactivate_problem_detection_whitelist(whitelist_id)
+                next_notice = "Whitelist entry removed."
+            else:
+                next_notice = "Invalid whitelist row."
+                next_type = "warning"
+        elif action == "run_now":
+            analyze_transaction_health(send_notifications=False)
+            next_notice = "Problem detector run completed."
+        else:
+            next_notice = "Unknown settings action."
+            next_type = "warning"
+
+        return redirect(url_for("tc_problem_detection_settings", notice=next_notice, notice_type=next_type))
+
+    settings = fetch_problem_detection_settings()
+    whitelist_rows = fetch_problem_detection_whitelist(active_only=False)
+    active_transactions = execute_query(
+        """
+        SELECT id, property_address, closing_date
+        FROM transactions
+        WHERE status = 'ACTIVE'
+        ORDER BY COALESCE(closing_date, CURRENT_DATE + INTERVAL '365 days') ASC, id ASC
+        """,
+        fetch=True,
+    ) or []
+    transaction_lookup = {row["id"]: row for row in active_transactions}
+    for row in whitelist_rows:
+        transaction = transaction_lookup.get(row.get("transaction_id"))
+        if transaction:
+            row["property_address"] = transaction.get("property_address") or f"Transaction #{row.get('transaction_id')}"
+            row["closing_label"] = (
+                transaction["closing_date"].strftime("%b %d, %Y") if transaction.get("closing_date") else "TBD"
+            )
+        else:
+            row["property_address"] = f"Transaction #{row.get('transaction_id')}"
+            row["closing_label"] = "Unknown"
+
+    return render_template(
+        "tc_problem_detection_settings.html",
+        notice=notice,
+        notice_type=notice_type,
+        settings=settings,
+        whitelist_rows=whitelist_rows,
+        active_transactions=active_transactions,
+    )
 
 
 @app.route("/tc/vendors", methods=["GET", "POST"])

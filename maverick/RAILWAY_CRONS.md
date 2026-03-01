@@ -40,7 +40,7 @@ Use these schedules and commands in Railway Cron.
 
 ## Problem Detection
 - Schedule: `0 */6 * * *`
-- Command: `python check_problems.py`
+- Command: `cd maverick && python3 automation/problem_detector.py`
 
 ## Database Backup
 - Schedule: `0 2 * * *`

@@ -555,6 +555,56 @@ CREATE TABLE heads_up_preferences (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE problem_detection_settings (
+    id SERIAL PRIMARY KEY,
+    sensitivity_level VARCHAR(20) DEFAULT 'standard',
+    notification_mode VARCHAR(20) DEFAULT 'urgent_only',
+    ai_enabled BOOLEAN DEFAULT TRUE,
+    auto_execute_actions JSONB DEFAULT '[]'::jsonb,
+    updated_by VARCHAR(100),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE problem_detection_whitelist (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+    reason TEXT,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE problem_detection_runs (
+    id SERIAL PRIMARY KEY,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    sensitivity_level VARCHAR(20),
+    notification_mode VARCHAR(20),
+    ai_enabled BOOLEAN DEFAULT TRUE,
+    auto_execute_actions JSONB DEFAULT '[]'::jsonb,
+    healthy_count INT DEFAULT 0,
+    watch_count INT DEFAULT 0,
+    urgent_count INT DEFAULT 0,
+    sms_sid VARCHAR(120),
+    email_message_id VARCHAR(255),
+    notes TEXT
+);
+
+CREATE TABLE problem_detection_results (
+    id SERIAL PRIMARY KEY,
+    run_id INT REFERENCES problem_detection_runs(id) ON DELETE CASCADE,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    health_score INT NOT NULL,
+    bucket VARCHAR(20) NOT NULL,
+    issues JSONB DEFAULT '[]'::jsonb,
+    suggestions JSONB DEFAULT '[]'::jsonb,
+    auto_actions JSONB DEFAULT '[]'::jsonb,
+    status VARCHAR(20) DEFAULT 'open',
+    handled_by VARCHAR(100),
+    handled_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -605,3 +655,7 @@ CREATE UNIQUE INDEX idx_nudge_agent_whitelist_email ON nudge_agent_whitelist(age
 CREATE UNIQUE INDEX idx_heads_up_signals_unique_daily ON heads_up_signals(transaction_id, pattern_key, signal_date);
 CREATE INDEX idx_heads_up_signals_date_status ON heads_up_signals(signal_date, status, severity);
 CREATE UNIQUE INDEX idx_heads_up_preferences_key ON heads_up_preferences(pattern_key);
+CREATE UNIQUE INDEX idx_problem_detection_results_run_txn ON problem_detection_results(run_id, transaction_id);
+CREATE INDEX idx_problem_detection_results_bucket_status ON problem_detection_results(bucket, status, created_at DESC);
+CREATE INDEX idx_problem_detection_whitelist_active ON problem_detection_whitelist(active, transaction_id);
+CREATE INDEX idx_problem_detection_runs_completed ON problem_detection_runs(completed_at DESC);
