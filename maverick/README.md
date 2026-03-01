@@ -17,6 +17,7 @@ Core capabilities:
 - Auto-generated timeline PDF packet (with milestone chart) + multi-party email distribution
 - Vendor outreach automation (inspector/appraiser/survey/title) with secure confirmation links
 - Transaction-specific inbound email aliases with AI urgency/category routing
+- Proactive deadline nudges with two-step escalation and SMS YES inspector recommendations
 - Automation scripts for reminders, closing protocol, problem detection, and nightly backups
 
 ## Local setup instructions
@@ -70,6 +71,7 @@ AWS_S3_BUCKET_BACKUPS=maverick-backups
 INSPECTOR_NAME=Inspection Team
 INSPECTOR_EMAIL=
 INSPECTOR_CALENDLY_URL=
+INSPECTOR_RECOMMENDATIONS=Inspector One | (214) 555-0101 | one@example.com; Inspector Two | (817) 555-0102 | two@example.com
 APPRAISER_NAME=Appraisal Team
 APPRAISER_EMAIL=
 APPRAISER_CALENDLY_URL=
@@ -216,6 +218,13 @@ See `RAILWAY_CRONS.md` for copy/paste schedules and commands for:
 - `closing_protocol.py`
 - `check_problems.py`
 - `backup_db.sh`
+
+`send_reminders.py` now also runs the proactive deadline nudge engine:
+- Sends first/second nudges when progress is missing
+- Escalates to Margaret checklist only when:
+  - no response after 2 nudges and deadline within 48h, or
+  - a party explicitly asks for Margaret help
+- Supports agent SMS `YES` response flow for inspector recommendations
 
 ## Additional operational docs
 

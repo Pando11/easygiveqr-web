@@ -5,6 +5,9 @@ Use these schedules and commands in Railway Cron.
 ## Daily Reminders
 - Schedule: `0 8 * * *`
 - Command: `python send_reminders.py`
+- Includes:
+  - 10/7/3/1 day deadline reminder SMS
+  - proactive deadline nudge engine + escalation checks
 
 ## Predictive Alerts
 - Schedule: `0 6 * * *`

@@ -2137,6 +2137,246 @@ def ensure_inbound_email_tables():
     ensure_transaction_risk_flags_table()
 
 
+def ensure_deadline_nudges_table():
+    """Store proactive deadline nudges and response/escalation state."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS deadline_nudges (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            deadline_id INT REFERENCES deadlines(id) ON DELETE CASCADE,
+            task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+            nudge_key VARCHAR(80) NOT NULL,
+            deadline_type VARCHAR(80),
+            due_date DATE,
+            target_party VARCHAR(30) NOT NULL,
+            target_email VARCHAR(255),
+            target_phone VARCHAR(25),
+            message_text TEXT,
+            first_nudge_sent_at TIMESTAMP,
+            second_nudge_sent_at TIMESTAMP,
+            response_received_at TIMESTAMP,
+            response_channel VARCHAR(20),
+            response_text TEXT,
+            requested_margaret_help BOOLEAN DEFAULT FALSE,
+            escalated_at TIMESTAMP,
+            escalation_task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+            status VARCHAR(20) DEFAULT 'pending',
+            status_notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deadline_nudges_transaction
+        ON deadline_nudges(transaction_id, due_date DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deadline_nudges_phone
+        ON deadline_nudges(target_phone, status, response_received_at)
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_deadline_nudges_unique_cycle
+        ON deadline_nudges(transaction_id, nudge_key, due_date, target_party)
+        """
+    )
+
+
+def phone_last10(value):
+    """Return last 10 numeric digits from a phone-like value."""
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) < 10:
+        return ""
+    return digits[-10:]
+
+
+def fetch_open_agent_nudge_by_phone(phone_number):
+    """Fetch latest pending agent nudge by sender phone."""
+    ensure_deadline_nudges_table()
+    last10 = phone_last10(phone_number)
+    if not last10:
+        return None
+    rows = execute_query(
+        """
+        SELECT dn.id, dn.transaction_id, dn.deadline_id, dn.task_id, dn.nudge_key,
+               dn.deadline_type, dn.due_date, dn.target_party, dn.target_email, dn.target_phone,
+               dn.message_text, dn.first_nudge_sent_at, dn.second_nudge_sent_at,
+               dn.requested_margaret_help, dn.escalated_at, dn.status_notes,
+               t.property_address, t.agent_name
+        FROM deadline_nudges dn
+        JOIN transactions t ON t.id = dn.transaction_id
+        WHERE dn.target_party = 'agent'
+          AND dn.response_received_at IS NULL
+          AND dn.status = 'pending'
+          AND RIGHT(REGEXP_REPLACE(COALESCE(dn.target_phone, t.agent_phone, ''), '[^0-9]', '', 'g'), 10) = %s
+        ORDER BY COALESCE(dn.second_nudge_sent_at, dn.first_nudge_sent_at, dn.created_at) DESC
+        LIMIT 1
+        """,
+        (last10,),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def mark_deadline_nudge_response(nudge_id, response_text, response_channel="sms", requested_help=False):
+    """Mark one proactive nudge as responded."""
+    execute_query(
+        """
+        UPDATE deadline_nudges
+        SET response_received_at = COALESCE(response_received_at, CURRENT_TIMESTAMP),
+            response_channel = %s,
+            response_text = %s,
+            requested_margaret_help = requested_margaret_help OR %s,
+            status = CASE
+                WHEN status = 'escalated' THEN status
+                ELSE 'responded'
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (
+            (response_channel or "sms")[:20],
+            (response_text or "")[:1000] or None,
+            bool(requested_help),
+            nudge_id,
+        ),
+    )
+
+
+def create_deadline_nudge_followup_task(transaction_id, description, notes=""):
+    """Create one high-priority coordination task for Margaret follow-up."""
+    safe_description = (description or "Follow up on deadline nudge").strip()[:280]
+    existing_rows = execute_query(
+        """
+        SELECT id
+        FROM tasks
+        WHERE transaction_id = %s
+          AND LOWER(task_description) = LOWER(%s)
+          AND completed = FALSE
+          AND COALESCE(status, 'pending') <> 'completed'
+        LIMIT 1
+        """,
+        (transaction_id, safe_description),
+        fetch=True,
+    ) or []
+    if existing_rows:
+        return existing_rows[0]["id"]
+
+    rows = execute_query(
+        """
+        INSERT INTO tasks (
+            transaction_id, task_description, task_category, due_date,
+            priority, status, completed, display_order, notes, created_at
+        )
+        VALUES (%s, %s, 'coordination', %s, 'high', 'pending', FALSE, 64, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            transaction_id,
+            safe_description,
+            date.today(),
+            (notes or "Auto-created from proactive deadline nudge response."),
+        ),
+        fetch=True,
+    ) or []
+    return rows[0]["id"] if rows else None
+
+
+def deadline_nudge_escalation_summary(nudge_row):
+    """Default escalation summary by nudge key."""
+    summary_map = {
+        "option_period_inspection": "Follow up on inspection scheduling",
+        "earnest_money_receipt": "Follow up on earnest money receipt",
+        "appraisal_order": "Follow up with lender on appraisal order",
+        "hoa_docs_request": "Follow up on HOA documents from seller",
+        "repair_addendum": "Follow up on repair addendum submission",
+    }
+    key = (nudge_row.get("nudge_key") or "").strip().lower()
+    if key in summary_map:
+        return summary_map[key]
+    deadline_label = (nudge_row.get("deadline_type") or "").replace("_", " ").title()
+    return f"Follow up on {deadline_label or 'deadline'} progress"
+
+
+def escalate_deadline_nudge_to_margaret(nudge_row, reason, notify_sms=False):
+    """Escalate nudge to Margaret by creating checklist task + optional SMS."""
+    if not nudge_row:
+        return None
+    if nudge_row.get("escalated_at") and nudge_row.get("escalation_task_id"):
+        return nudge_row.get("escalation_task_id")
+
+    transaction_id = nudge_row["transaction_id"]
+    summary = deadline_nudge_escalation_summary(nudge_row)
+    notes = f"{summary}. Reason: {(reason or 'Escalation requested')[:300]}"
+    task_id = create_deadline_nudge_followup_task(
+        transaction_id=transaction_id,
+        description=summary,
+        notes=notes,
+    )
+    execute_query(
+        """
+        UPDATE deadline_nudges
+        SET escalated_at = CURRENT_TIMESTAMP,
+            escalation_task_id = %s,
+            status = 'escalated',
+            status_notes = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (task_id, notes[:400], nudge_row["id"]),
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'deadline_nudge', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Deadline nudge escalated to Margaret",
+            f"nudge_id={nudge_row['id']} reason={reason} task_id={task_id or 'n/a'}",
+        ),
+    )
+    if notify_sms:
+        margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE") or "")
+        if margaret_phone:
+            send_sms_async(
+                margaret_phone,
+                (
+                    f"⚠️ Escalation requested for {nudge_row.get('property_address')}: "
+                    f"{summary}. Reason: {reason}"
+                )[:300],
+            )
+    return task_id
+
+
+def build_inspector_recommendations_message():
+    """Return inspector recommendation SMS payload after agent replies YES."""
+    raw_value = (os.getenv("INSPECTOR_RECOMMENDATIONS") or "").strip()
+    recommendations = []
+    if raw_value:
+        for chunk in raw_value.split(";"):
+            item = chunk.strip()
+            if item:
+                recommendations.append(item)
+    if not recommendations:
+        recommendations = [
+            "Lone Star Inspection Group | (214) 555-0130 | scheduling@lonestarinspect.com",
+            "North Texas Home Inspectors | (817) 555-0194 | team@nthi.com",
+            "Metro Property Inspection | (972) 555-0177 | appointments@metroinspect.com",
+        ]
+    lines = ["Great — here are inspector recommendations:"]
+    for idx, item in enumerate(recommendations[:3], start=1):
+        lines.append(f"{idx}) {item}")
+    lines.append("Reply HELP if you want Margaret to coordinate introductions. - Maverick TC")
+    return "\n".join(lines)
+
+
 def fetch_inbound_email_rule(transaction_id, sender_role):
     """Fetch one sender-role rule row with defaults."""
     ensure_inbound_email_rules_table()
@@ -8262,11 +8502,78 @@ def cancel_transaction(transaction_id):
 @app.route("/sms-webhook", methods=["POST"])
 def sms_webhook():
     """Handle incoming SMS from agents."""
-    incoming_msg = request.form.get("Body", "").strip().lower()
+    incoming_msg_raw = request.form.get("Body", "").strip()
+    incoming_msg = incoming_msg_raw.lower()
     from_number = normalize_phone(request.form.get("From", ""))
     response = MessagingResponse()
 
     emergency_keywords = {"emergency", "urgent", "asap", "help now"}
+    status_keywords = {"status", "closing", "when", "deadline", "update"}
+    affirmative_keywords = {"yes", "yes please", "y", "yep", "yeah", "affirmative"}
+    margaret_help_keywords = {"margaret", "please call", "need help", "call me", "need support", "help"}
+
+    ensure_deadline_nudges_table()
+    pending_nudge = fetch_open_agent_nudge_by_phone(from_number)
+    if pending_nudge:
+        if any(keyword in incoming_msg for keyword in margaret_help_keywords):
+            mark_deadline_nudge_response(
+                nudge_id=pending_nudge["id"],
+                response_text=incoming_msg_raw,
+                response_channel="sms",
+                requested_help=True,
+            )
+            escalate_deadline_nudge_to_margaret(
+                pending_nudge,
+                reason="Party explicitly requested Margaret help via SMS.",
+                notify_sms=True,
+            )
+            response.message("Margaret has been notified and will follow up with you shortly. - Maverick TC")
+            return str(response)
+
+        if incoming_msg in affirmative_keywords and pending_nudge.get("nudge_key") == "option_period_inspection":
+            mark_deadline_nudge_response(
+                nudge_id=pending_nudge["id"],
+                response_text=incoming_msg_raw,
+                response_channel="sms",
+                requested_help=False,
+            )
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'text', 'agent', %s, %s, %s)
+                """,
+                (
+                    pending_nudge["transaction_id"],
+                    pending_nudge.get("agent_name") or "Agent",
+                    "Agent replied YES to inspection scheduling nudge",
+                    f"nudge_id={pending_nudge['id']}",
+                ),
+            )
+            response.message(build_inspector_recommendations_message())
+            return str(response)
+
+        if incoming_msg and not any(keyword in incoming_msg for keyword in emergency_keywords.union(status_keywords)):
+            mark_deadline_nudge_response(
+                nudge_id=pending_nudge["id"],
+                response_text=incoming_msg_raw,
+                response_channel="sms",
+                requested_help=False,
+            )
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'text', 'agent', %s, %s, %s)
+                """,
+                (
+                    pending_nudge["transaction_id"],
+                    pending_nudge.get("agent_name") or "Agent",
+                    "Agent replied to proactive deadline nudge",
+                    f"nudge_id={pending_nudge['id']} message={incoming_msg_raw[:180]}",
+                ),
+            )
+            response.message("Thanks for the update — we logged your response and will keep the timeline on track.")
+            return str(response)
+
     if any(word in incoming_msg for word in emergency_keywords):
         heidi_phone = os.getenv("HEIDI_PHONE")
         margaret_phone = os.getenv("MARGARET_PHONE")
@@ -8277,7 +8584,6 @@ def sms_webhook():
         response.message("Emergency alert sent to Heidi and Margaret. They will call you ASAP.")
         return str(response)
 
-    status_keywords = {"status", "closing", "when", "deadline", "update"}
     if any(word in incoming_msg for word in status_keywords):
         last_10 = re.sub(r"\D", "", from_number)[-10:]
         query = """

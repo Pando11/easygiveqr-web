@@ -180,6 +180,29 @@ If no response is received within 24 hours, a follow-up task is auto-added to yo
 - Treat these as high-priority coordination tasks.
 - Update/complete once vendor confirms scheduling.
 
+### Proactive Deadline Nudges (Auto)
+
+Maverick now checks key timeline milestones daily for missing progress and sends gentle nudges automatically.
+
+Examples:
+- Option period in 5 days + no inspection scheduled -> agent nudge (SMS/email)
+- Earnest due in 2 days + no receipt -> buyer reminder email
+- Appraisal due in 7 days + not ordered -> lender reminder email
+- HOA docs due in 5 days + not received -> seller reminder email
+- Repair addendum due in 3 days + missing -> agent reminder email
+
+Escalation rules:
+- Maverick escalates to your checklist only when:
+  1. no response after 2 nudges **and** deadline is within 48 hours, or
+  2. a party explicitly asks for your help
+
+### Agent Reply Flow: "YES" for Inspector Help
+
+For inspection scheduling nudges, if an agent replies `YES`:
+- Maverick sends inspector recommendations by SMS
+- Logs interaction automatically
+- No manual Margaret action is required unless agent requests help
+
 ---
 
 ## 5. DOCUMENT TRACKING

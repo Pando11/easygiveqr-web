@@ -187,3 +187,18 @@ Accepted payload fields (provider-dependent):
   - `override_route` (`log_only`, `medium_awareness`, `high_action`)
   - `override_notes` (optional)
   - `clear_risk` (`true` to clear at-risk state)
+
+## SMS Webhook Behavior (Nudge Replies)
+
+Route:
+- `POST /sms-webhook`
+
+In addition to emergency/status handling, Maverick now supports proactive nudge replies:
+- If agent replies `YES` to inspection-scheduling nudge:
+  - sends inspector recommendations list
+  - logs interaction
+  - marks nudge responded (no Margaret escalation)
+- If agent asks for help (e.g., includes `margaret`/`need help`):
+  - marks nudge responded + help requested
+  - escalates to Margaret checklist
+  - sends Margaret alert SMS

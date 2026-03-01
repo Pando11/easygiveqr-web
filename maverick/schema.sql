@@ -431,6 +431,32 @@ CREATE TABLE transaction_risk_flags (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE deadline_nudges (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    deadline_id INT REFERENCES deadlines(id) ON DELETE CASCADE,
+    task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+    nudge_key VARCHAR(80) NOT NULL,
+    deadline_type VARCHAR(80),
+    due_date DATE,
+    target_party VARCHAR(30) NOT NULL,
+    target_email VARCHAR(255),
+    target_phone VARCHAR(25),
+    message_text TEXT,
+    first_nudge_sent_at TIMESTAMP,
+    second_nudge_sent_at TIMESTAMP,
+    response_received_at TIMESTAMP,
+    response_channel VARCHAR(20),
+    response_text TEXT,
+    requested_margaret_help BOOLEAN DEFAULT FALSE,
+    escalated_at TIMESTAMP,
+    escalation_task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+    status VARCHAR(20) DEFAULT 'pending',
+    status_notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -465,3 +491,6 @@ CREATE INDEX idx_calendar_events_transaction ON calendar_events(transaction_id, 
 CREATE INDEX idx_inbound_email_messages_transaction ON inbound_email_messages(transaction_id, received_at DESC);
 CREATE UNIQUE INDEX idx_inbound_email_rules_txn_role ON inbound_email_rules(transaction_id, sender_role);
 CREATE UNIQUE INDEX idx_transaction_risk_flags_txn ON transaction_risk_flags(transaction_id);
+CREATE INDEX idx_deadline_nudges_transaction ON deadline_nudges(transaction_id, due_date DESC);
+CREATE INDEX idx_deadline_nudges_phone ON deadline_nudges(target_phone, status, response_received_at);
+CREATE UNIQUE INDEX idx_deadline_nudges_unique_cycle ON deadline_nudges(transaction_id, nudge_key, due_date, target_party);
