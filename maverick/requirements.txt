@@ -9,3 +9,4 @@ Werkzeug==3.0.1
 pdf2image
 pytesseract
 Pillow
+PyJWT==2.11.0

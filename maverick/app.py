@@ -8,9 +8,10 @@ from functools import wraps
 from threading import Thread
 from typing import Any
 
+import jwt
 import stripe
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, session, url_for
 from twilio.twiml.messaging_response import MessagingResponse
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
@@ -905,6 +906,73 @@ def login_required(view_func):
     return wrapped
 
 
+MOBILE_JWT_ALGORITHM = "HS256"
+
+
+def parse_mobile_token_hours():
+    """Return access-token lifetime in hours for mobile clients."""
+    raw_value = (os.getenv("MOBILE_JWT_EXP_HOURS") or "").strip()
+    if not raw_value:
+        return 12
+    try:
+        parsed = int(raw_value)
+        if parsed <= 0:
+            return 12
+        return min(parsed, 72)
+    except (TypeError, ValueError):
+        return 12
+
+
+def issue_mobile_access_token(username: str):
+    """Create a signed JWT bearer token for mobile API usage."""
+    issued_at = datetime.utcnow()
+    expires_at = issued_at + timedelta(hours=parse_mobile_token_hours())
+    payload = {
+        "sub": username,
+        "scope": "mobile",
+        "iat": issued_at,
+        "exp": expires_at,
+    }
+    token = jwt.encode(payload, app.config["SECRET_KEY"], algorithm=MOBILE_JWT_ALGORITHM)
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+    return token, expires_at
+
+
+def mobile_jwt_required(view_func):
+    """Protect JSON API routes with bearer token auth."""
+
+    @wraps(view_func)
+    def wrapped(*args, **kwargs):
+        auth_header = (request.headers.get("Authorization") or "").strip()
+        if not auth_header.lower().startswith("bearer "):
+            return jsonify({"success": False, "error": "Missing bearer token"}), 401
+        token = auth_header.split(" ", 1)[1].strip()
+        if not token:
+            return jsonify({"success": False, "error": "Missing bearer token"}), 401
+
+        try:
+            payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=[MOBILE_JWT_ALGORITHM])
+        except jwt.ExpiredSignatureError:
+            return jsonify({"success": False, "error": "Token expired"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"success": False, "error": "Invalid token"}), 401
+
+        g.mobile_username = payload.get("sub") or "mobile-user"
+        return view_func(*args, **kwargs)
+
+    return wrapped
+
+
+def json_date_value(value):
+    """Serialize date and datetime values to ISO8601 strings."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return None
+
+
 def format_time_ago(value):
     """Return a short relative time label for dashboard cards."""
     if not value:
@@ -1323,6 +1391,555 @@ def tc_logout():
     """Clear session and return to login page."""
     session.clear()
     return redirect(url_for("tc_entry"))
+
+
+@app.route("/api/mobile/login", methods=["POST"])
+def mobile_login():
+    """Issue JWT access token for the mobile app."""
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    username = (payload.get("username") or "").strip()
+    password = payload.get("password") or ""
+    expected_username = os.getenv("TC_USERNAME", "margaret")
+
+    if username != expected_username or not _verify_tc_password(password):
+        return jsonify({"success": False, "error": "Invalid username or password"}), 401
+
+    token, expires_at = issue_mobile_access_token(username)
+    return jsonify(
+        {
+            "success": True,
+            "access_token": token,
+            "token_type": "Bearer",
+            "expires_at": expires_at.isoformat() + "Z",
+            "username": username,
+        }
+    )
+
+
+@app.route("/api/mobile/dashboard", methods=["GET"])
+@mobile_jwt_required
+def mobile_dashboard():
+    """JSON dashboard payload for mobile."""
+    needs_review_rows = execute_query(
+        """
+        SELECT id, property_address, agent_name, agent_phone, created_at,
+               rush_service, referred_by_agent
+        FROM transactions
+        WHERE status = %s
+        ORDER BY created_at ASC
+        LIMIT %s
+        """,
+        ("NEEDS_MARGARET_REVIEW", 30),
+        fetch=True,
+    ) or []
+
+    active_rows = execute_query(
+        """
+        SELECT t.id, t.property_address, t.agent_name, t.agent_phone, t.closing_date,
+               t.payment_upfront_paid, t.payment_closing_paid,
+               nd.deadline_type AS next_deadline_type,
+               nd.deadline_date AS next_deadline_date
+        FROM transactions t
+        LEFT JOIN LATERAL (
+            SELECT d.deadline_type, d.deadline_date
+            FROM deadlines d
+            WHERE d.transaction_id = t.id
+              AND d.completed = FALSE
+              AND d.deadline_date >= CURRENT_DATE
+            ORDER BY d.deadline_date ASC
+            LIMIT 1
+        ) nd ON TRUE
+        WHERE t.status = %s
+        ORDER BY COALESCE(t.closing_date, nd.deadline_date) ASC NULLS LAST, t.created_at DESC
+        LIMIT %s
+        """,
+        ("ACTIVE", 80),
+        fetch=True,
+    ) or []
+
+    needs_review = []
+    for row in needs_review_rows:
+        needs_review.append(
+            {
+                "id": row["id"],
+                "property_address": row.get("property_address") or "",
+                "agent_name": row.get("agent_name") or "",
+                "agent_phone": row.get("agent_phone") or "",
+                "created_at": json_date_value(row.get("created_at")),
+                "time_ago_uploaded": format_time_ago(row.get("created_at")),
+                "rush_service": bool(row.get("rush_service")),
+                "referred_by_agent": bool(row.get("referred_by_agent")),
+            }
+        )
+
+    active_transactions = []
+    for row in active_rows:
+        days_until = calculate_days_until_closing(row.get("closing_date"))
+        if days_until is None:
+            days_until_label = "No closing date"
+        elif days_until < 0:
+            days_until_label = f"{abs(days_until)} days overdue"
+        elif days_until == 0:
+            days_until_label = "Closing today"
+        elif days_until == 1:
+            days_until_label = "1 day until closing"
+        else:
+            days_until_label = f"{days_until} days until closing"
+
+        active_transactions.append(
+            {
+                "id": row["id"],
+                "property_address": row.get("property_address") or "",
+                "agent_name": row.get("agent_name") or "",
+                "agent_phone": row.get("agent_phone") or "",
+                "closing_date": json_date_value(row.get("closing_date")),
+                "days_until_closing": days_until,
+                "days_until_label": days_until_label,
+                "next_deadline_type": row.get("next_deadline_type"),
+                "next_deadline_date": json_date_value(row.get("next_deadline_date")),
+                "next_deadline_label": format_next_deadline(
+                    row.get("next_deadline_type"),
+                    row.get("next_deadline_date"),
+                ),
+                "payment_summary": payment_status_text(
+                    bool(row.get("payment_upfront_paid")),
+                    bool(row.get("payment_closing_paid")),
+                ),
+            }
+        )
+
+    return jsonify(
+        {
+            "success": True,
+            "summary": {
+                "needs_review_count": len(needs_review),
+                "active_count": len(active_transactions),
+            },
+            "needs_review": needs_review,
+            "active_transactions": active_transactions,
+        }
+    )
+
+
+@app.route("/api/mobile/daily-checklist", methods=["GET"])
+@mobile_jwt_required
+def mobile_daily_checklist():
+    """Return today's checklist as JSON for mobile."""
+    try:
+        today = date.today()
+        call_window_start = today - timedelta(days=1)
+        call_window_end = today + timedelta(days=3)
+
+        calls_to_make = execute_query(
+            """
+            SELECT d.id, d.deadline_type, d.deadline_date, d.margaret_called_agent,
+                   t.id AS transaction_id, t.property_address, t.agent_phone,
+                   t.lender_phone, t.title_officer_phone
+            FROM deadlines d
+            JOIN transactions t ON t.id = d.transaction_id
+            WHERE t.status = 'ACTIVE'
+              AND d.completed = FALSE
+              AND d.is_critical = TRUE
+              AND d.deadline_date >= %s
+              AND d.deadline_date <= %s
+            ORDER BY d.deadline_date ASC
+            """,
+            (call_window_start, call_window_end),
+            fetch=True,
+        ) or []
+
+        call_payload = []
+        for call_item in calls_to_make:
+            contact_type = deadline_contact_party(call_item.get("deadline_type"))
+            deadline_label = (call_item.get("deadline_type") or "").replace("_", " ").title()
+            if contact_type == "lender":
+                contact_phone = call_item.get("lender_phone") or call_item.get("agent_phone")
+            elif contact_type == "title":
+                contact_phone = call_item.get("title_officer_phone") or call_item.get("agent_phone")
+            else:
+                contact_phone = call_item.get("agent_phone")
+
+            digits_only_phone = re.sub(r"\D", "", contact_phone or "")
+            phone_link = f"tel:{digits_only_phone}" if digits_only_phone else None
+            days_away = (call_item["deadline_date"] - today).days if call_item.get("deadline_date") else None
+
+            call_payload.append(
+                {
+                    "deadline_id": call_item["id"],
+                    "transaction_id": call_item.get("transaction_id"),
+                    "property_address": call_item.get("property_address") or "",
+                    "contact_type": contact_type,
+                    "contact_phone": contact_phone or "",
+                    "phone_link": phone_link,
+                    "deadline_type": call_item.get("deadline_type"),
+                    "deadline_label": deadline_label,
+                    "deadline_date": json_date_value(call_item.get("deadline_date")),
+                    "days_away": days_away,
+                    "days_label": "Today" if days_away == 0 else (f"{days_away}d" if days_away is not None else ""),
+                    "made": bool(call_item.get("margaret_called_agent")),
+                    "call_script": build_call_script(
+                        contact_type,
+                        deadline_label,
+                        call_item.get("property_address") or "this property",
+                    ),
+                }
+            )
+
+        overdue_tasks_rows = execute_query(
+            """
+            SELECT tk.id, tk.task_description, tk.notes, tk.due_date,
+                   t.id AS transaction_id, t.property_address
+            FROM tasks tk
+            JOIN transactions t ON t.id = tk.transaction_id
+            WHERE t.status = 'ACTIVE'
+              AND tk.completed = FALSE
+              AND COALESCE(tk.status, 'pending') <> 'completed'
+              AND tk.due_date < %s
+            ORDER BY tk.due_date ASC, tk.display_order ASC NULLS LAST
+            """,
+            (today,),
+            fetch=True,
+        ) or []
+        due_today_rows = execute_query(
+            """
+            SELECT tk.id, tk.task_description, tk.notes, tk.due_date,
+                   t.id AS transaction_id, t.property_address
+            FROM tasks tk
+            JOIN transactions t ON t.id = tk.transaction_id
+            WHERE t.status = 'ACTIVE'
+              AND tk.completed = FALSE
+              AND COALESCE(tk.status, 'pending') <> 'completed'
+              AND tk.due_date = %s
+            ORDER BY tk.display_order ASC NULLS LAST, tk.id ASC
+            """,
+            (today,),
+            fetch=True,
+        ) or []
+
+        def _task_payload(task, include_days_overdue=False):
+            result = {
+                "task_id": task["id"],
+                "transaction_id": task.get("transaction_id"),
+                "property_address": task.get("property_address") or "",
+                "task_description": task.get("task_description") or "",
+                "notes": task.get("notes") or "",
+                "due_date": json_date_value(task.get("due_date")),
+                "due_label": format_date_label(task.get("due_date")),
+                "completed": False,
+            }
+            if include_days_overdue:
+                result["days_overdue"] = (today - task["due_date"]).days if task.get("due_date") else 0
+            return result
+
+        overdue_tasks = [_task_payload(task, include_days_overdue=True) for task in overdue_tasks_rows]
+        due_today_tasks = [_task_payload(task, include_days_overdue=False) for task in due_today_rows]
+
+        reminders_to_send_rows = execute_query(
+            """
+            SELECT d.id, d.deadline_type, d.deadline_date,
+                   t.id AS transaction_id, t.property_address, t.agent_phone
+            FROM deadlines d
+            JOIN transactions t ON t.id = d.transaction_id
+            WHERE t.status = 'ACTIVE'
+              AND d.completed = FALSE
+              AND (
+                    (d.deadline_date = %s AND d.reminder_1d_sent = FALSE)
+                 OR (d.deadline_date = %s AND d.reminder_3d_sent = FALSE)
+                 OR (d.deadline_date = %s AND d.reminder_7d_sent = FALSE)
+                 OR (d.deadline_date = %s AND d.reminder_10d_sent = FALSE)
+              )
+            ORDER BY d.deadline_date ASC
+            """,
+            (
+                today + timedelta(days=1),
+                today + timedelta(days=3),
+                today + timedelta(days=7),
+                today + timedelta(days=10),
+            ),
+            fetch=True,
+        ) or []
+
+        reminder_payload = []
+        for row in reminders_to_send_rows:
+            days_until = (row["deadline_date"] - today).days if row.get("deadline_date") else None
+            reminder_payload.append(
+                {
+                    "deadline_id": row["id"],
+                    "transaction_id": row.get("transaction_id"),
+                    "property_address": row.get("property_address") or "",
+                    "agent_phone": row.get("agent_phone") or "",
+                    "deadline_type": row.get("deadline_type"),
+                    "deadline_label": (row.get("deadline_type") or "").replace("_", " ").title(),
+                    "deadline_date": json_date_value(row.get("deadline_date")),
+                    "days_until": days_until,
+                }
+            )
+
+        summary = {
+            "total_items": len(overdue_tasks) + len(due_today_tasks) + len(call_payload) + len(reminder_payload),
+            "overdue_count": len(overdue_tasks),
+            "due_today_count": len(due_today_tasks),
+            "calls_count": len(call_payload),
+            "reminders_count": len(reminder_payload),
+        }
+
+        return jsonify(
+            {
+                "success": True,
+                "current_date_label": today.strftime("%A, %B %d, %Y"),
+                "summary": summary,
+                "calls_to_make": call_payload,
+                "overdue_tasks": overdue_tasks,
+                "due_today_tasks": due_today_tasks,
+                "reminders_to_send": reminder_payload,
+            }
+        )
+    except Exception as exc:
+        print(f"Mobile checklist error: {exc}")
+        return jsonify({"success": False, "error": "Unable to load checklist"}), 500
+
+
+@app.route("/api/mobile/task/<int:task_id>/complete", methods=["POST"])
+@mobile_jwt_required
+def mobile_complete_task(task_id):
+    """Mark one task complete/incomplete from mobile."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        completed = parse_bool_value(payload.get("completed"), default=True)
+        completed_by = getattr(g, "mobile_username", "mobile-user") if completed else None
+        status_value = "completed" if completed else "pending"
+
+        rows = execute_query(
+            """
+            UPDATE tasks
+            SET completed = %s,
+                status = %s,
+                completed_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END,
+                completed_by = %s
+            WHERE id = %s
+            RETURNING id, transaction_id, completed, status, completed_at
+            """,
+            (completed, status_value, completed, completed_by, task_id),
+            fetch=True,
+        ) or []
+        if not rows:
+            return jsonify({"success": False, "error": "Task not found"}), 404
+
+        task_row = rows[0]
+        return jsonify(
+            {
+                "success": True,
+                "task_id": task_row["id"],
+                "transaction_id": task_row.get("transaction_id"),
+                "completed": bool(task_row.get("completed")),
+                "status": task_row.get("status"),
+                "completed_at": json_date_value(task_row.get("completed_at")),
+            }
+        )
+    except Exception as exc:
+        print(f"Mobile task completion error: {exc}")
+        return jsonify({"success": False, "error": "Unable to update task"}), 500
+
+
+@app.route("/api/mobile/transaction/<int:transaction_id>/documents", methods=["GET"])
+@mobile_jwt_required
+def mobile_transaction_documents(transaction_id):
+    """Return transaction documents and secure URLs for mobile viewing."""
+    transaction_rows = execute_query(
+        "SELECT id, property_address, status FROM transactions WHERE id = %s",
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if not transaction_rows:
+        return jsonify({"success": False, "error": "Transaction not found"}), 404
+    transaction = transaction_rows[0]
+
+    document_rows = execute_query(
+        """
+        SELECT id, document_type, filename, status, uploaded_at, s3_key
+        FROM documents
+        WHERE transaction_id = %s
+        ORDER BY uploaded_at DESC, id DESC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+
+    documents = []
+    uploaded_document_types = set()
+    for row in document_rows:
+        uploaded_document_types.add((row.get("document_type") or "").lower())
+        view_url = get_presigned_url(row["s3_key"], expiration=1800)
+        download_url = get_presigned_url(
+            row["s3_key"],
+            expiration=1800,
+            download_filename=row.get("filename") or f"document_{row['id']}",
+        )
+        documents.append(
+            {
+                "id": row["id"],
+                "document_type": row.get("document_type") or "",
+                "document_type_label": (row.get("document_type") or "").replace("_", " ").title(),
+                "filename": row.get("filename") or "",
+                "status": row.get("status") or "received",
+                "uploaded_at": json_date_value(row.get("uploaded_at")),
+                "view_url": view_url,
+                "download_url": download_url,
+            }
+        )
+
+    missing_required = sorted(REQUIRED_DOCUMENT_TYPES - uploaded_document_types)
+    return jsonify(
+        {
+            "success": True,
+            "transaction": {
+                "id": transaction["id"],
+                "property_address": transaction.get("property_address") or "",
+                "status": transaction.get("status") or "",
+            },
+            "documents": documents,
+            "missing_required_documents": missing_required,
+        }
+    )
+
+
+@app.route("/api/mobile/call/<int:deadline_id>/complete", methods=["POST"])
+@mobile_jwt_required
+def mobile_complete_call(deadline_id):
+    """Mark a call action complete/incomplete from mobile."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        call_made = parse_bool_value(payload.get("made"), default=True)
+        rows = execute_query(
+            """
+            UPDATE deadlines
+            SET margaret_called_agent = %s,
+                margaret_call_date = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END
+            WHERE id = %s
+            RETURNING id, transaction_id, margaret_called_agent, margaret_call_date
+            """,
+            (call_made, call_made, deadline_id),
+            fetch=True,
+        ) or []
+        if not rows:
+            return jsonify({"success": False, "error": "Deadline not found"}), 404
+        row = rows[0]
+        return jsonify(
+            {
+                "success": True,
+                "deadline_id": row["id"],
+                "transaction_id": row.get("transaction_id"),
+                "made": bool(row.get("margaret_called_agent")),
+                "call_date": json_date_value(row.get("margaret_call_date")),
+            }
+        )
+    except Exception as exc:
+        print(f"Mobile call completion error: {exc}")
+        return jsonify({"success": False, "error": "Unable to update call status"}), 500
+
+
+@app.route("/api/mobile/transaction/<int:transaction_id>/communications", methods=["GET"])
+@mobile_jwt_required
+def mobile_list_communications(transaction_id):
+    """List communications for a transaction in descending order."""
+    if not get_transaction_or_none(transaction_id):
+        return jsonify({"success": False, "error": "Transaction not found"}), 404
+
+    rows = execute_query(
+        """
+        SELECT id, communication_type, contact_party, contact_name,
+               summary, outcome, follow_up_needed, follow_up_date,
+               logged_by, created_at
+        FROM communications
+        WHERE transaction_id = %s
+        ORDER BY created_at DESC
+        LIMIT 100
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+
+    communications = [
+        {
+            "id": row["id"],
+            "communication_type": row.get("communication_type") or "",
+            "contact_party": row.get("contact_party") or "",
+            "contact_name": row.get("contact_name") or "",
+            "summary": row.get("summary") or "",
+            "outcome": row.get("outcome") or "",
+            "follow_up_needed": bool(row.get("follow_up_needed")),
+            "follow_up_date": json_date_value(row.get("follow_up_date")),
+            "logged_by": row.get("logged_by") or "",
+            "created_at": json_date_value(row.get("created_at")),
+        }
+        for row in rows
+    ]
+    return jsonify({"success": True, "communications": communications})
+
+
+@app.route("/api/mobile/transaction/<int:transaction_id>/communications", methods=["POST"])
+@mobile_jwt_required
+def mobile_log_communication(transaction_id):
+    """Insert a communication log entry from the mobile app."""
+    if not get_transaction_or_none(transaction_id):
+        return jsonify({"success": False, "error": "Transaction not found"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    communication_type = (payload.get("communication_type") or "").strip().lower()
+    contact_party = (payload.get("contact_party") or "").strip().lower()
+    contact_name = (payload.get("contact_name") or "").strip()
+    summary = (payload.get("summary") or "").strip()
+    outcome = (payload.get("outcome") or "").strip()
+    follow_up_date = parse_optional_date(payload.get("follow_up_date"))
+    follow_up_needed = bool(follow_up_date)
+
+    if not communication_type:
+        return jsonify({"success": False, "error": "Communication type is required"}), 400
+    if not contact_party:
+        return jsonify({"success": False, "error": "Contact party is required"}), 400
+    if not summary:
+        return jsonify({"success": False, "error": "Summary is required"}), 400
+
+    rows = execute_query(
+        """
+        INSERT INTO communications (
+            transaction_id, communication_type, contact_party, contact_name,
+            summary, outcome, follow_up_needed, follow_up_date, logged_by
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id, created_at
+        """,
+        (
+            transaction_id,
+            communication_type,
+            contact_party,
+            contact_name or None,
+            summary,
+            outcome or None,
+            follow_up_needed,
+            follow_up_date,
+            getattr(g, "mobile_username", "mobile-user"),
+        ),
+        fetch=True,
+    ) or []
+    if not rows:
+        return jsonify({"success": False, "error": "Unable to log communication"}), 500
+
+    return jsonify(
+        {
+            "success": True,
+            "communication_id": rows[0]["id"],
+            "transaction_id": transaction_id,
+            "created_at": json_date_value(rows[0].get("created_at")),
+        }
+    )
 
 
 @app.route("/tc/dashboard")

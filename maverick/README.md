@@ -43,6 +43,7 @@ APP_BASE_URL=http://localhost:5000
 
 TC_USERNAME=margaret
 TC_PASSWORD=secure-hashed-password
+MOBILE_JWT_EXP_HOURS=12
 
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
@@ -76,6 +77,25 @@ Useful endpoints:
 - Agent upload: `http://localhost:5000/`
 - TC login: `http://localhost:5000/tc`
 - Health check: `http://localhost:5000/health`
+
+## Mobile API (JWT)
+
+Mobile clients authenticate with TC credentials and receive a bearer token.
+
+1. Login:
+   - `POST /api/mobile/login`
+   - Body: `{"username":"margaret","password":"..."}`
+   - Response includes `access_token`
+2. Use token:
+   - Header: `Authorization: Bearer <access_token>`
+3. Key MVP endpoints:
+   - `GET /api/mobile/dashboard`
+   - `GET /api/mobile/daily-checklist`
+   - `POST /api/mobile/task/<task_id>/complete`
+   - `GET /api/mobile/transaction/<transaction_id>/documents`
+   - `POST /api/mobile/call/<deadline_id>/complete`
+   - `GET /api/mobile/transaction/<transaction_id>/communications`
+   - `POST /api/mobile/transaction/<transaction_id>/communications`
 
 ## Deploy to Railway
 
