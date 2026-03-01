@@ -921,9 +921,9 @@
                 <p><small>Last seller access: {{ client_portal_links.seller.last_accessed_label }}</small></p>
                 {% endif %}
             </div>
-            <a class="btn action-btn" href="{{ url_for('mark_transaction_complete', transaction_id=transaction.id) }}">
-                Mark Complete
-            </a>
+            <form method="post" action="{{ url_for('mark_transaction_complete', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn action-btn">Mark Complete</button>
+            </form>
             <form method="post" action="{{ url_for('cancel_transaction', transaction_id=transaction.id) }}">
                 <button type="submit" class="btn btn-secondary action-btn">Cancel Transaction</button>
             </form>

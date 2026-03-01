@@ -64,6 +64,9 @@ CREATE TABLE transactions (
     -- Post-Closing
     review_requested BOOLEAN DEFAULT FALSE,
     review_requested_date TIMESTAMP,
+    completed_at TIMESTAMP,
+    completion_archive_s3_key VARCHAR(500),
+    completion_summary_s3_key VARCHAR(500),
 
     -- Timestamps
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -185,6 +188,38 @@ CREATE TABLE communications (
 
     -- Tracking
     logged_by VARCHAR(100) DEFAULT 'margaret',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE agent_review_requests (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    agent_email VARCHAR(255) NOT NULL,
+    access_token UUID UNIQUE NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending',
+    requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+CREATE TABLE agent_reviews (
+    id SERIAL PRIMARY KEY,
+    request_id INT REFERENCES agent_review_requests(id) ON DELETE SET NULL,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    agent_email VARCHAR(255),
+    rating INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
+    feedback TEXT NOT NULL,
+    auto_posted BOOLEAN DEFAULT FALSE,
+    posted_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE website_reviews (
+    id SERIAL PRIMARY KEY,
+    source_review_id INT UNIQUE REFERENCES agent_reviews(id) ON DELETE CASCADE,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    display_name VARCHAR(255),
+    quote_text TEXT NOT NULL,
+    rating INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

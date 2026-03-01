@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Transaction Complete</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Transaction Completed</h2>
+                <p style="margin:8px 0 0;">{{ property_address }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                <p style="margin:0 0 12px;">Hi {{ agent_name }},</p>
+                <p style="margin:0 0 12px;">Great news: your transaction has been marked complete in Maverick TC.</p>
+                <ul style="margin:0 0 12px; padding-left:18px;">
+                    <li>You will receive a separate review/testimonial request link shortly.</li>
+                    <li>Your referral credits remain active for qualifying referrals.</li>
+                </ul>
+                <p style="margin:0 0 12px;">
+                    Referral program details:
+                    <a href="{{ referral_link }}" target="_blank" rel="noopener">{{ referral_link }}</a>
+                </p>
+                <p style="margin:0;">Thank you for partnering with us.</p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

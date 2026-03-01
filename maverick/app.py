@@ -16,6 +16,10 @@ import jwt
 import stripe
 from dotenv import load_dotenv
 from flask import Flask, Response, g, has_request_context, jsonify, redirect, render_template, request, session, url_for
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse
 from werkzeug.security import check_password_hash
@@ -216,6 +220,16 @@ REQUIRED_DOCUMENT_TYPES = {
     "insurance_binder",
     "settlement_statement",
 }
+
+CRITICAL_COMPLETION_DOCUMENT_TYPES = {
+    "contract",
+    "title_commitment",
+    "loan_approval",
+    "insurance_binder",
+    "settlement_statement",
+}
+
+POSITIVE_REVIEW_THRESHOLD = 4
 
 CLIENT_TYPES = {"buyer", "seller"}
 
@@ -6632,6 +6646,1041 @@ def get_transaction_or_none(transaction_id):
     return rows[0] if rows else None
 
 
+def get_transaction(transaction_id):
+    """Fetch one transaction or raise a ValueError."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        raise ValueError("Transaction not found")
+    return transaction
+
+
+def ensure_completion_workflow_schema():
+    """Ensure completion-workflow transaction columns exist."""
+    execute_query("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP")
+    execute_query("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS completion_archive_s3_key VARCHAR(500)")
+    execute_query("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS completion_summary_s3_key VARCHAR(500)")
+
+
+def ensure_review_system_tables():
+    """Ensure review request, review submission, and website review tables exist."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS agent_review_requests (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            agent_email VARCHAR(255) NOT NULL,
+            access_token UUID UNIQUE NOT NULL,
+            status VARCHAR(20) DEFAULT 'pending',
+            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_review_requests_txn
+        ON agent_review_requests(transaction_id, requested_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS agent_reviews (
+            id SERIAL PRIMARY KEY,
+            request_id INT REFERENCES agent_review_requests(id) ON DELETE SET NULL,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            agent_email VARCHAR(255),
+            rating INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
+            feedback TEXT NOT NULL,
+            auto_posted BOOLEAN DEFAULT FALSE,
+            posted_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_reviews_txn
+        ON agent_reviews(transaction_id, created_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS website_reviews (
+            id SERIAL PRIMARY KEY,
+            source_review_id INT UNIQUE REFERENCES agent_reviews(id) ON DELETE CASCADE,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            display_name VARCHAR(255),
+            quote_text TEXT NOT NULL,
+            rating INT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_website_reviews_created
+        ON website_reviews(created_at DESC)
+        """
+    )
+
+
+def update_transaction(transaction_id, **fields):
+    """Update whitelisted transaction columns and updated_at timestamp."""
+    ensure_completion_workflow_schema()
+    allowed_fields = {
+        "status",
+        "completed_at",
+        "completion_archive_s3_key",
+        "completion_summary_s3_key",
+        "review_requested",
+        "review_requested_date",
+    }
+    safe_fields = {key: value for key, value in fields.items() if key in allowed_fields}
+    if not safe_fields:
+        return False
+
+    set_parts = []
+    params: list[Any] = []
+    for key, value in safe_fields.items():
+        set_parts.append(f"{key} = %s")
+        params.append(value)
+    set_parts.append("updated_at = CURRENT_TIMESTAMP")
+    params.append(transaction_id)
+    query = f"""
+    UPDATE transactions
+    SET {", ".join(set_parts)}
+    WHERE id = %s
+    """
+    return bool(execute_query(query, tuple(params)))
+
+
+def _uploaded_documents_for_completion(transaction_id, transaction_row=None):
+    """Return uploaded document rows and lookup maps for completion checks."""
+    transaction = transaction_row or get_transaction_or_none(transaction_id) or {}
+    rows = execute_query(
+        """
+        SELECT id, document_type, filename, s3_key, status, uploaded_at
+        FROM documents
+        WHERE transaction_id = %s
+        ORDER BY uploaded_at DESC, id DESC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    by_type = {}
+    uploaded_types = set()
+    for row in rows:
+        doc_type = (row.get("document_type") or "").strip().lower()
+        if not doc_type:
+            continue
+        uploaded_types.add(doc_type)
+        if doc_type not in by_type:
+            by_type[doc_type] = row
+
+    if transaction.get("contract_s3_key"):
+        uploaded_types.add("contract")
+        by_type.setdefault(
+            "contract",
+            {
+                "id": 0,
+                "document_type": "contract",
+                "filename": transaction.get("contract_pdf_url") or "contract.pdf",
+                "s3_key": transaction.get("contract_s3_key"),
+                "status": "received",
+                "uploaded_at": transaction.get("created_at"),
+            },
+        )
+    return {"rows": rows, "by_type": by_type, "uploaded_types": uploaded_types}
+
+
+def run_completion_safety_checks(transaction_id, transaction_row=None):
+    """Validate safety checks and return warning/error payload."""
+    transaction = transaction_row or get_transaction_or_none(transaction_id)
+    if not transaction:
+        return {
+            "ok": False,
+            "issues": [{"code": "transaction_not_found", "severity": "error", "message": "Transaction not found."}],
+            "missing_documents": [],
+            "major_incomplete_tasks": [],
+        }
+
+    issues = []
+    if not transaction.get("payment_closing_paid"):
+        issues.append(
+            {
+                "code": "closing_payment_missing",
+                "severity": "error",
+                "message": "Closing payment has not been marked as received.",
+            }
+        )
+
+    docs_payload = _uploaded_documents_for_completion(transaction_id, transaction_row=transaction)
+    missing_documents = sorted(CRITICAL_COMPLETION_DOCUMENT_TYPES - docs_payload["uploaded_types"])
+    if missing_documents:
+        issues.append(
+            {
+                "code": "critical_docs_missing",
+                "severity": "error",
+                "message": "Critical closing documents are missing.",
+                "missing_documents": missing_documents,
+            }
+        )
+
+    major_incomplete_tasks = execute_query(
+        """
+        SELECT id, task_description, task_category, priority, due_date
+        FROM tasks
+        WHERE transaction_id = %s
+          AND completed = FALSE
+          AND (
+                LOWER(COALESCE(priority, 'medium')) = 'high'
+                OR LOWER(COALESCE(task_category, '')) IN ('closing', 'post_closing')
+              )
+        ORDER BY due_date ASC NULLS LAST, id ASC
+        LIMIT 25
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if major_incomplete_tasks:
+        issues.append(
+            {
+                "code": "major_tasks_incomplete",
+                "severity": "warning",
+                "message": f"{len(major_incomplete_tasks)} major task(s) remain incomplete.",
+                "task_ids": [row["id"] for row in major_incomplete_tasks],
+            }
+        )
+
+    has_errors = any(issue.get("severity") == "error" for issue in issues)
+    return {
+        "ok": not issues,
+        "has_errors": has_errors,
+        "issues": issues,
+        "missing_documents": missing_documents,
+        "major_incomplete_tasks": major_incomplete_tasks,
+    }
+
+
+def complete_all_deadlines(transaction_id):
+    """Mark all open deadlines complete for a transaction."""
+    rows = execute_query(
+        """
+        UPDATE deadlines
+        SET completed = TRUE,
+            completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+        WHERE transaction_id = %s
+          AND completed = FALSE
+        RETURNING id
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    return [row["id"] for row in rows]
+
+
+def complete_all_tasks(transaction_id):
+    """Mark all open tasks complete for a transaction."""
+    rows = execute_query(
+        """
+        UPDATE tasks
+        SET completed = TRUE,
+            status = 'completed',
+            completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+            completed_by = COALESCE(NULLIF(completed_by, ''), 'completion_workflow')
+        WHERE transaction_id = %s
+          AND completed = FALSE
+        RETURNING id
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    return [row["id"] for row in rows]
+
+
+def archive_all_documents(transaction_id):
+    """Archive all transaction documents and upload an archive manifest."""
+    ensure_completion_workflow_schema()
+    transaction = get_transaction(transaction_id)
+    docs_payload = _uploaded_documents_for_completion(transaction_id, transaction_row=transaction)
+    document_rows = docs_payload["rows"]
+
+    execute_query(
+        """
+        UPDATE documents
+        SET status = 'archived'
+        WHERE transaction_id = %s
+          AND COALESCE(status, 'received') <> 'archived'
+        """,
+        (transaction_id,),
+    )
+
+    manifest_payload = {
+        "transaction_id": transaction_id,
+        "property_address": transaction.get("property_address"),
+        "archived_at": datetime.now().isoformat(),
+        "contract_s3_key": transaction.get("contract_s3_key"),
+        "documents": [
+            {
+                "id": row.get("id"),
+                "document_type": row.get("document_type"),
+                "filename": row.get("filename"),
+                "s3_key": row.get("s3_key"),
+                "status": row.get("status"),
+                "uploaded_at": row.get("uploaded_at"),
+            }
+            for row in document_rows
+        ],
+    }
+
+    archive_key = None
+    temp_path = None
+    try:
+        filename = f"archive_manifest_txn_{transaction_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w", encoding="utf-8") as tmp:
+            temp_path = tmp.name
+            json.dump(manifest_payload, tmp, indent=2, default=str)
+        archive_key = upload_local_file(
+            local_path=temp_path,
+            transaction_id=transaction_id,
+            document_type="archive_manifest",
+            filename=filename,
+            content_type="application/json",
+        )
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    if archive_key:
+        update_transaction(transaction_id, completion_archive_s3_key=archive_key)
+    return archive_key
+
+
+def count_completions_this_month():
+    """Return number of completed transactions in the current month."""
+    month_start = date.today().replace(day=1)
+    rows = execute_query(
+        """
+        SELECT COUNT(*) AS total
+        FROM transactions
+        WHERE status = 'COMPLETED'
+          AND COALESCE(completed_at, updated_at, created_at) >= %s
+        """,
+        (month_start,),
+        fetch=True,
+    ) or []
+    return int(rows[0]["total"]) if rows else 0
+
+
+def _completion_date_label(value):
+    if isinstance(value, datetime):
+        return value.strftime("%b %d, %Y %I:%M %p")
+    if isinstance(value, date):
+        return value.strftime("%b %d, %Y")
+    return str(value or "N/A")
+
+
+def generate_completion_summary(transaction_id):
+    """Generate and upload transaction completion summary PDF."""
+    ensure_completion_workflow_schema()
+    ensure_commission_tracking_table()
+    transaction = get_transaction(transaction_id)
+    upsert_commission_tracking(transaction_id)
+
+    deadline_rows = execute_query(
+        """
+        SELECT deadline_type, deadline_date, completed
+        FROM deadlines
+        WHERE transaction_id = %s
+        ORDER BY deadline_date ASC, id ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    docs_payload = _uploaded_documents_for_completion(transaction_id, transaction_row=transaction)
+    comm_rows = execute_query(
+        """
+        SELECT communication_type, contact_party, summary, created_at
+        FROM communications
+        WHERE transaction_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT 14
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    comm_type_counts = execute_query(
+        """
+        SELECT communication_type, COUNT(*) AS total
+        FROM communications
+        WHERE transaction_id = %s
+        GROUP BY communication_type
+        ORDER BY total DESC, communication_type ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    commission_rows = execute_query(
+        """
+        SELECT upfront_fee, closing_fee, referral_credit_given, total_revenue,
+               upfront_paid_date, closing_paid_date
+        FROM commission_tracking
+        WHERE transaction_id = %s
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    commission_row = commission_rows[0] if commission_rows else {}
+
+    upfront_breakdown = calculate_payment_breakdown(transaction, "upfront")
+    closing_breakdown = calculate_payment_breakdown(transaction, "closing")
+    outstanding_amount = 0.0
+    if not transaction.get("payment_upfront_paid"):
+        outstanding_amount += float(upfront_breakdown["amount"])
+    if not transaction.get("payment_closing_paid"):
+        outstanding_amount += float(closing_breakdown["amount"])
+
+    total_deadlines = len(deadline_rows)
+    met_deadlines = len([row for row in deadline_rows if row.get("completed")])
+
+    deadline_table_rows = [["Milestone", "Date", "Met"]]
+    for row in deadline_rows:
+        deadline_table_rows.append(
+            [
+                (row.get("deadline_type") or "").replace("_", " ").title(),
+                _completion_date_label(row.get("deadline_date")),
+                "Yes" if row.get("completed") else "No",
+            ]
+        )
+    if len(deadline_table_rows) == 1:
+        deadline_table_rows.append(["No deadlines", "N/A", "N/A"])
+
+    docs_table_rows = [["Document", "Received", "Latest File"]]
+    for doc_type in sorted(REQUIRED_DOCUMENT_TYPES):
+        latest_row = docs_payload["by_type"].get(doc_type) or {}
+        docs_table_rows.append(
+            [
+                document_type_label(doc_type),
+                "Yes" if doc_type in docs_payload["uploaded_types"] else "No",
+                latest_row.get("filename") or "-",
+            ]
+        )
+
+    comm_type_table_rows = [["Type", "Count"]]
+    for row in comm_type_counts:
+        comm_type_table_rows.append(
+            [
+                (row.get("communication_type") or "").replace("_", " ").title(),
+                str(int(row.get("total") or 0)),
+            ]
+        )
+    if len(comm_type_table_rows) == 1:
+        comm_type_table_rows.append(["No communications", "0"])
+
+    recent_comm_table_rows = [["When", "Type", "Summary"]]
+    for row in comm_rows:
+        recent_comm_table_rows.append(
+            [
+                _completion_date_label(row.get("created_at")),
+                (row.get("communication_type") or "").replace("_", " ").title(),
+                (row.get("summary") or "").strip()[:90] or "-",
+            ]
+        )
+    if len(recent_comm_table_rows) == 1:
+        recent_comm_table_rows.append(["N/A", "N/A", "No communications logged."])
+
+    settlement_table_rows = [
+        ["Line Item", "Amount", "Status"],
+        [
+            "Upfront Payment",
+            f"${float(upfront_breakdown['amount']):,.2f}",
+            "Paid" if transaction.get("payment_upfront_paid") else "Pending",
+        ],
+        [
+            "Closing Payment",
+            f"${float(closing_breakdown['amount']):,.2f}",
+            "Paid" if transaction.get("payment_closing_paid") else "Pending",
+        ],
+        ["Outstanding Balance", f"${float(outstanding_amount):,.2f}", "Cleared" if outstanding_amount == 0 else "Open"],
+    ]
+
+    commission_table_rows = [
+        ["Metric", "Value"],
+        ["Upfront Fee", f"${float(commission_row.get('upfront_fee') or 0):,.2f}"],
+        ["Closing Fee", f"${float(commission_row.get('closing_fee') or 0):,.2f}"],
+        ["Referral Credit", f"${float(commission_row.get('referral_credit_given') or 0):,.2f}"],
+        ["Total Revenue", f"${float(commission_row.get('total_revenue') or 0):,.2f}"],
+    ]
+
+    temp_path = None
+    pdf_bytes = b""
+    filename = f"completion_summary_txn_{transaction_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            temp_path = tmp.name
+
+        doc = SimpleDocTemplate(temp_path, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+        styles = getSampleStyleSheet()
+        story = []
+        story.append(Paragraph("Transaction Completion Summary", styles["Title"]))
+        story.append(
+            Paragraph(
+                f"Transaction #{transaction_id} | {(transaction.get('property_address') or 'Unknown property')}",
+                styles["Heading3"],
+            )
+        )
+        story.append(Spacer(1, 8))
+        story.append(
+            Paragraph(
+                (
+                    f"Completed at: {_completion_date_label(datetime.now())}<br/>"
+                    f"Agent: {transaction.get('agent_name') or 'N/A'} | "
+                    f"Buyer: {transaction.get('buyer_name') or 'N/A'} | "
+                    f"Seller: {transaction.get('seller_name') or 'N/A'}"
+                ),
+                styles["BodyText"],
+            )
+        )
+        story.append(Spacer(1, 10))
+
+        def _styled_table(rows, col_widths):
+            table = Table(rows, colWidths=col_widths, repeatRows=1)
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1d4ed8")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 8.6),
+                        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ]
+                )
+            )
+            return table
+
+        story.append(Paragraph("Final Timeline", styles["Heading2"]))
+        story.append(_styled_table(deadline_table_rows, [250, 160, 90]))
+        story.append(Spacer(1, 10))
+
+        story.append(Paragraph("Deadlines Met", styles["Heading2"]))
+        story.append(Paragraph(f"{met_deadlines}/{total_deadlines} deadlines marked complete.", styles["BodyText"]))
+        story.append(Spacer(1, 8))
+
+        story.append(Paragraph("Documents Checklist", styles["Heading2"]))
+        story.append(_styled_table(docs_table_rows, [170, 80, 250]))
+        story.append(Spacer(1, 10))
+
+        story.append(Paragraph("Communications Summary", styles["Heading2"]))
+        story.append(_styled_table(comm_type_table_rows, [280, 220]))
+        story.append(Spacer(1, 6))
+        story.append(_styled_table(recent_comm_table_rows, [130, 90, 280]))
+        story.append(Spacer(1, 10))
+
+        story.append(Paragraph("Final Settlement Amounts", styles["Heading2"]))
+        story.append(_styled_table(settlement_table_rows, [220, 140, 140]))
+        story.append(Spacer(1, 10))
+
+        story.append(Paragraph("Commission Breakdown", styles["Heading2"]))
+        story.append(_styled_table(commission_table_rows, [250, 250]))
+        doc.build(story)
+
+        with open(temp_path, "rb") as pdf_file:
+            pdf_bytes = pdf_file.read()
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    temp_upload_path = None
+    s3_key = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_upload:
+            temp_upload_path = tmp_upload.name
+            tmp_upload.write(pdf_bytes)
+        s3_key = upload_local_file(
+            local_path=temp_upload_path,
+            transaction_id=transaction_id,
+            document_type="completion_summary",
+            filename=filename,
+            content_type="application/pdf",
+        )
+    finally:
+        if temp_upload_path and os.path.exists(temp_upload_path):
+            try:
+                os.remove(temp_upload_path)
+            except OSError:
+                pass
+
+    if not s3_key:
+        raise RuntimeError("Failed to upload completion summary PDF")
+
+    document_id = execute_insert(
+        """
+        INSERT INTO documents (
+            transaction_id, document_type, filename, s3_key, file_size, uploaded_by, uploaded_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (transaction_id, "completion_summary", filename, s3_key, len(pdf_bytes), "completion_workflow"),
+    )
+    update_transaction(transaction_id, completion_summary_s3_key=s3_key)
+    return {
+        "s3_key": s3_key,
+        "filename": filename,
+        "document_id": document_id,
+        "pdf_bytes": pdf_bytes,
+        "summary_url": get_presigned_url(s3_key, expiration=60 * 60 * 24 * 7),
+    }
+
+
+def send_congratulations_emails(transaction):
+    """Send buyer, seller, and agent completion emails."""
+    transaction_id = int(transaction["id"])
+    email_map = fetch_client_email_map(transaction_id)
+    portal_links = fetch_client_portal_link_map(transaction_id)
+    default_portal_link = ensure_primary_portal_link(transaction_id)
+    survey_url = (os.getenv("POST_CLOSE_SURVEY_URL") or "").strip() or f"{app_base_url()}/tc"
+    referral_url = (os.getenv("REFERRAL_PROGRAM_URL") or "").strip() or "https://www.getmaverick.com"
+
+    def _log_email_result(contact_party, contact_name, summary, outcome):
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'email', %s, %s, %s, %s)
+            """,
+            (transaction_id, contact_party, contact_name, summary, outcome),
+        )
+
+    results = {"sent": 0, "failed": 0, "skipped": 0}
+
+    buyer_email = normalize_email(email_map.get("buyer"))
+    if buyer_email and is_email_valid(buyer_email):
+        buyer_context = {
+            "subject": f"Congratulations on your closing - {transaction.get('property_address')}",
+            "buyer_name": transaction.get("buyer_name") or "Buyer",
+            "property_address": transaction.get("property_address"),
+            "move_in_tip_1": "Create a first-week move-in checklist before closing day.",
+            "move_in_tip_2": "Store settlement documents in your portal for quick access.",
+            "utility_reminder": "Set utility transfers to begin on your closing date.",
+            "final_docs_link": portal_links.get("buyer") or default_portal_link,
+            "survey_link": survey_url,
+        }
+        message_id = send_email(
+            to=buyer_email,
+            template="emails/transaction_complete_buyer.html",
+            data=buyer_context,
+        )
+        _log_email_result(
+            "buyer",
+            transaction.get("buyer_name") or "Buyer",
+            "Buyer congratulations email sent" if message_id else "Buyer congratulations email failed",
+            f"to={buyer_email} message_id={message_id or 'failed'}",
+        )
+        if message_id:
+            results["sent"] += 1
+        else:
+            results["failed"] += 1
+    else:
+        results["skipped"] += 1
+
+    seller_email = normalize_email(email_map.get("seller"))
+    if seller_email and is_email_valid(seller_email):
+        seller_context = {
+            "subject": f"Thank you for trusting Maverick TC - {transaction.get('property_address')}",
+            "seller_name": transaction.get("seller_name") or "Seller",
+            "property_address": transaction.get("property_address"),
+            "final_docs_link": portal_links.get("seller") or default_portal_link,
+            "referral_link": referral_url,
+        }
+        message_id = send_email(
+            to=seller_email,
+            template="emails/transaction_complete_seller.html",
+            data=seller_context,
+        )
+        _log_email_result(
+            "seller",
+            transaction.get("seller_name") or "Seller",
+            "Seller thank-you email sent" if message_id else "Seller thank-you email failed",
+            f"to={seller_email} message_id={message_id or 'failed'}",
+        )
+        if message_id:
+            results["sent"] += 1
+        else:
+            results["failed"] += 1
+    else:
+        results["skipped"] += 1
+
+    agent_email = normalize_email(transaction.get("agent_email"))
+    if agent_email and is_email_valid(agent_email):
+        agent_context = {
+            "subject": f"Transaction complete - {transaction.get('property_address')}",
+            "agent_name": transaction.get("agent_name") or "Agent",
+            "property_address": transaction.get("property_address"),
+            "referral_link": referral_url,
+        }
+        message_id = send_email(
+            to=agent_email,
+            template="emails/transaction_complete_agent.html",
+            data=agent_context,
+        )
+        _log_email_result(
+            "agent",
+            transaction.get("agent_name") or "Agent",
+            "Agent completion email sent" if message_id else "Agent completion email failed",
+            f"to={agent_email} message_id={message_id or 'failed'}",
+        )
+        if message_id:
+            results["sent"] += 1
+        else:
+            results["failed"] += 1
+    else:
+        results["skipped"] += 1
+
+    return results
+
+
+def send_review_request(agent_email, transaction_id):
+    """Create review request token and email the review link to agent."""
+    ensure_review_system_tables()
+    safe_email = normalize_email(agent_email)
+    if not safe_email or not is_email_valid(safe_email):
+        return {"success": False, "skipped": "missing_agent_email"}
+
+    existing_rows = execute_query(
+        """
+        SELECT id, access_token
+        FROM agent_review_requests
+        WHERE transaction_id = %s
+          AND LOWER(agent_email) = LOWER(%s)
+          AND status = 'pending'
+        ORDER BY requested_at DESC, id DESC
+        LIMIT 1
+        """,
+        (transaction_id, safe_email),
+        fetch=True,
+    ) or []
+    if existing_rows:
+        request_id = existing_rows[0]["id"]
+        access_token = str(existing_rows[0]["access_token"])
+    else:
+        access_token = str(uuid4())
+        request_id = execute_insert(
+            """
+            INSERT INTO agent_review_requests (
+                transaction_id, agent_email, access_token, status, requested_at
+            ) VALUES (%s, %s, %s, 'pending', CURRENT_TIMESTAMP)
+            RETURNING id
+            """,
+            (transaction_id, safe_email, access_token),
+        )
+
+    review_link = f"{app_base_url()}/review/{access_token}"
+    transaction = get_transaction_or_none(transaction_id) or {}
+    message_id = send_email(
+        to=safe_email,
+        template="emails/review_request_agent.html",
+        data={
+            "subject": f"Quick favor: review your Maverick TC experience ({transaction.get('property_address')})",
+            "agent_name": transaction.get("agent_name") or "Agent",
+            "property_address": transaction.get("property_address") or "your transaction",
+            "review_link": review_link,
+        },
+    )
+    update_transaction(
+        transaction_id,
+        review_requested=True,
+        review_requested_date=datetime.now(),
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'email', 'agent', %s, %s, %s)
+        """,
+        (
+            transaction_id,
+            transaction.get("agent_name") or "Agent",
+            "Review request email sent" if message_id else "Review request email failed",
+            f"to={safe_email} request_id={request_id or 'n/a'} message_id={message_id or 'failed'}",
+        ),
+    )
+    return {
+        "success": bool(message_id),
+        "request_id": request_id,
+        "review_link": review_link,
+        "message_id": message_id,
+    }
+
+
+def auto_post_positive_review(review_id):
+    """Auto-post positive agent reviews to website_reviews."""
+    ensure_review_system_tables()
+    rows = execute_query(
+        """
+        SELECT ar.id, ar.transaction_id, ar.rating, ar.feedback, ar.agent_email,
+               t.agent_name, t.property_address
+        FROM agent_reviews ar
+        LEFT JOIN transactions t ON t.id = ar.transaction_id
+        WHERE ar.id = %s
+        LIMIT 1
+        """,
+        (review_id,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return {"success": False, "error": "review_not_found"}
+    row = rows[0]
+    if int(row.get("rating") or 0) < POSITIVE_REVIEW_THRESHOLD:
+        return {"success": False, "skipped": "rating_not_positive"}
+
+    display_name = row.get("agent_name") or row.get("agent_email") or "Maverick Agent"
+    execute_query(
+        """
+        INSERT INTO website_reviews (
+            source_review_id, transaction_id, display_name, quote_text, rating, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (source_review_id)
+        DO UPDATE SET
+            quote_text = EXCLUDED.quote_text,
+            rating = EXCLUDED.rating
+        """,
+        (
+            review_id,
+            row.get("transaction_id"),
+            display_name,
+            (row.get("feedback") or "").strip(),
+            int(row.get("rating") or 0),
+        ),
+    )
+    execute_query(
+        """
+        UPDATE agent_reviews
+        SET auto_posted = TRUE,
+            posted_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (review_id,),
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'reviews', %s, %s)
+        """,
+        (
+            row.get("transaction_id"),
+            "Positive review auto-posted to website",
+            f"review_id={review_id} rating={int(row.get('rating') or 0)}",
+        ),
+    )
+    return {"success": True}
+
+
+def alert_margaret_negative_review(transaction_id, rating, feedback):
+    """Notify Margaret when a low review is submitted."""
+    margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE") or "")
+    margaret_email = normalize_email(os.getenv("MARGARET_EMAIL") or "")
+    message_body = (
+        f"Negative review alert: Transaction #{transaction_id} "
+        f"received {int(rating)}/5. Feedback: {(feedback or '')[:180]}"
+    )
+    sms_sid = None
+    if margaret_phone:
+        sms_sid = send_sms(margaret_phone, message_body[:320])
+    email_message_id = None
+    if margaret_email and is_email_valid(margaret_email):
+        email_html = (
+            "<p><strong>Negative review alert</strong></p>"
+            f"<p>Transaction #{transaction_id} received <strong>{int(rating)}/5</strong>.</p>"
+            f"<p>Feedback:</p><blockquote>{(feedback or '').strip()}</blockquote>"
+        )
+        email_message_id = send_html_email(
+            to_email=margaret_email,
+            subject=f"Negative review alert - Transaction #{transaction_id}",
+            html_body=email_html,
+        )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'reviews', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Negative review alert sent to Margaret",
+            f"sms_sid={sms_sid or 'none'} email_message_id={email_message_id or 'none'}",
+        ),
+    )
+
+
+def process_referral_credit(transaction_id):
+    """Process referral credit bookkeeping for completed transaction."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return {"success": False, "error": "transaction_not_found"}
+    maybe_create_referral(transaction)
+    used_credit = False
+    if transaction.get("payment_upfront_paid") and transaction.get("agent_name"):
+        mark_referral_credit_used_if_needed(transaction_id, transaction.get("agent_name"))
+        used_credit = True
+    return {
+        "success": True,
+        "had_referral": bool((transaction.get("referred_by_agent") or "").strip()),
+        "credit_marked_used": used_credit,
+    }
+
+
+def finalize_commission_record(transaction_id):
+    """Finalize commission row after completion."""
+    ensure_commission_tracking_table()
+    success = bool(upsert_commission_tracking(transaction_id))
+    rows = execute_query(
+        """
+        SELECT upfront_fee, closing_fee, referral_credit_given, total_revenue
+        FROM commission_tracking
+        WHERE transaction_id = %s
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    return {"success": success, "commission_row": rows[0] if rows else {}}
+
+
+def execute_transaction_completion_workflow(transaction_id, force_complete=False, initiated_by="margaret"):
+    """Run full one-click completion workflow."""
+    ensure_completion_workflow_schema()
+    ensure_review_system_tables()
+    transaction = get_transaction(transaction_id)
+    status = (transaction.get("status") or "").strip().upper()
+    if status in {"COMPLETED", "CANCELLED"}:
+        return {"success": False, "error": "invalid_status", "message": "Transaction is already closed."}
+
+    safety = run_completion_safety_checks(transaction_id, transaction_row=transaction)
+    if safety.get("issues") and not force_complete:
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "message": "Safety checks found issues. Confirmation required.",
+            "issues": safety.get("issues"),
+        }
+
+    if safety.get("issues") and force_complete:
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', 'system', 'completion_workflow', %s, %s)
+            """,
+            (
+                transaction_id,
+                "Completion workflow override confirmed",
+                json.dumps(safety.get("issues"), default=str)[:1800],
+            ),
+        )
+
+    update_transaction(transaction_id, status="COMPLETED", completed_at=datetime.now())
+    completed_deadline_ids = complete_all_deadlines(transaction_id)
+    completed_task_ids = complete_all_tasks(transaction_id)
+    archive_s3_key = archive_all_documents(transaction_id)
+    summary_pdf = generate_completion_summary(transaction_id)
+
+    margaret_email = normalize_email(os.getenv("MARGARET_EMAIL") or "")
+    margaret_message_id = None
+    if margaret_email and is_email_valid(margaret_email):
+        margaret_message_id = send_email(
+            to=margaret_email,
+            template="emails/transaction_complete_margaret.html",
+            data={
+                "subject": f"Transaction completed: {transaction.get('property_address')}",
+                "transaction": transaction,
+                "summary_pdf": summary_pdf,
+                "archive_s3_key": archive_s3_key,
+            },
+            attachments=[
+                {
+                    "filename": summary_pdf.get("filename") or "completion_summary.pdf",
+                    "content_type": "application/pdf",
+                    "data": summary_pdf.get("pdf_bytes"),
+                }
+            ],
+        )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'email', 'system', 'margaret', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Margaret completion summary email sent" if margaret_message_id else "Margaret completion email failed/skipped",
+            f"to={margaret_email or 'n/a'} message_id={margaret_message_id or 'none'}",
+        ),
+    )
+
+    congratulation_result = send_congratulations_emails(transaction)
+    review_result = send_review_request(transaction.get("agent_email"), transaction_id)
+    referral_result = process_referral_credit(transaction_id)
+    commission_result = finalize_commission_record(transaction_id)
+
+    completion_count = count_completions_this_month()
+    margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE") or "")
+    celebration_sid = None
+    if margaret_phone:
+        celebration_sid = send_sms(
+            margaret_phone,
+            (
+                f"Transaction #{transaction_id} ({transaction.get('property_address')}) completed. "
+                f"That's #{completion_count} this month. Great work!"
+            ),
+        )
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'completion_workflow', %s, %s)
+        """,
+        (
+            transaction_id,
+            "One-click completion workflow executed",
+            (
+                f"by={initiated_by} completed_deadlines={len(completed_deadline_ids)} "
+                f"completed_tasks={len(completed_task_ids)} archive_key={archive_s3_key or 'none'} "
+                f"summary_key={summary_pdf.get('s3_key') or 'none'} "
+                f"review_request={'sent' if review_result.get('success') else 'failed/skipped'} "
+                f"celebration_sid={celebration_sid or 'none'}"
+            ),
+        ),
+    )
+
+    return {
+        "success": True,
+        "message": "Transaction completed successfully",
+        "actions_completed": 15,
+        "archive_s3_key": archive_s3_key,
+        "summary_pdf": {
+            "s3_key": summary_pdf.get("s3_key"),
+            "summary_url": summary_pdf.get("summary_url"),
+            "filename": summary_pdf.get("filename"),
+        },
+        "completed_deadline_count": len(completed_deadline_ids),
+        "completed_task_count": len(completed_task_ids),
+        "email_summary": congratulation_result,
+        "review_request": review_result,
+        "referral": referral_result,
+        "commission": commission_result,
+        "safety_issues": safety.get("issues") if safety.get("issues") else [],
+    }
+
+
 def get_extracted_contract_data_or_none(transaction_id):
     """Fetch OCR extraction payload for one transaction."""
     ensure_extracted_contract_data_table()
@@ -12261,6 +13310,103 @@ def send_referrer_thanks(transaction_id):
     return redirect(f"{url_for('tc_transaction', transaction_id=transaction_id)}#review-details")
 
 
+@app.route("/review/<access_token>", methods=["GET", "POST"])
+def submit_agent_review(access_token):
+    """Public review form for agent completion feedback."""
+    ensure_review_system_tables()
+    rows = execute_query(
+        """
+        SELECT rr.id, rr.transaction_id, rr.agent_email, rr.status, rr.requested_at, rr.completed_at,
+               t.property_address, t.agent_name
+        FROM agent_review_requests rr
+        JOIN transactions t ON t.id = rr.transaction_id
+        WHERE rr.access_token = %s
+        LIMIT 1
+        """,
+        (access_token,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return "Invalid or expired review link.", 404
+
+    review_request = rows[0]
+    if request.method == "GET":
+        return render_template(
+            "review_form.html",
+            review_request=review_request,
+            submitted=(review_request.get("status") == "completed"),
+            error="",
+        )
+
+    if review_request.get("status") == "completed":
+        return render_template("review_form.html", review_request=review_request, submitted=True, error="")
+
+    rating = parse_optional_int(request.form.get("rating"))
+    feedback = (request.form.get("feedback") or "").strip()
+    if not rating or rating < 1 or rating > 5:
+        return render_template(
+            "review_form.html",
+            review_request=review_request,
+            submitted=False,
+            error="Please select a rating from 1 to 5.",
+        )
+    if not feedback:
+        return render_template(
+            "review_form.html",
+            review_request=review_request,
+            submitted=False,
+            error="Please include a few words of feedback.",
+        )
+
+    review_id = execute_insert(
+        """
+        INSERT INTO agent_reviews (
+            request_id, transaction_id, agent_email, rating, feedback, created_at
+        ) VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            review_request["id"],
+            review_request["transaction_id"],
+            review_request.get("agent_email"),
+            int(rating),
+            feedback,
+        ),
+    )
+    execute_query(
+        """
+        UPDATE agent_review_requests
+        SET status = 'completed',
+            completed_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (review_request["id"],),
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'agent', %s, %s, %s)
+        """,
+        (
+            review_request["transaction_id"],
+            review_request.get("agent_name") or "Agent",
+            "Agent review submitted",
+            f"review_id={review_id or 'n/a'} rating={int(rating)}",
+        ),
+    )
+
+    if int(rating) >= POSITIVE_REVIEW_THRESHOLD:
+        auto_post_positive_review(review_id)
+    else:
+        alert_margaret_negative_review(
+            transaction_id=review_request["transaction_id"],
+            rating=int(rating),
+            feedback=feedback,
+        )
+
+    return render_template("review_form.html", review_request=review_request, submitted=True, error="")
+
+
 @app.route("/upload", methods=["POST"])
 def upload_contract_route():
     """Handle contract upload from agent."""
@@ -12749,48 +13895,110 @@ def send_reminder_now(deadline_id):
         return jsonify({"success": False, "error": "Unable to send reminder right now"}), 500
 
 
+def _completion_force_flag():
+    payload = request.get_json(silent=True)
+    if isinstance(payload, dict) and "force_complete" in payload:
+        return parse_bool_value(payload.get("force_complete"), default=False)
+    return parse_bool_value(request.form.get("force_complete"), default=False)
+
+
+@app.route("/tc/transaction/<int:transaction_id>/complete", methods=["POST"])
+@login_required
+def complete_transaction(transaction_id):
+    """
+    Execute full transaction completion sequence.
+    """
+    try:
+        result = execute_transaction_completion_workflow(
+            transaction_id=transaction_id,
+            force_complete=_completion_force_flag(),
+            initiated_by=session.get("tc_username", "margaret"),
+        )
+        if result.get("success"):
+            return jsonify(
+                {
+                    "success": True,
+                    "message": "Transaction completed successfully",
+                    "actions_completed": 15,
+                    "result": result,
+                }
+            )
+
+        status_code = 409 if result.get("requires_confirmation") else 400
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": result.get("error") or "completion_failed",
+                    "message": result.get("message") or "Some completion steps failed - please review",
+                    "requires_confirmation": bool(result.get("requires_confirmation")),
+                    "issues": result.get("issues") or [],
+                }
+            ),
+            status_code,
+        )
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc), "message": "Transaction not found"}), 404
+    except Exception as exc:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "message": "Some completion steps failed - please review",
+                }
+            ),
+            500,
+        )
+
+
 @app.route("/tc/transaction/<int:transaction_id>/mark-complete", methods=["GET", "POST"])
 @login_required
 def mark_transaction_complete(transaction_id):
-    """Mark transaction as completed."""
-    if request.method == "GET":
-        rows = execute_query(
-            "SELECT property_address, agent_name, agent_phone FROM transactions WHERE id = %s",
-            (transaction_id,),
-            fetch=True,
-        ) or []
-        if not rows:
-            return "Transaction not found", 404
+    """Legacy completion confirmation route backed by one-click workflow."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
 
-        txn = rows[0]
+    if request.method == "GET":
+        safety_warning = (request.args.get("safety_warning") or "").strip()
+        warning_block = (
+            f"<div class='warning'><strong>Safety checks detected:</strong><br>{safety_warning}</div>"
+            if safety_warning
+            else ""
+        )
+        force_input = "<input type='hidden' name='force_complete' value='1'>" if safety_warning else ""
         return f"""
         <html>
         <head>
             <title>Mark Complete</title>
             <style>
-                body {{ font-family: sans-serif; padding: 40px; max-width: 600px; margin: 0 auto; }}
+                body {{ font-family: sans-serif; padding: 40px; max-width: 700px; margin: 0 auto; background:#f8fafc; }}
                 .card {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
                 h2 {{ color: #1e3a8a; margin-bottom: 20px; }}
                 .checklist {{ background: #f9fafb; padding: 20px; border-radius: 6px; margin: 20px 0; }}
                 .checklist-item {{ padding: 10px 0; border-bottom: 1px solid #e5e7eb; }}
                 .btn {{ padding: 12px 24px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; margin-right: 10px; text-decoration: none; display: inline-block; }}
                 .btn-secondary {{ background: #6b7280; }}
+                .warning {{ background:#fff7ed; border:1px solid #fdba74; color:#9a3412; padding:12px; border-radius:6px; margin:12px 0; }}
             </style>
         </head>
         <body>
             <div class="card">
                 <h2>Mark Transaction Complete</h2>
-                <p><strong>Property:</strong> {txn['property_address']}</p>
-                <p><strong>Agent:</strong> {txn['agent_name']}</p>
+                <p><strong>Property:</strong> {transaction.get('property_address') or 'N/A'}</p>
+                <p><strong>Agent:</strong> {transaction.get('agent_name') or 'N/A'}</p>
+                {warning_block}
                 <div class="checklist">
                     <h3>Pre-Completion Checklist:</h3>
                     <div class="checklist-item">Closing occurred successfully</div>
-                    <div class="checklist-item">All documents received</div>
+                    <div class="checklist-item">All critical documents are uploaded</div>
                     <div class="checklist-item">Final settlement statement uploaded</div>
-                    <div class="checklist-item">Commission disbursed</div>
+                    <div class="checklist-item">Commission tracking is current</div>
                     <div class="checklist-item">Closing payment received</div>
                 </div>
                 <form method="POST">
+                    {force_input}
                     <button type="submit" class="btn">Mark Complete</button>
                     <a href="/tc/transaction/{transaction_id}" class="btn btn-secondary">Cancel</a>
                 </form>
@@ -12799,44 +14007,37 @@ def mark_transaction_complete(transaction_id):
         </html>
         """
 
-    execute_query(
-        """
-        UPDATE transactions
-        SET status = 'COMPLETED',
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = %s
-        """,
-        (transaction_id,),
+    force_complete = parse_bool_value(request.form.get("force_complete"), default=False)
+    result = execute_transaction_completion_workflow(
+        transaction_id=transaction_id,
+        force_complete=force_complete,
+        initiated_by=session.get("tc_username", "margaret"),
     )
-
-    rows = execute_query(
-        "SELECT property_address, agent_name, agent_phone FROM transactions WHERE id = %s",
-        (transaction_id,),
-        fetch=True,
-    ) or []
-    if rows:
-        txn = rows[0]
-        congrats_message = f"""Congratulations on closing {txn['property_address']}!
-
-Thank you for using Maverick TC. We would love your feedback.
-
-Refer a friend and you both get $50 off.
-
-- Heidi and Margaret"""
-        send_sms(txn["agent_phone"], congrats_message)
-
-    execute_query(
-        """
-        UPDATE transactions
-        SET review_requested = TRUE,
-            review_requested_date = %s,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = %s
-        """,
-        (datetime.now(), transaction_id),
+    if result.get("success"):
+        return redirect(
+            url_for(
+                "tc_dashboard",
+                notice="Transaction completed successfully.",
+                notice_type="success",
+            )
+        )
+    if result.get("requires_confirmation"):
+        issue_text = "<br>".join(issue.get("message") or "Issue detected" for issue in (result.get("issues") or []))
+        return redirect(
+            url_for(
+                "mark_transaction_complete",
+                transaction_id=transaction_id,
+                safety_warning=issue_text,
+            )
+        )
+    return redirect(
+        url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice=result.get("message") or "Could not complete transaction.",
+            doc_notice_type="warning",
+        )
     )
-
-    return redirect(url_for("tc_dashboard"))
 
 
 @app.route("/tc/transaction/<int:transaction_id>/cancel", methods=["POST"])
