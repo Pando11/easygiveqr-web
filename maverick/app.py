@@ -3030,7 +3030,10 @@ def stripe_webhook():
             if rows:
                 referral_credit = calculate_payment_breakdown(rows[0], "upfront").get("referral_credit", 0)
                 mark_referral_credit_used_if_needed(transaction_id, rows[0].get("agent_name"))
-                upsert_commission_tracking(transaction_id, referral_credit_override=referral_credit)
+                if float(referral_credit or 0) > 0:
+                    upsert_commission_tracking(transaction_id, referral_credit_override=referral_credit)
+                else:
+                    upsert_commission_tracking(transaction_id)
         else:
             execute_query(
                 """
