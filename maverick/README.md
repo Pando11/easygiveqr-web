@@ -13,7 +13,7 @@ Core capabilities:
 - Twilio SMS reminders, updates, and escalation alerts
 - Client portal links for buyer/seller timeline + document upload
 - Triple-scan AI contract extraction with confidence verification (OCR + PyPDF2 + pdfplumber)
-- Automated HOA/Inspection document analysis with action-item automation
+- Automated HOA/Inspection/Appraisal document analysis with action-item automation
 - Automation scripts for reminders, closing protocol, problem detection, and nightly backups
 
 ## Local setup instructions
@@ -130,9 +130,9 @@ Verification workflow routes:
 Approval gating:
 - Transaction approval requires all required extraction fields to be verified.
 
-## Automated HOA / Inspection Analysis
+## Automated HOA / Inspection / Appraisal Analysis
 
-Uploaded HOA and inspection documents are analyzed with triple-scan text extraction.
+Uploaded HOA, inspection, and appraisal documents are analyzed with triple-scan text extraction.
 
 Dashboard route:
 - `GET /tc/transaction/<transaction_id>/document-analysis`

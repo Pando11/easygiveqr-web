@@ -1,4 +1,4 @@
-# Document Analysis User Guide (HOA + Inspection)
+# Document Analysis User Guide (HOA + Inspection + Appraisal)
 
 This guide explains Maverick's automated HOA and inspection report analysis workflow for TC operations.
 
@@ -8,6 +8,7 @@ Supported document categories:
 
 - HOA documents (`hoa`, `hoa_documents`, `hoa_docs`)
 - Inspection reports (`inspection`, `inspection_report`)
+- Appraisal reports (`appraisal`, `appraisal_report`)
 
 Only PDF files are currently analyzed automatically.
 
@@ -33,6 +34,7 @@ Immediate SMS alerts to Margaret are sent when:
 - HOA special assessment > $3,000
 - Inspection safety issues are detected
 - Estimated repair cost > $10,000
+- Appraisal value is below contract price
 
 All other alerts are converted to due-today checklist tasks.
 

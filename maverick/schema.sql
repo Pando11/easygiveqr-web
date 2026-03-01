@@ -8,6 +8,7 @@ CREATE TABLE transactions (
 
     -- Property Info
     property_address TEXT NOT NULL,
+    contract_price DECIMAL(12,2),
 
     -- Contract Document
     contract_pdf_url TEXT,

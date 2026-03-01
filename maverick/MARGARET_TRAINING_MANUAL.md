@@ -183,15 +183,16 @@ If a required document is missing:
 4. Confirm the status banner at the top.
 5. Verify request timestamps in the **Document Requests** box.
 
-### AI Document Analysis (HOA + Inspection)
+### AI Document Analysis (HOA + Inspection + Appraisal)
 
-When HOA or inspection PDFs are uploaded, Maverick auto-analyzes them and creates action items.
+When HOA, inspection, or appraisal PDFs are uploaded, Maverick auto-analyzes them and creates action items.
 
 1. Open transaction and review **Document Analysis** status.
 2. Click **View Full Analysis Dashboard**.
 3. Review:
    - HOA dues / special assessments / violations
    - Inspection major defects / repair count / safety issues / estimated cost
+   - Appraisal value vs contract price variance
 4. Check confidence indicators:
    - High (3/3), Medium (2/3), Low (1/3)
 5. Confirm auto-created tasks make sense.
@@ -203,6 +204,7 @@ When HOA or inspection PDFs are uploaded, Maverick auto-analyzes them and create
 - HOA special assessment over $3,000 -> immediate SMS alert
 - Inspection safety issues -> immediate SMS alert
 - Estimated repairs over $10,000 -> immediate SMS alert
+- Appraisal below contract value -> immediate SMS alert + critical task
 - Lower-severity alerts -> auto-added to daily checklist tasks
 
 ### Access and Retention

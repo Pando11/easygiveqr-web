@@ -117,11 +117,12 @@ Contract uploads trigger asynchronous triple-scan extraction:
 
 The system writes field-level confidence rows to `contract_extractions` and requires manual verification before approval.
 
-## Automated HOA / Inspection Analysis
+## Automated HOA / Inspection / Appraisal Analysis
 
 When these document types are uploaded:
 - HOA: `hoa`, `hoa_documents`, `hoa_docs`
 - Inspection: `inspection`, `inspection_report`
+- Appraisal: `appraisal`, `appraisal_report`
 
 Maverick:
 1. Downloads the PDF from S3

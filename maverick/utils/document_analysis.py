@@ -129,6 +129,13 @@ def _best_single_item(items: List[dict]):
     return items[0] if items else None
 
 
+def _best_amount_from_items(items: List[dict]):
+    amounts = []
+    for item in items or []:
+        amounts.extend(_extract_amounts(item.get("text", "")))
+    return max(amounts) if amounts else None
+
+
 def analyze_hoa_documents(pdf_path):
     """
     Scan HOA documents for critical information.
@@ -356,6 +363,90 @@ def analyze_inspection_report(pdf_path):
             + electrical_matches["ignored_low_confidence_count"]
             + foundation_matches["ignored_low_confidence_count"]
             + estimate_matches["ignored_low_confidence_count"]
+        ),
+        "method_errors": method_errors,
+    }
+
+
+def analyze_appraisal(pdf_path, contract_price=None):
+    """
+    Scan appraisal for value discrepancies.
+    Returns dict with extracted data and action items.
+    """
+    method_texts, method_errors = _method_texts_from_pdf(pdf_path, max_pages=30)
+
+    patterns = {
+        "appraised_value": r"([^\n\.]{0,90}appraised value[^\n\.]{0,120}\$\s?\d[\d,]*(?:\.\d{1,2})?[^\n\.]{0,40})",
+        "contract_price": r"([^\n\.]{0,90}contract price[^\n\.]{0,120}\$\s?\d[\d,]*(?:\.\d{1,2})?[^\n\.]{0,40})",
+        "comparable_sales": r"([^\n\.]{0,90}(?:comp|comparable)\s*sale[^\n\.]{0,120}\$\s?\d[\d,]*(?:\.\d{1,2})?[^\n\.]{0,40})",
+    }
+
+    appraised_matches = _collect_pattern_matches(method_texts, patterns["appraised_value"])
+    contract_matches = _collect_pattern_matches(method_texts, patterns["contract_price"])
+    comparable_matches = _collect_pattern_matches(method_texts, patterns["comparable_sales"])
+
+    appraised_items = appraised_matches["flagged"]
+    contract_items = contract_matches["flagged"]
+    comparable_sales = comparable_matches["flagged"]
+
+    appraised_item = _best_single_item(appraised_items)
+    extracted_appraised_value = _best_amount_from_items([appraised_item] if appraised_item else [])
+    extracted_contract_price = _best_amount_from_items(contract_items)
+
+    reference_contract_price = contract_price if isinstance(contract_price, (int, float)) else None
+    if reference_contract_price is None:
+        reference_contract_price = extracted_contract_price
+
+    matches_contract = None
+    variance = None
+    variance_percent = None
+    action_items = []
+
+    if extracted_appraised_value is not None and reference_contract_price:
+        if extracted_appraised_value < reference_contract_price:
+            variance = round(reference_contract_price - extracted_appraised_value, 2)
+            variance_percent = round((variance / reference_contract_price) * 100, 1)
+            matches_contract = False
+            action_items.append(
+                {
+                    "type": "alert_margaret",
+                    "priority": "critical",
+                    "immediate": True,
+                    "message": (
+                        f"⚠️ Appraisal came in ${variance:,.0f} LOW "
+                        f"({variance_percent:.1f}% under contract)"
+                    ),
+                }
+            )
+            action_items.append(
+                {
+                    "type": "create_task",
+                    "task": f"Address appraisal shortfall of ${variance:,.0f}",
+                    "priority": "critical",
+                    "due_days": 1,
+                }
+            )
+        else:
+            matches_contract = True
+            variance = round(extracted_appraised_value - reference_contract_price, 2)
+            variance_percent = round((variance / reference_contract_price) * 100, 1) if reference_contract_price else None
+
+    all_items = appraised_items + contract_items + comparable_sales
+    return {
+        "appraised_value": extracted_appraised_value,
+        "appraised_value_evidence": appraised_item,
+        "contract_price": reference_contract_price,
+        "contract_price_evidence": contract_items,
+        "matches_contract": matches_contract,
+        "variance": variance,
+        "variance_percent": variance_percent,
+        "comparable_sales": comparable_sales,
+        "action_items": action_items,
+        "confidence_summary": _confidence_summary(all_items),
+        "ignored_low_confidence_count": (
+            appraised_matches["ignored_low_confidence_count"]
+            + contract_matches["ignored_low_confidence_count"]
+            + comparable_matches["ignored_low_confidence_count"]
         ),
         "method_errors": method_errors,
     }

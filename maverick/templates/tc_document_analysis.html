@@ -75,6 +75,41 @@
         <div class="empty-box">No inspection analysis results yet.</div>
         {% endif %}
     </article>
+
+    <article class="card">
+        <h3>🏠 Appraisal Analysis</h3>
+        {% if appraisal_summary %}
+        {% set findings = appraisal_summary.findings %}
+        <p>✅ Appraised Value:
+            {% if findings.appraised_value is not none %}
+            ${{ "{:,.0f}".format(findings.appraised_value) }}
+            {% else %}
+            Not identified
+            {% endif %}
+        </p>
+        <p>📄 Contract Price:
+            {% if findings.contract_price is not none %}
+            ${{ "{:,.0f}".format(findings.contract_price) }}
+            {% else %}
+            Not identified
+            {% endif %}
+        </p>
+        <p>
+            {% if findings.matches_contract is sameas false %}
+            ❌ Under contract by ${{ "{:,.0f}".format(findings.variance or 0) }} ({{ "%.1f"|format(findings.variance_percent or 0) }}%)
+            {% elif findings.matches_contract is sameas true %}
+            ✅ Meets or exceeds contract value
+            {% else %}
+            ⚠️ Unable to confirm appraisal variance
+            {% endif %}
+        </p>
+        <p>📝 Comparable sales identified: {{ findings.comparable_sales|length if findings.comparable_sales else 0 }}</p>
+        <p>📝 Action Items: {{ (appraisal_summary.action_items or [])|length }}</p>
+        <p>Confidence: High {{ findings.confidence_summary.high or 0 }}, Medium {{ findings.confidence_summary.medium or 0 }}, Low {{ findings.confidence_summary.low or 0 }}</p>
+        {% else %}
+        <div class="empty-box">No appraisal analysis results yet.</div>
+        {% endif %}
+    </article>
 </section>
 
 <section class="card">
@@ -143,7 +178,7 @@
 <style>
 .analysis-summary-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: 14px;
 }
 
@@ -189,10 +224,6 @@
 }
 
 @media (max-width: 1024px) {
-    .analysis-summary-grid {
-        grid-template-columns: 1fr;
-    }
-
     .analysis-row {
         flex-direction: column;
     }

@@ -29,7 +29,7 @@ from utils.contract_extraction import (
     extract_via_pdfplumber,
     extract_via_pypdf,
 )
-from utils.document_analysis import analyze_hoa_documents, analyze_inspection_report
+from utils.document_analysis import analyze_appraisal, analyze_hoa_documents, analyze_inspection_report
 from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 
@@ -81,6 +81,7 @@ CLIENT_UPLOAD_DOCUMENT_TYPES = {
 
 HOA_ANALYSIS_DOCUMENT_TYPES = {"hoa", "hoa_documents", "hoa_docs"}
 INSPECTION_ANALYSIS_DOCUMENT_TYPES = {"inspection", "inspection_report"}
+APPRAISAL_ANALYSIS_DOCUMENT_TYPES = {"appraisal", "appraisal_report"}
 
 DOCUMENT_REQUEST_TARGET = {
     "contract": "seller",
@@ -1364,6 +1365,40 @@ def execute_document_analysis_actions(transaction_id, analysis_type, action_item
     return executed_actions
 
 
+def get_transaction_contract_price(transaction_id):
+    """Fetch optional transaction contract_price when column exists."""
+    has_column_rows = execute_query(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'transactions'
+          AND column_name = 'contract_price'
+        LIMIT 1
+        """,
+        fetch=True,
+    ) or []
+    if not has_column_rows:
+        return None
+
+    value_rows = execute_query(
+        """
+        SELECT contract_price
+        FROM transactions
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    if not value_rows:
+        return None
+    value = value_rows[0].get("contract_price")
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def run_document_analysis(document_id, transaction_id, document_type, s3_key, extension):
     """Analyze HOA/inspection docs and persist findings."""
     normalized_type = (document_type or "").strip().lower()
@@ -1372,6 +1407,8 @@ def run_document_analysis(document_id, transaction_id, document_type, s3_key, ex
         analysis_type = "hoa"
     elif normalized_type in INSPECTION_ANALYSIS_DOCUMENT_TYPES:
         analysis_type = "inspection"
+    elif normalized_type in APPRAISAL_ANALYSIS_DOCUMENT_TYPES:
+        analysis_type = "appraisal"
     if not analysis_type:
         return
 
@@ -1398,7 +1435,15 @@ def run_document_analysis(document_id, transaction_id, document_type, s3_key, ex
             save_analysis_results(document_id, transaction_id, analysis_type, findings, [])
             return
 
-        findings = analyze_hoa_documents(temp_path) if analysis_type == "hoa" else analyze_inspection_report(temp_path)
+        if analysis_type == "hoa":
+            findings = analyze_hoa_documents(temp_path)
+        elif analysis_type == "inspection":
+            findings = analyze_inspection_report(temp_path)
+        else:
+            findings = analyze_appraisal(
+                temp_path,
+                contract_price=get_transaction_contract_price(transaction_id),
+            )
         action_items = findings.get("action_items") or []
         saved_row = save_analysis_results(
             document_id=document_id,
@@ -4972,6 +5017,7 @@ def tc_document_analysis(transaction_id):
     analysis_rows = get_document_analysis_rows(transaction_id)
     hoa_summary = next((row for row in analysis_rows if row.get("document_type") == "hoa"), None)
     inspection_summary = next((row for row in analysis_rows if row.get("document_type") == "inspection"), None)
+    appraisal_summary = next((row for row in analysis_rows if row.get("document_type") == "appraisal"), None)
 
     return render_template(
         "tc_document_analysis.html",
@@ -4979,6 +5025,7 @@ def tc_document_analysis(transaction_id):
         analysis_rows=analysis_rows,
         hoa_summary=hoa_summary,
         inspection_summary=inspection_summary,
+        appraisal_summary=appraisal_summary,
     )
 
 
