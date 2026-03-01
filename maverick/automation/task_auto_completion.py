@@ -137,9 +137,7 @@ def ensure_task_completion_tables():
             )
             VALUES (%s, %s, %s::jsonb, 80, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT (task_description_pattern, completion_trigger_type)
-            DO UPDATE SET
-                completion_criteria = EXCLUDED.completion_criteria,
-                updated_at = CURRENT_TIMESTAMP
+            DO NOTHING
             """,
             (
                 rule["task_description_pattern"],
