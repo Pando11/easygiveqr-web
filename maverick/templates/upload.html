@@ -91,6 +91,7 @@
             <div id="successMessage" class="alert alert-success" style="display: none;">
                 <p><strong>Contract received.</strong></p>
                 <p>Margaret will review your file and text timeline details shortly.</p>
+                <p id="successMeta" style="display: none; margin-top: 6px; font-weight: 700;"></p>
             </div>
 
             <div id="warningMessage" class="alert alert-warning" style="display: none;">
@@ -329,6 +330,7 @@ const uploadForm = document.getElementById("uploadForm");
 const submitBtn = document.getElementById("submitBtn");
 const loadingMsg = document.getElementById("loadingMessage");
 const successMsg = document.getElementById("successMessage");
+const successMeta = document.getElementById("successMeta");
 const warningMsg = document.getElementById("warningMessage");
 const warningText = document.getElementById("warningText");
 const errorMsg = document.getElementById("errorMessage");
@@ -340,6 +342,8 @@ const browseTrigger = document.getElementById("browseTrigger");
 
 function showError(message) {
     successMsg.style.display = "none";
+    successMeta.style.display = "none";
+    successMeta.textContent = "";
     warningMsg.style.display = "none";
     errorMsg.style.display = "block";
     errorText.textContent = message;
@@ -348,10 +352,26 @@ function showError(message) {
     }
 }
 
-function showSuccess(message) {
+function showSuccess(message, confirmationCode = "", transactionId = null) {
     warningMsg.style.display = "none";
     errorMsg.style.display = "none";
     successMsg.style.display = "block";
+
+    const details = [];
+    if (confirmationCode) {
+        details.push(`Confirmation code: ${confirmationCode}`);
+    }
+    if (transactionId !== null && transactionId !== undefined && String(transactionId).trim() !== "") {
+        details.push(`Transaction ID: ${transactionId}`);
+    }
+    if (details.length > 0) {
+        successMeta.textContent = details.join(" - ");
+        successMeta.style.display = "block";
+    } else {
+        successMeta.style.display = "none";
+        successMeta.textContent = "";
+    }
+
     if (typeof window.showSuccess === "function") {
         window.showSuccess(message);
     }
@@ -359,6 +379,8 @@ function showSuccess(message) {
 
 function showWarning(message) {
     successMsg.style.display = "none";
+    successMeta.style.display = "none";
+    successMeta.textContent = "";
     errorMsg.style.display = "none";
     warningMsg.style.display = "block";
     warningText.textContent = message;
@@ -369,6 +391,8 @@ function showWarning(message) {
 
 function resetBanners() {
     successMsg.style.display = "none";
+    successMeta.style.display = "none";
+    successMeta.textContent = "";
     warningMsg.style.display = "none";
     errorMsg.style.display = "none";
 }
@@ -516,7 +540,9 @@ uploadForm.addEventListener("submit", async (event) => {
         }
 
         if (response.ok && payload.success) {
-            showSuccess("Contract submitted successfully.");
+            const transactionId = payload.transaction_id;
+            const confirmationCode = payload.confirmation_code || "";
+            showSuccess("Contract submitted successfully.", confirmationCode, transactionId);
             uploadForm.reset();
             setFileDisplay(null);
             referralGroup.style.display = "none";

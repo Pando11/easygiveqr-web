@@ -1674,11 +1674,13 @@ Margaret will review within 2 hours. You'll receive your timeline shortly.
 - Maverick TC"""
         send_sms_async(agent_phone, confirmation_message)
 
+        confirmation_code = f"MAV-{int(transaction_id):06d}"
         print(f"Contract uploaded: Transaction #{transaction_id} - {property_address}")
         return jsonify(
             {
                 "success": True,
                 "transaction_id": transaction_id,
+                "confirmation_code": confirmation_code,
                 "message": "Contract received successfully",
             }
         )
