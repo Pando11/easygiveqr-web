@@ -612,6 +612,24 @@
             {% endif %}
         </article>
 
+        <article class="card" id="timeline-pdf">
+            <h3>Transaction Timeline PDF</h3>
+            {% if timeline_pdf_url %}
+            <p>
+                <a class="text-link" href="{{ timeline_pdf_url }}" target="_blank" rel="noopener">
+                    View Current Timeline PDF
+                </a>
+            </p>
+            {% else %}
+            <p class="hint-text">Timeline PDF has not been generated yet.</p>
+            {% endif %}
+            <form method="post" action="{{ url_for('regenerate_transaction_timeline', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Regenerate &amp; Resend Timeline</button>
+            </form>
+            <p class="hint-text">Last sent: {{ timeline_last_sent_ago or "Not sent yet" }}</p>
+            <p class="hint-text">Recipients: {{ timeline_recipients_label }}</p>
+        </article>
+
         <article class="card" id="payments">
             <h3>Payments</h3>
             <div class="payment-row">
@@ -662,8 +680,8 @@
             <form method="post" action="{{ url_for('generate_client_portal_link', transaction_id=transaction.id) }}">
                 <button type="submit" class="btn btn-secondary action-btn">Generate Client Portal Link</button>
             </form>
-            <form method="post" action="{{ url_for('resend_timeline_packet', transaction_id=transaction.id) }}">
-                <button type="submit" class="btn btn-secondary action-btn">Re-send Timeline Packet</button>
+            <form method="post" action="{{ url_for('regenerate_transaction_timeline', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Regenerate &amp; Resend Timeline</button>
             </form>
             <div class="portal-links-box">
                 <p><strong>Buyer Portal:</strong>

@@ -3,6 +3,8 @@ import re
 import smtplib
 from email.message import EmailMessage
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 from dotenv import load_dotenv
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -29,6 +31,7 @@ def _attach_files(message, attachments):
         content_type = (attachment.get("content_type") or "application/octet-stream").strip()
         data = attachment.get("data")
         path = (attachment.get("path") or "").strip()
+        url = (attachment.get("url") or "").strip()
 
         if data is None and path:
             try:
@@ -37,6 +40,18 @@ def _attach_files(message, attachments):
                     filename = Path(path).name
             except Exception as exc:
                 print(f"Attachment read error ({path}): {exc}")
+                continue
+        if data is None and url:
+            try:
+                with urlopen(url, timeout=25) as response:
+                    data = response.read()
+                    header_content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+                    if header_content_type and "/" in header_content_type:
+                        content_type = header_content_type
+                if not filename:
+                    filename = Path(urlsplit(url).path).name or "attachment.bin"
+            except Exception as exc:
+                print(f"Attachment download error ({url}): {exc}")
                 continue
 
         if data is None:
@@ -119,7 +134,7 @@ def send_html_email(to_email, subject, html_body, text_body=None, attachments=No
         return None
 
 
-def send_email(to, template, data, reply_to=None):
+def send_email(to, template, data, reply_to=None, attachments=None):
     """
     Render a Jinja template and send an HTML email via SMTP.
 
@@ -128,6 +143,10 @@ def send_email(to, template, data, reply_to=None):
         template: template path relative to maverick/templates
         data: render context dict (can include "subject")
         reply_to: optional reply-to email
+        attachments: optional list of attachment dicts:
+            - {"filename": "...", "content_type": "...", "data": b"..."}
+            - {"filename": "...", "path": "/tmp/file.pdf"}
+            - {"filename": "...", "url": "https://..."}
 
     Returns:
         message-id string on success, None on failure
@@ -172,4 +191,5 @@ def send_email(to, template, data, reply_to=None):
         subject=subject,
         html_body=html_content,
         reply_to=reply_to,
+        attachments=attachments,
     )

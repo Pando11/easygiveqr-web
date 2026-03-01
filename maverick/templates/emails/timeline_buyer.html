@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Your Transaction Timeline Is Ready</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Your Transaction Timeline Is Ready</h2>
+                <p style="margin:8px 0 0; color:#334155;">{{ property_address }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                <p style="margin:0 0 14px;">Hi {{ buyer_name }},</p>
+                <p style="margin:0 0 14px;">
+                    Your personalized transaction timeline for <strong>{{ property_address }}</strong> is attached.
+                </p>
+                <p style="margin:0 0 14px;">
+                    This shows all important dates and what to expect each week leading up to closing on
+                    <strong>{{ closing_date|format_date }}</strong>.
+                </p>
+
+                <h3 style="margin:18px 0 8px; font-size:16px;">Quick reminders</h3>
+                <ul style="margin:0 0 14px; padding-left:18px; color:#334155;">
+                    <li>Option fee due: {{ option_fee_due_date|format_date }}</li>
+                    <li>Earnest money due: {{ earnest_due_date|format_date }}</li>
+                    <li>Your coordinator: Margaret {{ margaret_phone }}</li>
+                </ul>
+
+                <p style="margin:0 0 14px;">
+                    We'll send reminders as each deadline approaches. You can also track your transaction online:
+                    <a href="{{ client_portal_url }}" target="_blank" rel="noopener">{{ client_portal_url }}</a>
+                </p>
+                {% if timeline_url %}
+                <p style="margin:0 0 14px;">
+                    Timeline link (7 days): <a href="{{ timeline_url }}" target="_blank" rel="noopener">{{ timeline_url }}</a>
+                </p>
+                {% endif %}
+
+                <p style="margin:0;">
+                    Questions? Just reply to this email or call Margaret.
+                </p>
+                <p style="margin:14px 0 0;">
+                    Best regards,<br>
+                    Maverick Transaction Coordination
+                </p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

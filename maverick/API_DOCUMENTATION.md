@@ -84,6 +84,7 @@ Client portal uses a unique token URL and does not require login credentials.
 
 ### Force timeline packet resend
 - `POST /tc/transaction/<transaction_id>/resend-timeline`
+- `POST /tc/transaction/<transaction_id>/regenerate-timeline` (preferred alias)
 
 ### Document analysis dashboard
 - `GET /tc/transaction/<transaction_id>/document-analysis`

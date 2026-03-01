@@ -22,7 +22,7 @@ from werkzeug.utils import secure_filename
 
 from config import Config
 from utils.db import execute_insert, execute_query
-from utils.email import send_html_email
+from utils.email import send_email, send_html_email
 from utils.payments import calculate_payment_breakdown
 from utils.contract_extraction import (
     compare_extractions,
@@ -50,6 +50,11 @@ from utils.inbound_email import (
 )
 from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document, upload_local_file
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
+from utils.timeline_generator import (
+    generate_transaction_timeline_pdf,
+    generate_transaction_timeline_pdf_bytes,
+    upload_transaction_timeline_pdf,
+)
 from utils.timeline_pdf import build_timeline_pdf
 from utils.vendor_automation import (
     VENDOR_TYPES,
@@ -3824,6 +3829,17 @@ def fetch_client_email_map(transaction_id):
     return email_map
 
 
+def fetch_client_portal_link_map(transaction_id):
+    """Resolve buyer/seller client portal links by transaction role."""
+    link_map = {"buyer": "", "seller": ""}
+    for access_row in fetch_client_access_rows(transaction_id):
+        role = (access_row.get("client_type") or "").strip().lower()
+        access_token = (access_row.get("access_token") or "").strip()
+        if role in link_map and access_token:
+            link_map[role] = client_portal_link_for_token(access_token)
+    return link_map
+
+
 def ensure_primary_portal_link(transaction_id):
     """Return a stable portal upload link for timeline packet content."""
     buyer_access = upsert_client_access(transaction_id, "buyer", None)
@@ -4036,14 +4052,55 @@ def build_timeline_email_recipients(transaction, buyer_email="", seller_email=""
     ]
 
 
+def format_timeline_recipients_label(sent_recipients):
+    """Format timeline recipient roles for transaction detail display."""
+    preferred_order = ["buyer", "seller", "agent", "lender", "title"]
+    preferred_labels = {
+        "buyer": "Buyer",
+        "seller": "Seller",
+        "agent": "Agent",
+        "lender": "Lender",
+        "title": "Title",
+    }
+
+    if not isinstance(sent_recipients, list):
+        return ", ".join(preferred_labels[role] for role in preferred_order)
+
+    role_set = set()
+    extra_labels = []
+    for row in sent_recipients:
+        role = (row.get("role") if isinstance(row, dict) else "").strip().lower()
+        if not role:
+            continue
+        if role in preferred_labels:
+            role_set.add(role)
+        elif role not in extra_labels:
+            extra_labels.append(role.replace("_", " ").title())
+
+    ordered = [preferred_labels[role] for role in preferred_order if role in role_set]
+    if not ordered and not extra_labels:
+        return ", ".join(preferred_labels[role] for role in preferred_order)
+    return ", ".join(ordered + extra_labels)
+
+
 def send_timeline_packet_emails(transaction, timeline_artifact, trigger_reason, buyer_email="", seller_email=""):
     """Distribute timeline PDF to buyer/seller/agent/lender/title audiences."""
     property_address = transaction.get("property_address") or "your transaction"
     recipients = build_timeline_email_recipients(transaction, buyer_email=buyer_email, seller_email=seller_email)
+    portal_links = fetch_client_portal_link_map(transaction["id"])
     sent_recipients = []
 
     is_update = trigger_reason not in {"approved", "manual_refresh"}
     subject_prefix = "Updated transaction timeline" if is_update else "Your transaction timeline"
+    margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE")) or ""
+    margaret_email = normalize_email(os.getenv("MARGARET_EMAIL")) or ""
+    timeline_attachment = [
+        {
+            "filename": timeline_artifact.get("filename") or "timeline_packet.pdf",
+            "content_type": "application/pdf",
+            "data": timeline_artifact.get("pdf_bytes"),
+        }
+    ]
 
     for recipient in recipients:
         role = recipient["role"]
@@ -4065,42 +4122,59 @@ def send_timeline_packet_emails(transaction, timeline_artifact, trigger_reason, 
             )
             continue
 
-        template_context = {
-            "recipient_name": contact_name,
-            "recipient_role": role.title(),
-            "property_address": property_address,
-            "transaction_id": transaction["id"],
-            "effective_date": format_date_label(transaction.get("effective_date")),
-            "closing_date": format_date_label(transaction.get("closing_date")),
-            "message_line": (
-                f"{subject_prefix} for {property_address} is ready! "
-                "This shows all important dates and deadlines. We'll send reminders as dates approach. "
-                "Questions? Reply to this email or call Margaret at "
-                f"{normalize_phone(os.getenv('MARGARET_PHONE')) or 'our support line'}."
-            ),
-            "timeline_url": timeline_artifact.get("timeline_url"),
-            "portal_link": timeline_artifact.get("portal_link"),
-            "focus_points": timeline_recipient_focus_points(role),
-            "trigger_reason": trigger_reason.replace("_", " ").title(),
-        }
-        if has_request_context():
-            html_body = render_template("emails/timeline_packet_notification.html", data=template_context)
+        if role == "buyer":
+            buyer_context = {
+                "subject": f"Maverick TC - {subject_prefix.title()} - {property_address}",
+                "buyer_name": contact_name,
+                "property_address": property_address,
+                "closing_date": transaction.get("closing_date"),
+                "option_fee_due_date": transaction.get("option_fee_due_date"),
+                "earnest_due_date": transaction.get("earnest_due_date"),
+                "margaret_phone": margaret_phone or "our support line",
+                "client_portal_url": portal_links.get("buyer") or timeline_artifact.get("portal_link") or "",
+                "timeline_url": timeline_artifact.get("timeline_url") or "",
+            }
+            message_id = send_email(
+                to=to_email,
+                template="emails/timeline_buyer.html",
+                data=buyer_context,
+                reply_to=margaret_email or None,
+                attachments=timeline_attachment,
+            )
         else:
-            with app.app_context():
+            template_context = {
+                "recipient_name": contact_name,
+                "recipient_role": role.title(),
+                "property_address": property_address,
+                "transaction_id": transaction["id"],
+                "effective_date": format_date_label(transaction.get("effective_date")),
+                "closing_date": format_date_label(transaction.get("closing_date")),
+                "message_line": (
+                    f"{subject_prefix} for {property_address} is ready! "
+                    "This shows all important dates and deadlines. We'll send reminders as dates approach. "
+                    "Questions? Reply to this email or call Margaret at "
+                    f"{margaret_phone or 'our support line'}."
+                ),
+                "timeline_url": timeline_artifact.get("timeline_url"),
+                "portal_link": timeline_artifact.get("timeline_url") or timeline_artifact.get("portal_link"),
+                "focus_points": timeline_recipient_focus_points(role),
+                "trigger_reason": trigger_reason.replace("_", " ").title(),
+                "margaret_phone": margaret_phone,
+                "margaret_email": margaret_email,
+            }
+            if has_request_context():
                 html_body = render_template("emails/timeline_packet_notification.html", data=template_context)
+            else:
+                with app.app_context():
+                    html_body = render_template("emails/timeline_packet_notification.html", data=template_context)
 
-        message_id = send_html_email(
-            to_email=to_email,
-            subject=f"Maverick TC - {subject_prefix.title()} - {property_address}",
-            html_body=html_body,
-            attachments=[
-                {
-                    "filename": timeline_artifact.get("filename") or "timeline_packet.pdf",
-                    "content_type": "application/pdf",
-                    "data": timeline_artifact.get("pdf_bytes"),
-                }
-            ],
-        )
+            message_id = send_html_email(
+                to_email=to_email,
+                subject=f"Maverick TC - {subject_prefix.title()} - {property_address}",
+                html_body=html_body,
+                attachments=timeline_attachment,
+                reply_to=margaret_email or None,
+            )
         execute_query(
             """
             INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
@@ -4118,6 +4192,217 @@ def send_timeline_packet_emails(transaction, timeline_artifact, trigger_reason, 
             sent_recipients.append({"role": role, "email": to_email, "name": contact_name, "message_id": message_id})
 
     return sent_recipients
+
+
+def send_timeline_to_all_parties(
+    transaction,
+    timeline_url,
+    trigger_reason="timeline_updated",
+    buyer_email="",
+    seller_email="",
+    pdf_bytes=None,
+    filename="timeline_packet.pdf",
+):
+    """Fallback timeline distribution flow used when packet dispatch fails."""
+    recipients = build_timeline_email_recipients(transaction, buyer_email=buyer_email, seller_email=seller_email)
+    portal_links = fetch_client_portal_link_map(transaction["id"])
+    property_address = transaction.get("property_address") or "your transaction"
+    margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE")) or ""
+    margaret_email = normalize_email(os.getenv("MARGARET_EMAIL")) or ""
+
+    attachments = []
+    if pdf_bytes:
+        attachments = [{"filename": filename, "content_type": "application/pdf", "data": pdf_bytes}]
+    elif timeline_url:
+        attachments = [{"filename": filename, "content_type": "application/pdf", "url": timeline_url}]
+
+    sent_recipients = []
+    for recipient in recipients:
+        role = recipient["role"]
+        to_email = normalize_email(recipient.get("email"))
+        contact_name = recipient.get("name") or role.title()
+        if not to_email or not is_email_valid(to_email):
+            continue
+
+        if role == "buyer":
+            buyer_context = {
+                "subject": f"Maverick TC - Your transaction timeline - {property_address}",
+                "buyer_name": contact_name,
+                "property_address": property_address,
+                "closing_date": transaction.get("closing_date"),
+                "option_fee_due_date": transaction.get("option_fee_due_date"),
+                "earnest_due_date": transaction.get("earnest_due_date"),
+                "margaret_phone": margaret_phone or "our support line",
+                "client_portal_url": portal_links.get("buyer") or timeline_url or "",
+                "timeline_url": timeline_url or "",
+            }
+            message_id = send_email(
+                to=to_email,
+                template="emails/timeline_buyer.html",
+                data=buyer_context,
+                reply_to=margaret_email or None,
+                attachments=attachments,
+            )
+        else:
+            template_context = {
+                "recipient_name": contact_name,
+                "recipient_role": role.title(),
+                "property_address": property_address,
+                "transaction_id": transaction["id"],
+                "effective_date": format_date_label(transaction.get("effective_date")),
+                "closing_date": format_date_label(transaction.get("closing_date")),
+                "message_line": (
+                    f"Updated transaction timeline for {property_address} is ready. "
+                    "Reply to this message if dates changed or support is needed."
+                ),
+                "timeline_url": timeline_url,
+                "portal_link": timeline_url,
+                "focus_points": timeline_recipient_focus_points(role),
+                "trigger_reason": (trigger_reason or "timeline_updated").replace("_", " ").title(),
+                "margaret_phone": margaret_phone,
+                "margaret_email": margaret_email,
+            }
+            if has_request_context():
+                html_body = render_template("emails/timeline_packet_notification.html", data=template_context)
+            else:
+                with app.app_context():
+                    html_body = render_template("emails/timeline_packet_notification.html", data=template_context)
+
+            message_id = send_html_email(
+                to_email=to_email,
+                subject=f"Maverick TC - Updated transaction timeline - {property_address}",
+                html_body=html_body,
+                attachments=attachments,
+                reply_to=margaret_email or None,
+            )
+
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'email', %s, %s, %s, %s)
+            """,
+            (
+                transaction["id"],
+                role,
+                contact_name,
+                "Timeline fallback email sent" if message_id else "Timeline fallback email failed",
+                f"to={to_email} trigger={trigger_reason} message_id={message_id or 'failed'}",
+            ),
+        )
+        if message_id:
+            sent_recipients.append({"role": role, "email": to_email, "name": contact_name, "message_id": message_id})
+    return sent_recipients
+
+
+def log_timeline_sent(transaction_id, timeline_s3_key, sent_recipients=None, trigger_reason="timeline_updated"):
+    """Persist timeline packet metadata + communication log for generated timeline."""
+    transaction = fetch_timeline_transaction(transaction_id)
+    if not transaction:
+        return False
+    deadline_rows = fetch_timeline_deadlines(transaction_id)
+    repair_tasks = fetch_repair_timeline_tasks(transaction_id)
+    snapshot = build_timeline_snapshot(transaction, deadline_rows, repair_tasks)
+    signature = timeline_signature(snapshot)
+    filename = (timeline_s3_key or "").rsplit("/", 1)[-1] or f"timeline_{transaction_id}.pdf"
+
+    upsert_timeline_packet_row(
+        transaction_id=transaction_id,
+        s3_key=timeline_s3_key,
+        filename=filename,
+        signature=signature,
+        snapshot=snapshot,
+        sent_recipients=sent_recipients or [],
+        trigger_reason=trigger_reason,
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'timeline', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Timeline generated and sent",
+            f"trigger={trigger_reason} s3_key={timeline_s3_key} recipients={len(sent_recipients or [])}",
+        ),
+    )
+    return True
+
+
+def regenerate_and_resend_timeline(
+    transaction_id,
+    reason,
+    force=False,
+    buyer_email="",
+    seller_email="",
+    send_vendor_notifications=False,
+):
+    """
+    Regenerate + resend transaction timeline.
+
+    Primary path uses the existing timeline packet dispatcher.
+    Fallback path uses utils.timeline_generator when packet dispatch fails.
+    """
+    trigger_reason = ((reason or "timeline_updated").strip().lower() or "timeline_updated").replace(" ", "_")
+    dispatch_result = dispatch_timeline_packet(
+        transaction_id=transaction_id,
+        trigger_reason=trigger_reason,
+        force=bool(force),
+        buyer_email=buyer_email,
+        seller_email=seller_email,
+        send_vendor_requests=bool(send_vendor_notifications),
+    )
+    if dispatch_result.get("success"):
+        return dispatch_result
+
+    try:
+        payload = generate_transaction_timeline_pdf_bytes(transaction_id)
+        try:
+            timeline_s3_key = upload_transaction_timeline_pdf(
+                transaction_id=transaction_id,
+                pdf_bytes=payload["pdf_bytes"],
+                filename=payload["filename"],
+            )
+        except Exception:
+            # Keep an explicit fallback path through the standalone generator.
+            timeline_s3_key = generate_transaction_timeline_pdf(transaction_id)
+        timeline_url = get_presigned_url(timeline_s3_key, expiration=60 * 60 * 24 * 7)
+        transaction = fetch_timeline_transaction(transaction_id)
+        if not transaction:
+            return {
+                "success": False,
+                "error": "transaction_not_found",
+                "primary_error": dispatch_result.get("error") or "dispatch_failed",
+            }
+        sent_recipients = send_timeline_to_all_parties(
+            transaction=transaction,
+            timeline_url=timeline_url,
+            trigger_reason=trigger_reason,
+            buyer_email=buyer_email,
+            seller_email=seller_email,
+            pdf_bytes=payload["pdf_bytes"],
+            filename=payload["filename"],
+        )
+        log_timeline_sent(
+            transaction_id=transaction_id,
+            timeline_s3_key=timeline_s3_key,
+            sent_recipients=sent_recipients,
+            trigger_reason=trigger_reason,
+        )
+        return {
+            "success": True,
+            "fallback": True,
+            "timeline_s3_key": timeline_s3_key,
+            "timeline_url": timeline_url,
+            "sent_recipients": sent_recipients,
+            "trigger_reason": trigger_reason,
+        }
+    except Exception as fallback_exc:
+        return {
+            "success": False,
+            "error": dispatch_result.get("error") or "timeline_regeneration_failed",
+            "primary_error": dispatch_result.get("error") or "dispatch_failed",
+            "fallback_error": str(fallback_exc),
+        }
 
 
 def create_vendor_coordination_task(transaction_id, vendor_type, property_address, rush_service=False):
@@ -4515,11 +4800,11 @@ def auto_dispatch_timeline_updates(limit=40):
     ) or []
     sent_updates = 0
     for row in rows:
-        result = dispatch_timeline_packet(
+        result = regenerate_and_resend_timeline(
             transaction_id=row["id"],
-            trigger_reason="timeline_updated",
+            reason="timeline_updated",
             force=False,
-            send_vendor_requests=False,
+            send_vendor_notifications=False,
         )
         if result.get("success") and not result.get("skipped"):
             sent_updates += 1
@@ -4529,11 +4814,11 @@ def auto_dispatch_timeline_updates(limit=40):
 def maybe_dispatch_timeline_update_for_repairs(transaction_id):
     """Trigger non-blocking timeline update when repair timeline tasks are added."""
     try:
-        dispatch_timeline_packet(
+        regenerate_and_resend_timeline(
             transaction_id=transaction_id,
-            trigger_reason="repair_timeline_added",
+            reason="repair_timeline_added",
             force=False,
-            send_vendor_requests=False,
+            send_vendor_notifications=False,
         )
     except Exception as exc:
         print(f"Repair timeline dispatch error (txn#{transaction_id}): {exc}")
@@ -7357,6 +7642,15 @@ def tc_transaction(transaction_id):
         deadline["deadline_label"] = format_date_label(deadline.get("deadline_date"))
         deadline["name_label"] = (deadline.get("deadline_type") or "").replace("_", " ").title()
 
+    timeline_packet = fetch_timeline_packet_row(transaction_id) or {}
+    timeline_pdf_url = ""
+    if timeline_packet.get("timeline_s3_key"):
+        timeline_pdf_url = get_presigned_url(timeline_packet["timeline_s3_key"], expiration=60 * 60 * 24 * 7) or ""
+    timeline_last_sent = timeline_packet.get("last_sent_at")
+    timeline_last_sent_label = format_timestamp_label(timeline_last_sent)
+    timeline_last_sent_ago = format_time_ago(timeline_last_sent) if timeline_last_sent else ""
+    timeline_recipients_label = format_timeline_recipients_label(timeline_packet.get("sent_recipients"))
+
     task_preview = []
     task_total = 0
     if status == "ACTIVE":
@@ -7431,6 +7725,10 @@ def tc_transaction(transaction_id):
         missing_document_items=missing_document_items,
         document_requests=document_requests,
         timeline=timeline,
+        timeline_pdf_url=timeline_pdf_url,
+        timeline_last_sent_label=timeline_last_sent_label,
+        timeline_last_sent_ago=timeline_last_sent_ago,
+        timeline_recipients_label=timeline_recipients_label,
         task_preview=task_preview,
         task_total=task_total,
         communications=communications,
@@ -7946,13 +8244,13 @@ def approve_transaction(transaction_id):
         seller_email=seller_email or None,
     )
 
-    timeline_result = dispatch_timeline_packet(
+    timeline_result = regenerate_and_resend_timeline(
         transaction_id=transaction_id,
-        trigger_reason="approved",
+        reason="approved",
         force=True,
         buyer_email=buyer_email or "",
         seller_email=seller_email or "",
-        send_vendor_requests=False,
+        send_vendor_notifications=False,
     )
     if not timeline_result.get("success"):
         execute_query(
@@ -7963,9 +8261,17 @@ def approve_transaction(transaction_id):
             (
                 transaction_id,
                 "Timeline packet dispatch failed on approval",
-                f"error={timeline_result.get('error', 'unknown')}",
+                (
+                    f"error={timeline_result.get('error', 'unknown')} "
+                    f"primary_error={timeline_result.get('primary_error', 'n/a')} "
+                    f"fallback_error={timeline_result.get('fallback_error', 'n/a')}"
+                ),
             ),
         )
+
+    timeline_warning = ""
+    if not timeline_result.get("success"):
+        timeline_warning = " Timeline generation failed; please regenerate from transaction details."
 
     dashboard_notice = "Transaction approved."
     dashboard_notice_type = "success"
@@ -7993,6 +8299,11 @@ def approve_transaction(transaction_id):
         dashboard_notice = f"⚠️ Transaction approved, but vendor emails failed: {str(exc)[:200]}"
         dashboard_notice_type = "warning"
         log_system_error("vendor_automation", str(exc), transaction_id)
+
+    if timeline_warning:
+        dashboard_notice = f"{dashboard_notice}{timeline_warning}"
+        if dashboard_notice_type == "success":
+            dashboard_notice_type = "warning"
 
     return redirect(url_for("tc_dashboard", notice=dashboard_notice, notice_type=dashboard_notice_type))
 
@@ -8506,27 +8817,25 @@ def vendor_outreach_response(access_token):
     )
 
 
-@app.route("/tc/transaction/<int:transaction_id>/resend-timeline", methods=["POST"])
-@login_required
-def resend_timeline_packet(transaction_id):
-    """Allow TC to force a timeline packet refresh/re-send."""
+def _handle_regenerate_timeline_request(transaction_id):
+    """Shared redirect flow for manual timeline regeneration endpoints."""
     transaction = get_transaction_or_none(transaction_id)
     if not transaction:
         return "Transaction not found", 404
     if (transaction.get("status") or "").upper() not in {"ACTIVE", "COMPLETED"}:
-        return "Timeline resend is only available for active/completed transactions.", 400
+        return "Timeline regeneration is only available for active/completed transactions.", 400
 
-    result = dispatch_timeline_packet(
+    result = regenerate_and_resend_timeline(
         transaction_id=transaction_id,
-        trigger_reason="manual_refresh",
+        reason="manual_refresh",
         force=True,
-        send_vendor_requests=False,
+        send_vendor_notifications=False,
     )
     if not result.get("success"):
         redirect_url = url_for(
             "tc_transaction",
             transaction_id=transaction_id,
-            doc_notice="Timeline resend failed. Please retry.",
+            doc_notice="Timeline regeneration failed. Please retry.",
             doc_notice_type="error",
         )
         return redirect(redirect_url)
@@ -8534,10 +8843,24 @@ def resend_timeline_packet(transaction_id):
     redirect_url = url_for(
         "tc_transaction",
         transaction_id=transaction_id,
-        doc_notice="Timeline packet re-sent successfully.",
+        doc_notice="Timeline regenerated and re-sent successfully.",
         doc_notice_type="success",
     )
-    return redirect(f"{redirect_url}#review-details")
+    return redirect(f"{redirect_url}#timeline-pdf")
+
+
+@app.route("/tc/transaction/<int:transaction_id>/resend-timeline", methods=["POST"])
+@login_required
+def resend_timeline_packet(transaction_id):
+    """Backward-compatible route for manual timeline resend."""
+    return _handle_regenerate_timeline_request(transaction_id)
+
+
+@app.route("/tc/transaction/<int:transaction_id>/regenerate-timeline", methods=["POST"])
+@login_required
+def regenerate_transaction_timeline(transaction_id):
+    """Allow TC to manually regenerate + resend timeline packet."""
+    return _handle_regenerate_timeline_request(transaction_id)
 
 
 @app.route("/tc/transaction/<int:transaction_id>/document-analysis")
