@@ -26,6 +26,7 @@ Core capabilities:
 - Smart document classification + renaming before S3 save, with Margaret correction learning loop
 - Automated weekly agent status updates (preview/edit/send controls, schedule choice, opt-out list)
 - Dynamic closing checklist generator (3-day trigger, Margaret review, 24-hour auto-send fallback, PDF + interactive + SMS)
+- Smart Q&A assistant with semantic matching, Margaret approval workflow, and auto-answer learning
 - Automation scripts for reminders, closing protocol, problem detection, task auto-completion, closing checklists, and nightly backups
 
 ## Local setup instructions
@@ -113,6 +114,12 @@ SMTP_PASSWORD=your_app_password
 SMTP_FROM_EMAIL=
 SMTP_FROM_NAME=Maverick TC
 ENABLE_LEGACY_DEADLINE_NUDGES=false
+COMMON_QA_EMBEDDING_DIMENSIONS=128
+COMMON_QA_SIMILARITY_THRESHOLD=0.85
+COMMON_QA_SUGGEST_CONFIDENCE=75
+COMMON_QA_AUTO_CONFIDENCE=95
+COMMON_QA_AUTO_ENABLE_REUSE_COUNT=5
+COMMON_QA_VARIANT_SIMILARITY_THRESHOLD=0.82
 ```
 
 ## Run locally
@@ -239,6 +246,33 @@ Distribution behavior:
   - interactive checklist link in Maverick (checkboxes shared across parties)
   - SMS mini-version summary
 - if not reviewed within 24 hours, it auto-sends with a disclaimer
+
+## Smart Q&A Assistant
+
+Maverick can detect repeated inbound questions and suggest or auto-send approved answers:
+
+- TC management route: `GET|POST /tc/common-qa`
+- Inbound email reply route: `POST /tc/transaction/<transaction_id>/inbound-email/<message_id>/reply`
+- Inbound intake integration:
+  - `POST /webhooks/inbound-email`
+  - `POST /sms-webhook` (agent SMS question flow)
+
+Decision model:
+- semantic match against `common_qa` using cosine similarity
+- if confidence > 95% and auto-answer enabled: auto-send answer
+- if confidence > 75%: suggest answer to Margaret
+- otherwise: regular manual response flow
+
+Learning model:
+- suggested answer used -> `times_reused` increments
+- at reuse threshold (`COMMON_QA_AUTO_ENABLE_REUSE_COUNT`, default 5), auto-answer is enabled
+- major Margaret edits create a new variant entry
+- new manual replies are saved as future common Q&A candidates
+
+Analytics:
+- monthly time saved estimate (hours)
+- most common question list
+- FAQ draft suggestion block for agent-facing documentation
 
 ## Timeline Packet + Vendor Outreach Automation
 

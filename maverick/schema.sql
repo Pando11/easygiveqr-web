@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE transactions (
     id SERIAL PRIMARY KEY,
 
@@ -446,6 +448,37 @@ CREATE TABLE calendar_events (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE common_qa (
+    id SERIAL PRIMARY KEY,
+    question_text TEXT NOT NULL,
+    question_embedding VECTOR(128),
+    answer_text TEXT NOT NULL,
+    transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+    asked_by_party VARCHAR(50),
+    times_reused INT DEFAULT 0,
+    auto_answer BOOLEAN DEFAULT FALSE,
+    category VARCHAR(50),
+    last_used_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE common_qa_events (
+    id SERIAL PRIMARY KEY,
+    common_qa_id INT REFERENCES common_qa(id) ON DELETE SET NULL,
+    transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+    channel VARCHAR(20),
+    event_type VARCHAR(40) NOT NULL,
+    asked_by_party VARCHAR(50),
+    question_text TEXT,
+    answer_text TEXT,
+    similarity_score DECIMAL(6,4),
+    confidence_score DECIMAL(5,2),
+    auto_answer BOOLEAN DEFAULT FALSE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE inbound_email_messages (
     id SERIAL PRIMARY KEY,
     transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
@@ -468,6 +501,16 @@ CREATE TABLE inbound_email_messages (
     status_notes TEXT,
     provider_message_id VARCHAR(255),
     provider_payload JSONB,
+    qa_match_id INT REFERENCES common_qa(id) ON DELETE SET NULL,
+    qa_similarity DECIMAL(6,4),
+    qa_confidence DECIMAL(5,2),
+    qa_decision VARCHAR(30),
+    qa_answer_text TEXT,
+    qa_used BOOLEAN DEFAULT FALSE,
+    qa_used_at TIMESTAMP,
+    qa_variant_created BOOLEAN DEFAULT FALSE,
+    reply_message_id VARCHAR(255),
+    replied_at TIMESTAMP,
     override_route VARCHAR(30),
     override_notes TEXT,
     override_by VARCHAR(100),
@@ -881,8 +924,14 @@ CREATE INDEX idx_vendor_outreach_log_pending ON vendor_outreach_log(outreach_typ
 CREATE INDEX idx_vendor_outreach_log_transaction ON vendor_outreach_log(transaction_id, outreach_date DESC);
 CREATE INDEX idx_calendar_events_transaction ON calendar_events(transaction_id, starts_at DESC);
 CREATE INDEX idx_inbound_email_messages_transaction ON inbound_email_messages(transaction_id, received_at DESC);
+CREATE INDEX idx_inbound_email_messages_qa ON inbound_email_messages(qa_decision, qa_match_id, received_at DESC);
 CREATE UNIQUE INDEX idx_inbound_email_rules_txn_role ON inbound_email_rules(transaction_id, sender_role);
 CREATE UNIQUE INDEX idx_transaction_risk_flags_txn ON transaction_risk_flags(transaction_id);
+CREATE INDEX idx_common_qa_category_reuse ON common_qa(category, times_reused DESC, updated_at DESC);
+CREATE INDEX idx_common_qa_auto_answer ON common_qa(auto_answer, times_reused DESC);
+CREATE INDEX idx_common_qa_transaction ON common_qa(transaction_id, updated_at DESC);
+CREATE INDEX idx_common_qa_events_created ON common_qa_events(created_at DESC, event_type);
+CREATE INDEX idx_common_qa_events_common_qa ON common_qa_events(common_qa_id, created_at DESC);
 CREATE INDEX idx_deadline_nudges_transaction ON deadline_nudges(transaction_id, due_date DESC);
 CREATE INDEX idx_deadline_nudges_phone ON deadline_nudges(target_phone, status, response_received_at);
 CREATE UNIQUE INDEX idx_deadline_nudges_unique_cycle ON deadline_nudges(transaction_id, nudge_key, due_date, target_party);

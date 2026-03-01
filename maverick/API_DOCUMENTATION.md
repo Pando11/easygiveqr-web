@@ -275,6 +275,40 @@ Form `action` options:
     - printable PDF link
     - SMS mini-version summary
 
+## Smart Q&A Assistant
+
+### Management UI (TC)
+- `GET|POST /tc/common-qa`
+- Form actions:
+  - `add` (create manual common Q&A)
+  - `update` (edit answer/category/auto-answer)
+  - `toggle_auto` (enable/disable auto-answer quickly)
+
+### Inbound email reply + learning
+- `POST /tc/transaction/<transaction_id>/inbound-email/<message_id>/reply`
+- Form actions:
+  - `use_suggested` (send suggested answer, increment reuse)
+  - `send_custom` (send edited/new answer, learn variant/new entry)
+
+### Inbound processing integration
+- `POST /webhooks/inbound-email`
+- Behavior:
+  - evaluates semantic match against `common_qa`
+  - decision logic:
+    - confidence > 95% AND `auto_answer = true` -> auto-send answer
+    - confidence > 75% -> suggest to Margaret
+    - otherwise no suggestion
+  - logs outcomes to:
+    - `inbound_email_messages` (qa match/confidence/decision metadata)
+    - `common_qa_events` (audit trail + analytics)
+
+### Agent SMS integration
+- `POST /sms-webhook`
+- Behavior:
+  - applies same threshold logic for non-emergency/non-status messages
+  - can auto-answer by SMS when high confidence + auto-answer enabled
+  - sends suggestion alert to Margaret when confidence is suggest-range
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values

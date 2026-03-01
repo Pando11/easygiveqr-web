@@ -324,6 +324,39 @@ Rule setting:
 - Inbound Routing Rules supports preferences like:
   - "Always notify Margaret for lender emails"
 
+### Smart Q&A Assistant (New)
+
+Maverick now learns from your inbound email/SMS answers and can suggest or auto-send approved responses.
+
+Decision thresholds:
+- Confidence > 95% and auto-answer enabled -> Maverick auto-sends a professional answer
+- Confidence > 75% -> Maverick suggests an answer for your review
+- Confidence <= 75% -> normal manual response workflow
+
+How to use it in a transaction:
+1. Open transaction -> **Communication Log** -> **Inbound Email Timeline**
+2. If a suggestion appears:
+   - Click **Use Suggested Answer** to send immediately, OR
+   - Click **Edit / Send Reply** to customize before sending
+3. If no suggestion appears:
+   - Use **Reply and Save to Smart Q&A**
+4. Every send is logged for audit trail automatically.
+
+Learning behavior:
+- Using suggested answers increments reuse count.
+- At 5 reuses (default), Maverick enables auto-answer for that Q&A.
+- Significant edits create a new answer variant.
+- New manual replies are stored as future common Q&A candidates.
+
+Global management:
+- Open **/tc/common-qa** from dashboard.
+- You can:
+  - view all reusable Q&A entries
+  - edit answers/categories
+  - enable/disable auto-answer per question
+  - add manual Q&A entries
+  - review time-saved metrics and FAQ draft suggestions
+
 ### Logging Best Practice
 
 For each log entry, capture:

@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<body style="margin:0;padding:0;background:#f8fafc;font-family:Arial,sans-serif;color:#0f172a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:20px 0;">
+        <tr>
+            <td align="center">
+                <table role="presentation" width="620" cellpadding="0" cellspacing="0" style="max-width:620px;background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;">
+                    <tr>
+                        <td style="padding:20px;">
+                            <h2 style="margin:0 0 8px;color:#1e3a8a;">Maverick Transaction Update</h2>
+                            {% if property_address %}
+                            <p style="margin:0 0 8px;"><strong>{{ property_address }}</strong></p>
+                            {% endif %}
+
+                            {% if auto_sent %}
+                            <p style="margin:0 0 10px;color:#475569;">
+                                We found a high-confidence answer for your question and are sharing it right away.
+                            </p>
+                            {% endif %}
+
+                            <div style="border:1px solid #dbeafe;border-radius:8px;background:#f8fbff;padding:12px;line-height:1.55;">
+                                {{ answer_text }}
+                            </div>
+
+                            <p style="margin:14px 0 0;color:#475569;">
+                                If you need anything else, reply to this email and Margaret will follow up.
+                            </p>
+                            <p style="margin:8px 0 0;color:#475569;">- Maverick TC</p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+

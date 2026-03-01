@@ -71,6 +71,23 @@ from utils.closing_checklist import (
     send_closing_checklist,
     toggle_closing_checklist_item,
 )
+from utils.common_qa import (
+    AUTO_ANSWER_CONFIDENCE_THRESHOLD,
+    COMMON_QA_CATEGORY_OPTIONS,
+    SUGGEST_CONFIDENCE_THRESHOLD,
+    answer_similarity,
+    build_agent_faq_draft,
+    create_common_qa_entry,
+    ensure_common_qa_tables,
+    evaluate_common_qa_decision,
+    fetch_common_qa_analytics,
+    fetch_common_qa_rows,
+    increment_common_qa_reuse,
+    infer_common_qa_category,
+    log_common_qa_event,
+    normalize_common_qa_category,
+    update_common_qa_entry,
+)
 from utils.db import execute_insert, execute_query
 from utils.email import send_email, send_html_email
 from utils.payments import calculate_payment_breakdown
@@ -2494,6 +2511,16 @@ def ensure_inbound_email_messages_table():
             status_notes TEXT,
             provider_message_id VARCHAR(255),
             provider_payload JSONB,
+            qa_match_id INT REFERENCES common_qa(id) ON DELETE SET NULL,
+            qa_similarity DECIMAL(6,4),
+            qa_confidence DECIMAL(5,2),
+            qa_decision VARCHAR(30),
+            qa_answer_text TEXT,
+            qa_used BOOLEAN DEFAULT FALSE,
+            qa_used_at TIMESTAMP,
+            qa_variant_created BOOLEAN DEFAULT FALSE,
+            reply_message_id VARCHAR(255),
+            replied_at TIMESTAMP,
             override_route VARCHAR(30),
             override_notes TEXT,
             override_by VARCHAR(100),
@@ -2503,10 +2530,27 @@ def ensure_inbound_email_messages_table():
         )
         """
     )
+    # Backfill new Q&A columns for already-provisioned databases.
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS qa_match_id INT REFERENCES common_qa(id) ON DELETE SET NULL")
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS qa_similarity DECIMAL(6,4)")
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS qa_confidence DECIMAL(5,2)")
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS qa_decision VARCHAR(30)")
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS qa_answer_text TEXT")
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS qa_used BOOLEAN DEFAULT FALSE")
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS qa_used_at TIMESTAMP")
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS qa_variant_created BOOLEAN DEFAULT FALSE")
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS reply_message_id VARCHAR(255)")
+    execute_query("ALTER TABLE inbound_email_messages ADD COLUMN IF NOT EXISTS replied_at TIMESTAMP")
     execute_query(
         """
         CREATE INDEX IF NOT EXISTS idx_inbound_email_messages_transaction
         ON inbound_email_messages(transaction_id, received_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_inbound_email_messages_qa
+        ON inbound_email_messages(qa_decision, qa_match_id, received_at DESC)
         """
     )
 
@@ -2560,6 +2604,7 @@ def ensure_transaction_risk_flags_table():
 
 def ensure_inbound_email_tables():
     """Ensure inbound email ingestion/routing tables exist."""
+    ensure_common_qa_tables()
     ensure_inbound_email_messages_table()
     ensure_inbound_email_rules_table()
     ensure_transaction_risk_flags_table()
@@ -3408,6 +3453,16 @@ def fetch_inbound_email_messages(transaction_id, limit=20):
             sms_sent,
             task_id,
             status_notes,
+            qa_match_id,
+            qa_similarity,
+            qa_confidence,
+            qa_decision,
+            qa_answer_text,
+            qa_used,
+            qa_used_at,
+            qa_variant_created,
+            reply_message_id,
+            replied_at,
             override_route,
             override_notes,
             override_by,
@@ -3429,6 +3484,11 @@ def fetch_inbound_email_messages(transaction_id, limit=20):
         row["mailbox_role_label"] = (row.get("mailbox_role") or "").replace("_", " ").title()
         row["urgency_label"] = (row.get("urgency") or "low").title()
         row["category_label"] = (row.get("category") or "general").replace("_", " ").title()
+        row["qa_decision_label"] = (row.get("qa_decision") or "none").replace("_", " ").title()
+        row["qa_used_at_label"] = format_timestamp_label(row.get("qa_used_at"))
+        row["replied_at_label"] = format_timestamp_label(row.get("replied_at"))
+        row["qa_confidence_pct"] = float(row.get("qa_confidence") or 0.0)
+        row["qa_similarity"] = float(row.get("qa_similarity") or 0.0)
     return rows
 
 
@@ -3456,7 +3516,17 @@ def fetch_inbound_email_message(transaction_id, message_id):
             forwarded_to,
             sms_sent,
             task_id,
-            status_notes
+            status_notes,
+            qa_match_id,
+            qa_similarity,
+            qa_confidence,
+            qa_decision,
+            qa_answer_text,
+            qa_used,
+            qa_used_at,
+            qa_variant_created,
+            reply_message_id,
+            replied_at
         FROM inbound_email_messages
         WHERE transaction_id = %s
           AND id = %s
@@ -3469,6 +3539,8 @@ def fetch_inbound_email_message(transaction_id, message_id):
         return None
     row = rows[0]
     row["forwarded_to"] = parse_json_field(row.get("forwarded_to"), [])
+    row["qa_confidence_pct"] = float(row.get("qa_confidence") or 0.0)
+    row["qa_similarity"] = float(row.get("qa_similarity") or 0.0)
     return row
 
 
@@ -3691,6 +3763,50 @@ def inbound_email_excerpt(text, max_chars=800):
     return f"{cleaned[:max_chars].rstrip()}..."
 
 
+def build_inbound_question_text(subject, body_text):
+    """Canonicalized question text used for semantic Q&A matching."""
+    subject_clean = re.sub(r"\s+", " ", str(subject or "").strip())
+    body_clean = inbound_email_excerpt(body_text, max_chars=1400)
+    if subject_clean and body_clean:
+        return f"{subject_clean}\n{body_clean}"
+    return subject_clean or body_clean
+
+
+def send_common_qa_reply_email(transaction, to_email, original_subject, answer_text, auto_sent=False):
+    """Send one common-Q&A reply email to inbound sender."""
+    recipient = normalize_email(to_email)
+    if not recipient or not is_email_valid(recipient):
+        return None
+    safe_subject = (original_subject or "Question").strip() or "Question"
+    reply_subject = f"Re: {safe_subject}"
+    html_body = render_template(
+        "emails/common_qa_reply.html",
+        property_address=transaction.get("property_address"),
+        answer_text=re.sub(r"\s+", " ", str(answer_text or "").strip()),
+        auto_sent=bool(auto_sent),
+    )
+    return send_html_email(to_email=recipient, subject=reply_subject, html_body=html_body)
+
+
+def evaluate_inbound_common_qa(subject, body_text, asked_by_party):
+    """Evaluate Q&A decision for one inbound question payload."""
+    question_text = build_inbound_question_text(subject, body_text)
+    category_hint = infer_common_qa_category(question_text)
+    decision = evaluate_common_qa_decision(
+        question_text=question_text,
+        asked_by_party=asked_by_party,
+        category_hint=category_hint,
+    )
+    return {
+        "question_text": question_text,
+        "category_hint": category_hint,
+        "decision": decision.get("decision") or "none",
+        "confidence": float(decision.get("confidence") or 0.0),
+        "similarity": float(decision.get("similarity") or 0.0),
+        "match": decision.get("match"),
+    }
+
+
 def send_inbound_forward_notifications(transaction, sender_email, sender_role, subject, body_text, analysis, recipient_roles):
     """Forward inbound email updates to selected parties and log outcomes."""
     email_map = inbound_forward_email_map(transaction)
@@ -3756,6 +3872,97 @@ def process_inbound_email_message(
     analysis = classify_inbound_email(subject, body_text, sender_role=sender_role)
     rule = fetch_inbound_email_rule(transaction["id"], sender_role)
     route, notify_margaret = resolve_inbound_route(analysis, rule)
+    qa_eval = evaluate_inbound_common_qa(
+        subject=subject,
+        body_text=body_text,
+        asked_by_party=sender_role,
+    )
+    qa_match = qa_eval.get("match") or {}
+    qa_match_id = qa_match.get("id")
+    qa_similarity = float(qa_eval.get("similarity") or 0.0) if qa_match else None
+    qa_confidence = float(qa_eval.get("confidence") or 0.0) if qa_match else None
+    qa_decision = qa_eval.get("decision") or "none"
+    qa_answer_text = (qa_match.get("answer_text") or "").strip() if qa_match else ""
+    qa_used = False
+    qa_variant_created = False
+    reply_message_id = None
+    replied_at = None
+
+    if qa_match:
+        log_common_qa_event(
+            event_type="question_matched",
+            common_qa_id=qa_match_id,
+            transaction_id=transaction["id"],
+            channel="email",
+            asked_by_party=sender_role,
+            question_text=qa_eval.get("question_text"),
+            answer_text=qa_answer_text,
+            similarity_score=qa_similarity,
+            confidence_score=qa_confidence,
+            auto_answer=(qa_decision == "auto_answer"),
+        )
+    else:
+        log_common_qa_event(
+            event_type="question_no_match",
+            common_qa_id=None,
+            transaction_id=transaction["id"],
+            channel="email",
+            asked_by_party=sender_role,
+            question_text=qa_eval.get("question_text"),
+            answer_text="",
+            similarity_score=0,
+            confidence_score=0,
+            auto_answer=False,
+        )
+
+    if qa_decision == "auto_answer" and qa_answer_text and qa_match_id:
+        reply_message_id = send_common_qa_reply_email(
+            transaction=transaction,
+            to_email=sender_email,
+            original_subject=subject,
+            answer_text=qa_answer_text,
+            auto_sent=True,
+        )
+        if reply_message_id:
+            replied_at = datetime.now()
+            qa_used = True
+            increment_common_qa_reuse(qa_match_id, increment_by=1)
+            log_common_qa_event(
+                event_type="auto_answer_sent",
+                common_qa_id=qa_match_id,
+                transaction_id=transaction["id"],
+                channel="email",
+                asked_by_party=sender_role,
+                question_text=qa_eval.get("question_text"),
+                answer_text=qa_answer_text,
+                similarity_score=qa_similarity,
+                confidence_score=qa_confidence,
+                auto_answer=True,
+            )
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'email', %s, %s, %s, %s)
+                """,
+                (
+                    transaction["id"],
+                    sender_role,
+                    sender_email,
+                    "Auto-answer sent from common Q&A",
+                    (
+                        f"qa_id={qa_match_id} confidence={qa_confidence or 0:.2f}% "
+                        f"message_id={reply_message_id}"
+                    ),
+                ),
+            )
+        else:
+            # Delivery failed; downgrade to suggestion so Margaret can intervene.
+            qa_decision = "suggest"
+            notify_margaret = True
+
+    if qa_decision == "suggest":
+        notify_margaret = True
+
     recipient_roles = build_inbound_forward_roles(
         route=route,
         category=analysis.get("category"),
@@ -3787,6 +3994,11 @@ def process_inbound_email_message(
                 analysis.get("margaret_alert")
                 or f"⚠️ {analysis.get('urgency', 'medium').title()} inbound email - {transaction.get('property_address')}"
             )
+            if qa_decision == "suggest" and qa_answer_text and qa_confidence:
+                alert_message = (
+                    f"Q&A suggestion ({qa_confidence:.0f}%) ready for "
+                    f"{transaction.get('property_address')}. Review inbound email in Maverick."
+                )
             send_sms_async(margaret_phone, alert_message)
             sms_sent = True
 
@@ -3813,12 +4025,24 @@ def process_inbound_email_message(
             status_notes,
             provider_message_id,
             provider_payload,
+            qa_match_id,
+            qa_similarity,
+            qa_confidence,
+            qa_decision,
+            qa_answer_text,
+            qa_used,
+            qa_used_at,
+            qa_variant_created,
+            reply_message_id,
+            replied_at,
             received_at,
             updated_at
         )
         VALUES (
             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         )
         RETURNING id
         """,
@@ -3840,11 +4064,39 @@ def process_inbound_email_message(
             json.dumps(forwarded_to or [], default=str),
             sms_sent,
             task_id,
-            f"rule_notify={bool(rule.get('always_notify_margaret'))} forward_policy={rule.get('forward_policy', 'default')}",
+            (
+                f"rule_notify={bool(rule.get('always_notify_margaret'))} "
+                f"forward_policy={rule.get('forward_policy', 'default')} "
+                f"qa_decision={qa_decision}"
+            ),
             (provider_message_id or "").strip()[:255] or None,
             json.dumps(provider_payload or {}, default=str),
+            qa_match_id,
+            qa_similarity,
+            qa_confidence,
+            qa_decision,
+            qa_answer_text or None,
+            qa_used,
+            (datetime.now() if qa_used else None),
+            qa_variant_created,
+            reply_message_id,
+            replied_at,
         ),
     )
+
+    if qa_match and qa_decision == "suggest":
+        log_common_qa_event(
+            event_type="suggested_answer_available",
+            common_qa_id=qa_match_id,
+            transaction_id=transaction["id"],
+            channel="email",
+            asked_by_party=sender_role,
+            question_text=qa_eval.get("question_text"),
+            answer_text=qa_answer_text,
+            similarity_score=qa_similarity,
+            confidence_score=qa_confidence,
+            auto_answer=False,
+        )
 
     execute_query(
         """
@@ -3859,7 +4111,8 @@ def process_inbound_email_message(
             (
                 f"mailbox={mailbox_role} urgency={analysis.get('urgency')} "
                 f"category={analysis.get('category')} route={route} "
-                f"forwarded={len(forwarded_to)} sms_sent={sms_sent} task_id={task_id or 'n/a'}"
+                f"forwarded={len(forwarded_to)} sms_sent={sms_sent} task_id={task_id or 'n/a'} "
+                f"qa_decision={qa_decision} qa_confidence={qa_confidence or 0:.2f}"
             ),
         ),
     )
@@ -3879,6 +4132,10 @@ def process_inbound_email_message(
         "forwarded_to": forwarded_to,
         "sms_sent": sms_sent,
         "task_id": task_id,
+        "qa_decision": qa_decision,
+        "qa_confidence": qa_confidence,
+        "qa_match_id": qa_match_id,
+        "qa_used": qa_used,
     }
 
 
@@ -5752,6 +6009,18 @@ def closing_checklist_public_url(access_token):
     return f"/closing-checklist/{access_token}"
 
 
+def common_qa_variant_similarity_threshold():
+    """Return minimum similarity to treat edited answer as same variant."""
+    raw_value = (os.getenv("COMMON_QA_VARIANT_SIMILARITY_THRESHOLD") or "").strip()
+    if not raw_value:
+        return 0.82
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return 0.82
+    return max(0.3, min(parsed, 0.99))
+
+
 def file_extension(filename):
     """Return lower-cased extension for a filename."""
     if not filename or "." not in filename:
@@ -7452,6 +7721,143 @@ def tc_status_updates():
     )
 
 
+@app.route("/tc/common-qa", methods=["GET", "POST"])
+@login_required
+def tc_common_qa():
+    """Manage reusable Smart Q&A responses and analytics."""
+    ensure_common_qa_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        next_notice = "Q&A settings updated."
+        next_type = "success"
+
+        if action == "add":
+            question_text = (request.form.get("question_text") or "").strip()
+            answer_text = (request.form.get("answer_text") or "").strip()
+            asked_by_party = (request.form.get("asked_by_party") or "agent").strip().lower()
+            category = normalize_common_qa_category(
+                request.form.get("category"),
+                fallback=infer_common_qa_category(question_text),
+            )
+            transaction_id = parse_optional_int(request.form.get("transaction_id"))
+            created = create_common_qa_entry(
+                question_text=question_text,
+                answer_text=answer_text,
+                transaction_id=transaction_id,
+                asked_by_party=asked_by_party,
+                category=category,
+                force_new=True,
+            )
+            if created:
+                log_common_qa_event(
+                    event_type="manual_qa_added",
+                    common_qa_id=created["id"],
+                    transaction_id=transaction_id,
+                    channel="tc_ui",
+                    asked_by_party=asked_by_party,
+                    question_text=question_text,
+                    answer_text=answer_text,
+                    auto_answer=False,
+                )
+                next_notice = "Common Q&A entry added."
+            else:
+                next_notice = "Could not add common Q&A entry."
+                next_type = "error"
+
+        elif action == "update":
+            qa_id = parse_optional_int(request.form.get("qa_id"))
+            answer_text = (request.form.get("answer_text") or "").strip()
+            category = normalize_common_qa_category(request.form.get("category"), fallback="general")
+            auto_answer = parse_bool_value(request.form.get("auto_answer"), default=False)
+            if not qa_id or not answer_text:
+                next_notice = "Question ID and answer are required."
+                next_type = "warning"
+            else:
+                updated = update_common_qa_entry(
+                    common_qa_id=qa_id,
+                    answer_text=answer_text,
+                    category=category,
+                    auto_answer=auto_answer,
+                )
+                if updated:
+                    log_common_qa_event(
+                        event_type="manual_qa_updated",
+                        common_qa_id=qa_id,
+                        transaction_id=updated.get("transaction_id"),
+                        channel="tc_ui",
+                        asked_by_party=updated.get("asked_by_party"),
+                        question_text=updated.get("question_text"),
+                        answer_text=answer_text,
+                        auto_answer=bool(auto_answer),
+                    )
+                    next_notice = "Common Q&A entry updated."
+                else:
+                    next_notice = "Could not update common Q&A entry."
+                    next_type = "error"
+
+        elif action == "toggle_auto":
+            qa_id = parse_optional_int(request.form.get("qa_id"))
+            auto_answer = parse_bool_value(request.form.get("auto_answer"), default=False)
+            if not qa_id:
+                next_notice = "Invalid Q&A row."
+                next_type = "warning"
+            else:
+                updated = update_common_qa_entry(common_qa_id=qa_id, auto_answer=auto_answer)
+                if updated:
+                    log_common_qa_event(
+                        event_type="manual_auto_toggle",
+                        common_qa_id=qa_id,
+                        transaction_id=updated.get("transaction_id"),
+                        channel="tc_ui",
+                        asked_by_party=updated.get("asked_by_party"),
+                        question_text=updated.get("question_text"),
+                        answer_text=updated.get("answer_text"),
+                        auto_answer=bool(auto_answer),
+                    )
+                    next_notice = "Auto-answer setting updated."
+                else:
+                    next_notice = "Could not update auto-answer setting."
+                    next_type = "error"
+        else:
+            next_notice = "Unknown common Q&A action."
+            next_type = "warning"
+
+        return redirect(url_for("tc_common_qa", notice=next_notice, notice_type=next_type))
+
+    selected_category = normalize_common_qa_category(request.args.get("category"), fallback="")
+    search_text = (request.args.get("q") or "").strip()
+    qa_rows = fetch_common_qa_rows(
+        limit=400,
+        category=(selected_category if selected_category else None),
+        search_text=search_text,
+    )
+    for row in qa_rows:
+        row["auto_enabled_label"] = "Enabled" if row.get("auto_answer") else "Disabled"
+        row["updated_at_label"] = format_timestamp_label(row.get("updated_at"))
+        row["last_used_label"] = format_timestamp_label(row.get("last_used_at"))
+
+    analytics = fetch_common_qa_analytics()
+    faq_draft = build_agent_faq_draft(limit=18)
+    return render_template(
+        "tc_common_qa.html",
+        notice=notice,
+        notice_type=notice_type,
+        qa_rows=qa_rows,
+        category_options=COMMON_QA_CATEGORY_OPTIONS,
+        selected_category=selected_category,
+        search_text=search_text,
+        analytics=analytics,
+        faq_draft=faq_draft,
+        auto_threshold_pct=AUTO_ANSWER_CONFIDENCE_THRESHOLD,
+        suggest_threshold_pct=SUGGEST_CONFIDENCE_THRESHOLD,
+    )
+
+
 @app.route("/tc/closing-checklists", methods=["GET", "POST"])
 @login_required
 def tc_closing_checklists():
@@ -8969,6 +9375,7 @@ def tc_transaction(transaction_id):
             "action_item_count": analysis_action_item_count,
         },
         document_classification_types=DOCUMENT_CLASSIFICATION_OVERRIDE_TYPES,
+        common_qa_categories=COMMON_QA_CATEGORY_OPTIONS,
     )
 
 
@@ -10540,6 +10947,188 @@ def save_inbound_email_rule(transaction_id):
     return redirect(f"{redirect_url}#communications")
 
 
+@app.route("/tc/transaction/<int:transaction_id>/inbound-email/<int:message_id>/reply", methods=["POST"])
+@login_required
+def reply_inbound_email_with_qa(transaction_id, message_id):
+    """Send Margaret-approved answer and update Smart Q&A learning state."""
+    ensure_common_qa_tables()
+    transaction = fetch_timeline_transaction(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+    inbound_row = fetch_inbound_email_message(transaction_id, message_id)
+    if not inbound_row:
+        return "Inbound message not found", 404
+
+    sender_email = normalize_email(inbound_row.get("sender_email"))
+    if not sender_email or not is_email_valid(sender_email):
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Inbound sender email is invalid; cannot send reply.",
+            doc_notice_type="error",
+        )
+        return redirect(f"{redirect_url}#communications")
+
+    action = (request.form.get("action") or "").strip().lower()
+    question_text = build_inbound_question_text(inbound_row.get("subject"), inbound_row.get("body_text"))
+    category = normalize_common_qa_category(
+        request.form.get("qa_category"),
+        fallback=infer_common_qa_category(question_text),
+    )
+    current_qa_id = inbound_row.get("qa_match_id")
+    existing_suggested_answer = (inbound_row.get("qa_answer_text") or "").strip()
+
+    answer_text = ""
+    event_type = "manual_answer_recorded"
+    qa_variant_created = False
+    qa_used_id = current_qa_id
+
+    if action == "use_suggested":
+        answer_text = existing_suggested_answer
+        if not answer_text:
+            redirect_url = url_for(
+                "tc_transaction",
+                transaction_id=transaction_id,
+                doc_notice="No suggested answer is available for this message.",
+                doc_notice_type="warning",
+            )
+            return redirect(f"{redirect_url}#communications")
+        if qa_used_id:
+            increment_common_qa_reuse(qa_used_id, increment_by=1)
+        event_type = "suggested_answer_used"
+    elif action == "send_custom":
+        answer_text = (request.form.get("answer_text") or "").strip()
+        if not answer_text:
+            redirect_url = url_for(
+                "tc_transaction",
+                transaction_id=transaction_id,
+                doc_notice="Answer text is required.",
+                doc_notice_type="warning",
+            )
+            return redirect(f"{redirect_url}#communications")
+
+        if qa_used_id and existing_suggested_answer:
+            similarity = answer_similarity(existing_suggested_answer, answer_text)
+            if similarity < common_qa_variant_similarity_threshold():
+                variant_row = create_common_qa_entry(
+                    question_text=question_text,
+                    answer_text=answer_text,
+                    transaction_id=transaction_id,
+                    asked_by_party=inbound_row.get("sender_role") or "agent",
+                    category=category,
+                    force_new=True,
+                )
+                if variant_row:
+                    qa_used_id = variant_row["id"]
+                qa_variant_created = True
+                event_type = "suggested_answer_variant_created"
+            else:
+                update_common_qa_entry(
+                    common_qa_id=qa_used_id,
+                    answer_text=answer_text,
+                    category=category,
+                )
+                increment_common_qa_reuse(qa_used_id, increment_by=1)
+                event_type = "suggested_answer_used"
+        else:
+            created = create_common_qa_entry(
+                question_text=question_text,
+                answer_text=answer_text,
+                transaction_id=transaction_id,
+                asked_by_party=inbound_row.get("sender_role") or "agent",
+                category=category,
+                force_new=True,
+            )
+            if created:
+                qa_used_id = created["id"]
+            event_type = "manual_answer_recorded"
+    else:
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Unknown reply action.",
+            doc_notice_type="warning",
+        )
+        return redirect(f"{redirect_url}#communications")
+
+    reply_message_id = send_common_qa_reply_email(
+        transaction=transaction,
+        to_email=sender_email,
+        original_subject=inbound_row.get("subject"),
+        answer_text=answer_text,
+        auto_sent=False,
+    )
+    if not reply_message_id:
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Could not send reply email.",
+            doc_notice_type="error",
+        )
+        return redirect(f"{redirect_url}#communications")
+
+    execute_query(
+        """
+        UPDATE inbound_email_messages
+        SET qa_match_id = COALESCE(%s, qa_match_id),
+            qa_answer_text = %s,
+            qa_used = TRUE,
+            qa_used_at = CURRENT_TIMESTAMP,
+            qa_variant_created = qa_variant_created OR %s,
+            reply_message_id = %s,
+            replied_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE transaction_id = %s
+          AND id = %s
+        """,
+        (
+            qa_used_id,
+            answer_text,
+            qa_variant_created,
+            reply_message_id,
+            transaction_id,
+            message_id,
+        ),
+    )
+
+    log_common_qa_event(
+        event_type=event_type,
+        common_qa_id=qa_used_id,
+        transaction_id=transaction_id,
+        channel="email",
+        asked_by_party=inbound_row.get("sender_role") or "agent",
+        question_text=question_text,
+        answer_text=answer_text,
+        similarity_score=inbound_row.get("qa_similarity"),
+        confidence_score=inbound_row.get("qa_confidence"),
+        auto_answer=False,
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'email', %s, %s, %s, %s)
+        """,
+        (
+            transaction_id,
+            inbound_row.get("sender_role") or "external",
+            sender_email,
+            "Margaret replied to inbound email",
+            (
+                f"message_id={message_id} qa_id={qa_used_id or 'n/a'} "
+                f"variant_created={qa_variant_created} reply_message_id={reply_message_id}"
+            ),
+        ),
+    )
+
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice="Inbound reply sent and Q&A learning updated.",
+        doc_notice_type="success",
+    )
+    return redirect(f"{redirect_url}#communications")
+
+
 @app.route("/tc/transaction/<int:transaction_id>/inbound-email/<int:message_id>/override", methods=["POST"])
 @login_required
 def override_inbound_email_routing(transaction_id, message_id):
@@ -11707,6 +12296,104 @@ def sms_webhook():
                 )
         else:
             response.message("No active transactions found. Margaret will call you tomorrow morning to help.")
+        return str(response)
+
+    qa_decision = evaluate_common_qa_decision(
+        question_text=incoming_msg_raw,
+        asked_by_party="agent",
+        category_hint=infer_common_qa_category(incoming_msg_raw),
+    )
+    qa_match = qa_decision.get("match") or {}
+    sms_txn_rows = execute_query(
+        """
+        SELECT id, property_address
+        FROM transactions
+        WHERE RIGHT(REGEXP_REPLACE(agent_phone, '[^0-9]', '', 'g'), 10) = %s
+          AND status IN ('NEEDS_MARGARET_REVIEW', 'ACTIVE')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (re.sub(r"\D", "", from_number)[-10:],),
+        fetch=True,
+    ) or []
+    sms_transaction = sms_txn_rows[0] if sms_txn_rows else None
+    if qa_decision.get("decision") == "auto_answer" and qa_match.get("id") and qa_match.get("answer_text"):
+        answer_text = (qa_match.get("answer_text") or "").strip()
+        if "- maverick tc" not in answer_text.lower():
+            answer_text = f"{answer_text}\n- Maverick TC"
+        increment_common_qa_reuse(qa_match["id"], increment_by=1)
+        log_common_qa_event(
+            event_type="auto_answer_sent",
+            common_qa_id=qa_match["id"],
+            transaction_id=(sms_transaction or {}).get("id"),
+            channel="sms",
+            asked_by_party="agent",
+            question_text=incoming_msg_raw,
+            answer_text=answer_text,
+            similarity_score=qa_decision.get("similarity"),
+            confidence_score=qa_decision.get("confidence"),
+            auto_answer=True,
+        )
+        if sms_transaction:
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'text', 'agent', %s, %s, %s)
+                """,
+                (
+                    sms_transaction["id"],
+                    from_number or "Agent",
+                    "Smart Q&A auto-answer sent (SMS)",
+                    (
+                        f"qa_id={qa_match['id']} confidence={float(qa_decision.get('confidence') or 0):.2f} "
+                        f"question={(incoming_msg_raw or '')[:140]}"
+                    ),
+                ),
+            )
+        response.message(answer_text[:1500])
+        return str(response)
+
+    if qa_decision.get("decision") == "suggest" and qa_match.get("id"):
+        margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE") or "")
+        if margaret_phone:
+            property_label = (sms_transaction or {}).get("property_address") or "unknown property"
+            send_sms(
+                margaret_phone,
+                (
+                    f"Q&A suggestion ({float(qa_decision.get('confidence') or 0):.0f}%) "
+                    f"for {property_label} from {from_number or 'unknown'}: "
+                    f"\"{(incoming_msg_raw or '')[:110]}\". Review in Maverick. - Maverick TC"
+                )[:320],
+            )
+        log_common_qa_event(
+            event_type="suggested_answer_available",
+            common_qa_id=qa_match["id"],
+            transaction_id=(sms_transaction or {}).get("id"),
+            channel="sms",
+            asked_by_party="agent",
+            question_text=incoming_msg_raw,
+            answer_text=qa_match.get("answer_text"),
+            similarity_score=qa_decision.get("similarity"),
+            confidence_score=qa_decision.get("confidence"),
+            auto_answer=False,
+        )
+        if sms_transaction:
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'text', 'agent', %s, %s, %s)
+                """,
+                (
+                    sms_transaction["id"],
+                    from_number or "Agent",
+                    "Smart Q&A suggestion flagged for Margaret (SMS)",
+                    (
+                        f"qa_id={qa_match['id']} confidence={float(qa_decision.get('confidence') or 0):.2f} "
+                        f"question={(incoming_msg_raw or '')[:140]}"
+                    ),
+                ),
+            )
+        response.message("Thanks for your question. Margaret will follow up shortly. - Maverick TC")
         return str(response)
 
     response.message(
