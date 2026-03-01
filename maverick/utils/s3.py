@@ -107,6 +107,23 @@ def get_presigned_url(s3_key, expiration=3600, download_filename=None):
         return None
 
 
+def download_file(s3_key, local_path):
+    """
+    Download an S3 object to a local file path.
+
+    Returns: True if successful, False otherwise.
+    """
+    try:
+        if not DOCUMENTS_BUCKET:
+            print("S3 download error: AWS_S3_BUCKET_DOCUMENTS is not configured")
+            return False
+        _get_s3_client().download_file(DOCUMENTS_BUCKET, s3_key, local_path)
+        return True
+    except Exception as exc:
+        print(f"S3 download error: {exc}")
+        return False
+
+
 def log_document_access(document_id, user_name, user_type, action, ip_address):
     """Log document access for audit trail."""
     from utils.db import execute_query

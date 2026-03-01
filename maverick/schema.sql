@@ -235,6 +235,40 @@ CREATE TABLE predictive_alerts (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE extracted_contract_data (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+
+    -- Source address entered by agent
+    submitted_property_address TEXT,
+
+    -- OCR extracted values
+    extracted_effective_date DATE,
+    extracted_closing_date DATE,
+    extracted_buyer_names TEXT,
+    extracted_seller_names TEXT,
+    extracted_property_address TEXT,
+    property_address_match BOOLEAN,
+    raw_text_excerpt TEXT,
+
+    -- Extraction status tracking
+    extraction_status VARCHAR(32) DEFAULT 'pending',
+    extraction_error TEXT,
+
+    -- Margaret confirmation payload
+    confirmed BOOLEAN DEFAULT FALSE,
+    confirmed_effective_date DATE,
+    confirmed_closing_date DATE,
+    confirmed_buyer_names TEXT,
+    confirmed_seller_names TEXT,
+    confirmed_property_address TEXT,
+    confirmed_at TIMESTAMP,
+    confirmed_by VARCHAR(100),
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -252,3 +286,4 @@ CREATE INDEX idx_access_logs_document ON document_access_logs(document_id);
 CREATE INDEX idx_access_logs_timestamp ON document_access_logs(timestamp);
 CREATE UNIQUE INDEX idx_predictive_alerts_txn_alert_date ON predictive_alerts(transaction_id, alert_date);
 CREATE INDEX idx_predictive_alerts_open ON predictive_alerts(transaction_id, resolved_date);
+CREATE UNIQUE INDEX idx_extracted_contract_data_transaction ON extracted_contract_data(transaction_id);

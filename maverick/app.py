@@ -1,5 +1,6 @@
 import os
 import re
+import tempfile
 from datetime import date, datetime, timedelta
 from functools import wraps
 from threading import Thread
@@ -15,7 +16,7 @@ from werkzeug.utils import secure_filename
 from config import Config
 from utils.db import execute_insert, execute_query
 from utils.payments import calculate_payment_breakdown
-from utils.s3 import get_presigned_url, log_document_access, upload_contract, upload_document
+from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 
 load_dotenv()
@@ -102,6 +103,335 @@ TASK_BLUEPRINTS = (
 
 LENDER_DEADLINE_TYPES = {"financing_approval"}
 TITLE_DEADLINE_TYPES = {"title_commitment", "buyer_title_objection", "closing"}
+
+DATE_CAPTURE_PATTERN = (
+    r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|"
+    r"[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4})"
+)
+EFFECTIVE_DATE_PATTERNS = (
+    rf"effective\s+date\s*[:\-]?\s*{DATE_CAPTURE_PATTERN}",
+    rf"date\s+of\s+effective\s*[:\-]?\s*{DATE_CAPTURE_PATTERN}",
+)
+CLOSING_DATE_PATTERNS = (
+    rf"closing\s+date\s*[:\-]?\s*{DATE_CAPTURE_PATTERN}",
+    rf"date\s+of\s+closing\s*[:\-]?\s*{DATE_CAPTURE_PATTERN}",
+)
+BUYER_PATTERNS = (
+    r"buyer(?:\(s\))?\s*[:\-]\s*([A-Za-z0-9 ,.&'/-]{3,160})",
+    r"buyer(?:\(s\))?\s+name\s*[:\-]\s*([A-Za-z0-9 ,.&'/-]{3,160})",
+)
+SELLER_PATTERNS = (
+    r"seller(?:\(s\))?\s*[:\-]\s*([A-Za-z0-9 ,.&'/-]{3,160})",
+    r"seller(?:\(s\))?\s+name\s*[:\-]\s*([A-Za-z0-9 ,.&'/-]{3,160})",
+)
+PROPERTY_ADDRESS_PATTERNS = (
+    r"property\s+address\s*[:\-]\s*([^\n]{8,220})",
+    r"address\s+of\s+property\s*[:\-]\s*([^\n]{8,220})",
+)
+DATE_PARSE_FORMATS = (
+    "%m/%d/%Y",
+    "%m-%d-%Y",
+    "%m/%d/%y",
+    "%m-%d-%y",
+    "%B %d, %Y",
+    "%b %d, %Y",
+    "%B %d %Y",
+    "%b %d %Y",
+)
+
+
+def normalize_address(value):
+    """Normalize address strings for lightweight equality checks."""
+    value = (value or "").lower()
+    value = value.replace("street", "st").replace("avenue", "ave").replace("road", "rd")
+    value = value.replace("drive", "dr").replace("lane", "ln").replace("court", "ct")
+    return re.sub(r"[^a-z0-9]", "", value)
+
+
+def addresses_match(first, second):
+    """Return True/False for likely address match, or None when unavailable."""
+    if not first or not second:
+        return None
+    normalized_first = normalize_address(first)
+    normalized_second = normalize_address(second)
+    if not normalized_first or not normalized_second:
+        return None
+    return normalized_first in normalized_second or normalized_second in normalized_first
+
+
+def cleanup_name_candidate(raw_value):
+    """Sanitize extracted buyer/seller text to remove trailing noise."""
+    value = (raw_value or "").strip(" ,.;:-")
+    value = re.sub(r"\s{2,}", " ", value)
+    value = re.split(r"\s+(?:phone|email|address|date)\s*[:\-]", value, maxsplit=1, flags=re.IGNORECASE)[0]
+    return value[:180].strip(" ,.;:-")
+
+
+def cleanup_address_candidate(raw_value):
+    """Sanitize extracted address candidate text."""
+    value = (raw_value or "").strip(" ,.;:-")
+    value = re.sub(r"\s{2,}", " ", value)
+    value = re.split(r"\s+(?:county|lot|block)\b", value, maxsplit=1, flags=re.IGNORECASE)[0]
+    return value[:240].strip(" ,.;:-")
+
+
+def parse_contract_date(raw_value):
+    """Parse a date string from OCR text using common contract formats."""
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+
+    value = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+", " ", value).strip()
+
+    for fmt in DATE_PARSE_FORMATS:
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def extract_pattern_value(text, patterns, cleanup_func=None):
+    """Search OCR text with regex patterns and return first cleaned match."""
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        value = (match.group(1) or "").strip()
+        if cleanup_func:
+            value = cleanup_func(value)
+        if value:
+            return value
+    return ""
+
+
+def extract_contract_fields_from_text(text):
+    """Extract key contract fields from OCR text."""
+    lower_text = text.lower()
+
+    extracted_effective = None
+    for pattern in EFFECTIVE_DATE_PATTERNS:
+        match = re.search(pattern, lower_text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        extracted_effective = parse_contract_date(match.group(1))
+        if extracted_effective:
+            break
+
+    extracted_closing = None
+    for pattern in CLOSING_DATE_PATTERNS:
+        match = re.search(pattern, lower_text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        extracted_closing = parse_contract_date(match.group(1))
+        if extracted_closing:
+            break
+
+    buyer_names = extract_pattern_value(text, BUYER_PATTERNS, cleanup_func=cleanup_name_candidate)
+    seller_names = extract_pattern_value(text, SELLER_PATTERNS, cleanup_func=cleanup_name_candidate)
+    property_address = extract_pattern_value(
+        text,
+        PROPERTY_ADDRESS_PATTERNS,
+        cleanup_func=cleanup_address_candidate,
+    )
+
+    return {
+        "effective_date": extracted_effective,
+        "closing_date": extracted_closing,
+        "buyer_names": buyer_names,
+        "seller_names": seller_names,
+        "property_address": property_address,
+    }
+
+
+def extract_text_from_contract_pdf(pdf_path, max_pages=3):
+    """Run OCR over first N pages of a contract PDF."""
+    from pdf2image import convert_from_path
+    import pytesseract
+
+    images = convert_from_path(pdf_path, first_page=1, last_page=max_pages)
+    page_text = []
+    for page_index, image in enumerate(images, start=1):
+        text = pytesseract.image_to_string(image) or ""
+        page_text.append(f"\n--- PAGE {page_index} ---\n{text}")
+    return "\n".join(page_text).strip()
+
+
+def save_extracted_contract_data(
+    transaction_id,
+    submitted_property_address,
+    extracted_fields=None,
+    status="success",
+    error_message=None,
+    raw_text_excerpt="",
+):
+    """Insert/update extracted OCR payload for a transaction."""
+    ensure_extracted_contract_data_table()
+    extracted_fields = extracted_fields or {}
+    extracted_property = extracted_fields.get("property_address") or ""
+    property_match = addresses_match(extracted_property, submitted_property_address)
+    if extracted_property and submitted_property_address and property_match is None:
+        property_match = False
+
+    execute_query(
+        """
+        INSERT INTO extracted_contract_data (
+            transaction_id,
+            submitted_property_address,
+            extracted_effective_date,
+            extracted_closing_date,
+            extracted_buyer_names,
+            extracted_seller_names,
+            extracted_property_address,
+            property_address_match,
+            raw_text_excerpt,
+            extraction_status,
+            extraction_error,
+            confirmed,
+            confirmed_effective_date,
+            confirmed_closing_date,
+            confirmed_buyer_names,
+            confirmed_seller_names,
+            confirmed_property_address,
+            confirmed_at,
+            confirmed_by,
+            updated_at
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            FALSE, NULL, NULL, NULL, NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP
+        )
+        ON CONFLICT (transaction_id)
+        DO UPDATE SET
+            submitted_property_address = EXCLUDED.submitted_property_address,
+            extracted_effective_date = EXCLUDED.extracted_effective_date,
+            extracted_closing_date = EXCLUDED.extracted_closing_date,
+            extracted_buyer_names = EXCLUDED.extracted_buyer_names,
+            extracted_seller_names = EXCLUDED.extracted_seller_names,
+            extracted_property_address = EXCLUDED.extracted_property_address,
+            property_address_match = EXCLUDED.property_address_match,
+            raw_text_excerpt = EXCLUDED.raw_text_excerpt,
+            extraction_status = EXCLUDED.extraction_status,
+            extraction_error = EXCLUDED.extraction_error,
+            confirmed = FALSE,
+            confirmed_effective_date = NULL,
+            confirmed_closing_date = NULL,
+            confirmed_buyer_names = NULL,
+            confirmed_seller_names = NULL,
+            confirmed_property_address = NULL,
+            confirmed_at = NULL,
+            confirmed_by = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            transaction_id,
+            submitted_property_address or "",
+            extracted_fields.get("effective_date"),
+            extracted_fields.get("closing_date"),
+            extracted_fields.get("buyer_names") or None,
+            extracted_fields.get("seller_names") or None,
+            extracted_property or None,
+            property_match,
+            (raw_text_excerpt or "")[:4000] or None,
+            status,
+            (error_message or "")[:500] or None,
+        ),
+    )
+
+
+def run_contract_extraction(transaction_id, s3_key, submitted_property_address):
+    """Download uploaded contract from S3, OCR it, and persist extraction output."""
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
+            temp_path = tmp_file.name
+
+        if not download_file(s3_key, temp_path):
+            save_extracted_contract_data(
+                transaction_id=transaction_id,
+                submitted_property_address=submitted_property_address,
+                status="failed",
+                error_message="Could not download PDF from S3 for OCR.",
+            )
+            return
+
+        raw_text = extract_text_from_contract_pdf(temp_path, max_pages=3)
+        extracted_fields = extract_contract_fields_from_text(raw_text)
+        save_extracted_contract_data(
+            transaction_id=transaction_id,
+            submitted_property_address=submitted_property_address,
+            extracted_fields=extracted_fields,
+            status="success",
+            error_message=None,
+            raw_text_excerpt=raw_text,
+        )
+    except Exception as exc:
+        save_extracted_contract_data(
+            transaction_id=transaction_id,
+            submitted_property_address=submitted_property_address,
+            status="failed",
+            error_message=str(exc),
+        )
+        print(f"Contract OCR extraction error (txn#{transaction_id}): {exc}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def run_contract_extraction_async(transaction_id, s3_key, submitted_property_address):
+    """Run OCR extraction in a background thread."""
+
+    def _extract():
+        try:
+            run_contract_extraction(transaction_id, s3_key, submitted_property_address)
+        except Exception as exc:
+            print(f"Async extraction error (txn#{transaction_id}): {exc}")
+
+    Thread(
+        target=_extract,
+        daemon=True,
+    ).start()
+
+
+def ensure_extracted_contract_data_table():
+    """Ensure extracted_contract_data table exists for OCR workflow."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS extracted_contract_data (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+            submitted_property_address TEXT,
+            extracted_effective_date DATE,
+            extracted_closing_date DATE,
+            extracted_buyer_names TEXT,
+            extracted_seller_names TEXT,
+            extracted_property_address TEXT,
+            property_address_match BOOLEAN,
+            raw_text_excerpt TEXT,
+            extraction_status VARCHAR(32) DEFAULT 'pending',
+            extraction_error TEXT,
+            confirmed BOOLEAN DEFAULT FALSE,
+            confirmed_effective_date DATE,
+            confirmed_closing_date DATE,
+            confirmed_buyer_names TEXT,
+            confirmed_seller_names TEXT,
+            confirmed_property_address TEXT,
+            confirmed_at TIMESTAMP,
+            confirmed_by VARCHAR(100),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_extracted_contract_data_transaction
+        ON extracted_contract_data(transaction_id)
+        """
+    )
 
 
 def normalize_phone(phone_number):
@@ -469,6 +799,54 @@ def get_transaction_or_none(transaction_id):
         fetch=True,
     ) or []
     return rows[0] if rows else None
+
+
+def get_extracted_contract_data_or_none(transaction_id):
+    """Fetch OCR extraction payload for one transaction."""
+    ensure_extracted_contract_data_table()
+    rows = execute_query(
+        """
+        SELECT transaction_id, submitted_property_address,
+               extracted_effective_date, extracted_closing_date,
+               extracted_buyer_names, extracted_seller_names, extracted_property_address,
+               property_address_match, raw_text_excerpt,
+               extraction_status, extraction_error,
+               confirmed, confirmed_effective_date, confirmed_closing_date,
+               confirmed_buyer_names, confirmed_seller_names, confirmed_property_address,
+               confirmed_at, confirmed_by, created_at, updated_at
+        FROM extracted_contract_data
+        WHERE transaction_id = %s
+        LIMIT 1
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def extraction_status_label(status_value):
+    """Return display-friendly status text for extraction records."""
+    status = (status_value or "").strip().lower()
+    if status == "success":
+        return "Extracted"
+    if status == "failed":
+        return "Extraction failed"
+    if status == "manual":
+        return "Manual entry"
+    if status == "pending":
+        return "Pending extraction"
+    return "Pending extraction"
+
+
+def extraction_prefill_value(extracted, confirmed_key, extracted_key, fallback=""):
+    """Choose confirmed value first, then extracted value, then fallback."""
+    if not extracted:
+        return fallback
+    if extracted.get("confirmed") and extracted.get(confirmed_key) not in (None, ""):
+        return extracted.get(confirmed_key)
+    if extracted.get(extracted_key) not in (None, ""):
+        return extracted.get(extracted_key)
+    return fallback
 
 
 @app.route("/")
@@ -1013,6 +1391,21 @@ def tc_transaction(transaction_id):
         transaction["created_at"].strftime("%b %d, %Y %I:%M %p") if transaction.get("created_at") else "Unknown"
     )
 
+    extracted_data = get_extracted_contract_data_or_none(transaction_id)
+    prefill_effective = extraction_prefill_value(extracted_data, "confirmed_effective_date", "extracted_effective_date")
+    prefill_closing = extraction_prefill_value(extracted_data, "confirmed_closing_date", "extracted_closing_date")
+    prefill_buyer = extraction_prefill_value(extracted_data, "confirmed_buyer_names", "extracted_buyer_names", "")
+    prefill_seller = extraction_prefill_value(extracted_data, "confirmed_seller_names", "extracted_seller_names", "")
+
+    if prefill_effective and not transaction.get("effective_date"):
+        transaction["effective_date"] = prefill_effective
+    if prefill_closing and not transaction.get("closing_date"):
+        transaction["closing_date"] = prefill_closing
+    if prefill_buyer and not transaction.get("buyer_name"):
+        transaction["buyer_name"] = prefill_buyer
+    if prefill_seller and not transaction.get("seller_name"):
+        transaction["seller_name"] = prefill_seller
+
     date_fields = (
         "effective_date",
         "earnest_due_date",
@@ -1023,6 +1416,35 @@ def tc_transaction(transaction_id):
     for field_name in date_fields:
         value = transaction.get(field_name)
         transaction[f"{field_name}_input"] = value.isoformat() if value else ""
+
+    extracted_context = {
+        "exists": bool(extracted_data),
+        "status": extracted_data.get("extraction_status") if extracted_data else "pending",
+        "status_label": extraction_status_label(extracted_data.get("extraction_status") if extracted_data else "pending"),
+        "error": extracted_data.get("extraction_error") if extracted_data else None,
+        "confirmed": bool(extracted_data.get("confirmed")) if extracted_data else False,
+        "confirmed_at_label": (
+            extracted_data["confirmed_at"].strftime("%b %d, %Y %I:%M %p")
+            if extracted_data and extracted_data.get("confirmed_at")
+            else ""
+        ),
+        "confirmed_by": extracted_data.get("confirmed_by") if extracted_data else "",
+        "raw_text_excerpt": extracted_data.get("raw_text_excerpt") if extracted_data else "",
+        "agent_property_address": (extracted_data.get("submitted_property_address") if extracted_data else None)
+        or transaction.get("property_address")
+        or "",
+        "property_address_match": extracted_data.get("property_address_match") if extracted_data else None,
+        "effective_date_input": (prefill_effective.isoformat() if prefill_effective else ""),
+        "closing_date_input": (prefill_closing.isoformat() if prefill_closing else ""),
+        "buyer_names_input": prefill_buyer,
+        "seller_names_input": prefill_seller,
+        "property_address_input": extraction_prefill_value(
+            extracted_data,
+            "confirmed_property_address",
+            "extracted_property_address",
+            transaction.get("property_address") or "",
+        ),
+    }
 
     documents = execute_query(
         """
@@ -1127,6 +1549,7 @@ def tc_transaction(transaction_id):
         task_total=task_total,
         communications=communications,
         payment_context=payment_context,
+        extracted_data=extracted_context,
     )
 
 
@@ -1171,6 +1594,133 @@ def download_transaction_pdf(transaction_id):
     return redirect(url)
 
 
+@app.route("/tc/transaction/<int:transaction_id>/confirm-extraction", methods=["POST"])
+@login_required
+def confirm_extraction(transaction_id):
+    """Confirm (and optionally edit) OCR extracted contract fields."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+    if transaction.get("status") in {"COMPLETED", "CANCELLED"}:
+        return "This transaction cannot be modified.", 400
+
+    try:
+        confirmed_effective = parse_required_date(
+            request.form.get("extracted_effective_date"),
+            "Effective date",
+        )
+        confirmed_closing = parse_required_date(
+            request.form.get("extracted_closing_date"),
+            "Closing date",
+        )
+    except ValueError as exc:
+        return str(exc), 400
+
+    confirmed_buyer = (request.form.get("extracted_buyer_names") or "").strip()
+    confirmed_seller = (request.form.get("extracted_seller_names") or "").strip()
+    confirmed_property = (request.form.get("extracted_property_address") or "").strip()
+
+    if not confirmed_buyer:
+        return "Buyer name(s) are required for extraction confirmation.", 400
+    if not confirmed_seller:
+        return "Seller name(s) are required for extraction confirmation.", 400
+    if not confirmed_property:
+        return "Property address is required for extraction confirmation.", 400
+    if confirmed_closing < confirmed_effective:
+        return "Closing date cannot be before effective date.", 400
+
+    existing = get_extracted_contract_data_or_none(transaction_id) or {}
+    extraction_status = "success" if existing.get("extraction_status") == "success" else "manual"
+    submitted_property_address = existing.get("submitted_property_address") or transaction.get("property_address") or ""
+    property_match = addresses_match(confirmed_property, submitted_property_address)
+    if property_match is None and submitted_property_address:
+        property_match = False
+
+    execute_query(
+        """
+        INSERT INTO extracted_contract_data (
+            transaction_id,
+            submitted_property_address,
+            extracted_effective_date,
+            extracted_closing_date,
+            extracted_buyer_names,
+            extracted_seller_names,
+            extracted_property_address,
+            property_address_match,
+            raw_text_excerpt,
+            extraction_status,
+            extraction_error,
+            confirmed,
+            confirmed_effective_date,
+            confirmed_closing_date,
+            confirmed_buyer_names,
+            confirmed_seller_names,
+            confirmed_property_address,
+            confirmed_at,
+            confirmed_by,
+            updated_at
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL,
+            TRUE, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s, CURRENT_TIMESTAMP
+        )
+        ON CONFLICT (transaction_id)
+        DO UPDATE SET
+            submitted_property_address = EXCLUDED.submitted_property_address,
+            extracted_effective_date = EXCLUDED.extracted_effective_date,
+            extracted_closing_date = EXCLUDED.extracted_closing_date,
+            extracted_buyer_names = EXCLUDED.extracted_buyer_names,
+            extracted_seller_names = EXCLUDED.extracted_seller_names,
+            extracted_property_address = EXCLUDED.extracted_property_address,
+            property_address_match = EXCLUDED.property_address_match,
+            raw_text_excerpt = EXCLUDED.raw_text_excerpt,
+            extraction_status = EXCLUDED.extraction_status,
+            extraction_error = NULL,
+            confirmed = TRUE,
+            confirmed_effective_date = EXCLUDED.confirmed_effective_date,
+            confirmed_closing_date = EXCLUDED.confirmed_closing_date,
+            confirmed_buyer_names = EXCLUDED.confirmed_buyer_names,
+            confirmed_seller_names = EXCLUDED.confirmed_seller_names,
+            confirmed_property_address = EXCLUDED.confirmed_property_address,
+            confirmed_at = CURRENT_TIMESTAMP,
+            confirmed_by = EXCLUDED.confirmed_by,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            transaction_id,
+            submitted_property_address,
+            existing.get("extracted_effective_date") or confirmed_effective,
+            existing.get("extracted_closing_date") or confirmed_closing,
+            existing.get("extracted_buyer_names") or confirmed_buyer,
+            existing.get("extracted_seller_names") or confirmed_seller,
+            existing.get("extracted_property_address") or confirmed_property,
+            property_match,
+            existing.get("raw_text_excerpt"),
+            extraction_status,
+            confirmed_effective,
+            confirmed_closing,
+            confirmed_buyer,
+            confirmed_seller,
+            confirmed_property,
+            session.get("tc_username", "margaret"),
+        ),
+    )
+
+    execute_query(
+        """
+        UPDATE transactions
+        SET effective_date = %s,
+            closing_date = %s,
+            buyer_name = %s,
+            seller_name = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (confirmed_effective, confirmed_closing, confirmed_buyer, confirmed_seller, transaction_id),
+    )
+
+    return redirect(f"{url_for('tc_transaction', transaction_id=transaction_id)}#review-details")
+
+
 @app.route("/tc/transaction/<int:transaction_id>/approve", methods=["POST"])
 @login_required
 def approve_transaction(transaction_id):
@@ -1181,28 +1731,36 @@ def approve_transaction(transaction_id):
     if transaction.get("status") in {"COMPLETED", "CANCELLED"}:
         return "This transaction cannot be approved.", 400
 
+    extraction = get_extracted_contract_data_or_none(transaction_id)
+    if not extraction or not extraction.get("confirmed"):
+        return "Please confirm extracted contract data before activating this transaction.", 400
+
+    effective_date_value = extraction.get("confirmed_effective_date")
+    closing_date_value = extraction.get("confirmed_closing_date")
+    buyer_name = (extraction.get("confirmed_buyer_names") or "").strip()
+    seller_name = (extraction.get("confirmed_seller_names") or "").strip()
+
+    if not effective_date_value or not closing_date_value:
+        return "Confirmed extraction must include effective and closing dates.", 400
+    if not buyer_name:
+        return "Confirmed extraction must include buyer name(s).", 400
+    if not seller_name:
+        return "Confirmed extraction must include seller name(s).", 400
+
     try:
-        effective_date_value = parse_required_date(request.form.get("effective_date"), "Effective date")
         earnest_due_date_value = parse_required_date(request.form.get("earnest_due_date"), "Earnest money due")
         option_period_end_value = parse_required_date(request.form.get("option_period_end_date"), "Option period end")
         financing_approval_value = parse_required_date(
             request.form.get("financing_approval_date"), "Financing approval"
         )
-        closing_date_value = parse_required_date(request.form.get("closing_date"), "Closing date")
     except ValueError as exc:
         return str(exc), 400
 
-    buyer_name = request.form.get("buyer_name", "").strip()
     buyer_phone = normalize_phone(request.form.get("buyer_phone", "").strip())
-    seller_name = request.form.get("seller_name", "").strip()
     seller_phone = normalize_phone(request.form.get("seller_phone", "").strip())
     lender_name = request.form.get("lender_name", "").strip()
     title_company = request.form.get("title_company", "").strip()
 
-    if not buyer_name:
-        return "Buyer name is required.", 400
-    if not seller_name:
-        return "Seller name is required.", 400
     if not title_company:
         return "Title company is required.", 400
     if closing_date_value < effective_date_value:
@@ -1666,6 +2224,7 @@ def upload_contract_route():
         WHERE id = %s
         """
         execute_query(update_query, (s3_key, safe_filename, transaction_id))
+        run_contract_extraction_async(transaction_id, s3_key, property_address)
 
         confirmation_message = f"""Contract received for {property_address}!
 

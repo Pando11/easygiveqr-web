@@ -57,6 +57,74 @@
             </div>
         </div>
 
+        <div class="form-section extraction-section">
+            <h4>AI Contract Extraction</h4>
+            <p class="hint-text">
+                OCR runs on the first 3 pages of the uploaded contract. Review and confirm these values
+                before activating the transaction.
+            </p>
+            <div class="badge-row">
+                <span class="tag tag-status">{{ extracted_data.status_label }}</span>
+                {% if extracted_data.confirmed %}
+                <span class="tag tag-confirmed">Confirmed{% if extracted_data.confirmed_by %} by {{ extracted_data.confirmed_by }}{% endif %}</span>
+                {% endif %}
+                {% if extracted_data.property_address_match is sameas true %}
+                <span class="tag tag-match">Address Match</span>
+                {% elif extracted_data.property_address_match is sameas false %}
+                <span class="tag tag-mismatch">Address Mismatch</span>
+                {% endif %}
+            </div>
+
+            {% if extracted_data.error %}
+            <div class="warning-box">
+                Extraction warning: {{ extracted_data.error }}
+            </div>
+            {% endif %}
+
+            <p><strong>Agent-entered address:</strong> {{ extracted_data.agent_property_address }}</p>
+            {% if extracted_data.confirmed and extracted_data.confirmed_at_label %}
+            <p><strong>Last confirmed:</strong> {{ extracted_data.confirmed_at_label }}</p>
+            {% endif %}
+
+            <form method="post" action="{{ url_for('confirm_extraction', transaction_id=transaction.id) }}"
+                  class="stack-form compact-form">
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label for="extracted_effective_date">Effective Date *</label>
+                        <input type="date" id="extracted_effective_date" name="extracted_effective_date"
+                               value="{{ extracted_data.effective_date_input }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="extracted_closing_date">Closing Date *</label>
+                        <input type="date" id="extracted_closing_date" name="extracted_closing_date"
+                               value="{{ extracted_data.closing_date_input }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="extracted_buyer_names">Buyer Name(s) *</label>
+                        <input type="text" id="extracted_buyer_names" name="extracted_buyer_names"
+                               value="{{ extracted_data.buyer_names_input }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="extracted_seller_names">Seller Name(s) *</label>
+                        <input type="text" id="extracted_seller_names" name="extracted_seller_names"
+                               value="{{ extracted_data.seller_names_input }}" required>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="extracted_property_address">Property Address *</label>
+                    <textarea id="extracted_property_address" name="extracted_property_address" rows="2" required>{{ extracted_data.property_address_input }}</textarea>
+                </div>
+                <button type="submit" class="btn btn-secondary">Confirm Extracted Data</button>
+            </form>
+
+            {% if extracted_data.raw_text_excerpt %}
+            <details>
+                <summary class="summary-btn">Preview OCR text excerpt</summary>
+                <pre class="ocr-preview">{{ extracted_data.raw_text_excerpt[:1200] }}</pre>
+            </details>
+            {% endif %}
+        </div>
+
         <form method="post" action="{{ url_for('approve_transaction', transaction_id=transaction.id) }}" class="stack-form">
             <div class="form-section">
                 <h4>Enter Contract Dates</h4>
@@ -122,7 +190,14 @@
                 </div>
             </div>
 
-            <button type="submit" class="btn approve-btn">APPROVE & ACTIVATE TRANSACTION</button>
+            {% if not extracted_data.confirmed %}
+            <div class="warning-box">
+                Confirm extracted contract data above before approving and creating deadlines.
+            </div>
+            {% endif %}
+            <button type="submit" class="btn approve-btn" {% if not extracted_data.confirmed %}disabled{% endif %}>
+                APPROVE & ACTIVATE TRANSACTION
+            </button>
         </form>
     </div>
 </section>
@@ -502,6 +577,26 @@
     color: #075985;
 }
 
+.tag-status {
+    background: #e2e8f0;
+    color: #1e293b;
+}
+
+.tag-confirmed {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.tag-match {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.tag-mismatch {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
 .stack-form {
     display: flex;
     flex-direction: column;
@@ -549,6 +644,24 @@
     margin-top: 6px;
     color: #64748b;
     font-size: 13px;
+}
+
+.extraction-section {
+    margin-bottom: 12px;
+}
+
+.ocr-preview {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 8px;
+    background: #f8fafc;
+    color: #334155;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
 }
 
 .approve-btn {
