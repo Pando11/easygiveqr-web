@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Document Reminder</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 22px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#0f766e;">Maverick TC - Gentle Reminder</h2>
+                <p style="margin:8px 0 0; color:#334155;">Property: {{ property_address }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 22px;">
+                <p style="margin:0 0 14px;">
+                    Friendly follow-up on this pending item:
+                </p>
+                <p style="margin:0 0 14px; font-size:18px; font-weight:700; color:#0f172a;">
+                    {{ document_label }}
+                </p>
+                <p style="margin:0 0 14px;">
+                    Closing date: <strong>{{ closing_date_label }}</strong>
+                    {% if days_to_close >= 0 %}
+                    ({{ days_to_close }} day{{ "" if days_to_close == 1 else "s" }} remaining)
+                    {% endif %}
+                </p>
+                <p style="margin:0 0 14px;">
+                    We appreciate your help getting this in today so the file stays on track.
+                </p>
+                <p style="margin:0;">
+                    Thank you,<br>
+                    Maverick TC on behalf of {{ agent_name }}
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:14px 22px; border-top:1px solid #e2e8f0; color:#64748b; font-size:13px;">
+                This is an automated reminder from Maverick TC.
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

@@ -283,6 +283,19 @@ CREATE TABLE commission_tracking (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE document_requests (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    document_type VARCHAR(100) NOT NULL,
+    requested_from VARCHAR(20) NOT NULL,
+    email_sent_date TIMESTAMP,
+    reminder_sent_date TIMESTAMP,
+    received_date TIMESTAMP,
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -303,3 +316,5 @@ CREATE INDEX idx_predictive_alerts_open ON predictive_alerts(transaction_id, res
 CREATE UNIQUE INDEX idx_extracted_contract_data_transaction ON extracted_contract_data(transaction_id);
 CREATE UNIQUE INDEX idx_commission_tracking_transaction ON commission_tracking(transaction_id);
 CREATE INDEX idx_commission_tracking_month ON commission_tracking(month);
+CREATE UNIQUE INDEX idx_document_requests_txn_doc_type ON document_requests(transaction_id, document_type);
+CREATE INDEX idx_document_requests_status ON document_requests(status);

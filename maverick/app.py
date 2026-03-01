@@ -566,6 +566,48 @@ def ensure_commission_tracking_table():
     )
 
 
+def ensure_document_requests_table():
+    """Ensure document request tracking table exists."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS document_requests (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            document_type VARCHAR(100) NOT NULL,
+            requested_from VARCHAR(20) NOT NULL,
+            email_sent_date TIMESTAMP,
+            reminder_sent_date TIMESTAMP,
+            received_date TIMESTAMP,
+            status VARCHAR(20) DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_document_requests_txn_doc_type
+        ON document_requests(transaction_id, document_type)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_document_requests_status
+        ON document_requests(status)
+        """
+    )
+
+
+def document_request_status_label(status_value):
+    """Readable status text for document request cards."""
+    normalized = (status_value or "").strip().lower()
+    if normalized == "received":
+        return "Received"
+    if normalized == "overdue":
+        return "Overdue"
+    return "Pending"
+
+
 def upsert_commission_tracking(transaction_id, referral_credit_override=None):
     """Create/update commission tracking row from current transaction state."""
     ensure_commission_tracking_table()
@@ -1925,7 +1967,35 @@ def tc_transaction(transaction_id):
         )
 
     uploaded_document_types = {doc["document_type"] for doc in documents}
+    if transaction.get("contract_s3_key"):
+        uploaded_document_types.add("contract")
     missing_document_types = sorted(REQUIRED_DOCUMENT_TYPES - uploaded_document_types)
+
+    ensure_document_requests_table()
+    document_requests = execute_query(
+        """
+        SELECT id, document_type, requested_from, email_sent_date, reminder_sent_date, received_date, status, updated_at
+        FROM document_requests
+        WHERE transaction_id = %s
+        ORDER BY
+            CASE status
+                WHEN 'overdue' THEN 0
+                WHEN 'pending' THEN 1
+                WHEN 'received' THEN 2
+                ELSE 3
+            END,
+            document_type ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    for req in document_requests:
+        req["status_label"] = document_request_status_label(req.get("status"))
+        req["document_label"] = (req.get("document_type") or "").replace("_", " ").title()
+        req["requested_from_label"] = (req.get("requested_from") or "").replace("_", " ").title()
+        req["email_sent_label"] = format_timestamp_label(req.get("email_sent_date"))
+        req["reminder_sent_label"] = format_timestamp_label(req.get("reminder_sent_date"))
+        req["received_label"] = format_timestamp_label(req.get("received_date"))
 
     timeline = execute_query(
         """
@@ -2007,6 +2077,7 @@ def tc_transaction(transaction_id):
         status=status,
         documents=documents,
         missing_document_types=missing_document_types,
+        document_requests=document_requests,
         timeline=timeline,
         task_preview=task_preview,
         task_total=task_total,
@@ -2459,6 +2530,20 @@ def upload_transaction_document(transaction_id):
     if not document_id:
         return "Failed to save document record.", 500
 
+    ensure_document_requests_table()
+    execute_query(
+        """
+        UPDATE document_requests
+        SET received_date = COALESCE(received_date, CURRENT_TIMESTAMP),
+            status = 'received',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE transaction_id = %s
+          AND document_type = %s
+          AND status <> 'received'
+        """,
+        (transaction_id, document_type),
+    )
+
     log_document_access(
         document_id=document_id,
         user_name=session.get("tc_username", "margaret"),
@@ -2758,6 +2843,19 @@ def upload_contract_route():
         WHERE id = %s
         """
         execute_query(update_query, (s3_key, safe_filename, transaction_id))
+        ensure_document_requests_table()
+        execute_query(
+            """
+            UPDATE document_requests
+            SET received_date = COALESCE(received_date, CURRENT_TIMESTAMP),
+                status = 'received',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE transaction_id = %s
+              AND document_type = 'contract'
+              AND status <> 'received'
+            """,
+            (transaction_id,),
+        )
         upsert_commission_tracking(transaction_id, referral_credit_override=0)
         run_contract_extraction_async(transaction_id, s3_key, property_address)
 
