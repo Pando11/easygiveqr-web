@@ -21,6 +21,13 @@ from config import Config
 from utils.db import execute_insert, execute_query
 from utils.email import send_html_email
 from utils.payments import calculate_payment_breakdown
+from utils.contract_extraction import (
+    compare_extractions,
+    extract_via_anthropic,
+    extract_via_ocr,
+    extract_via_pdfplumber,
+    extract_via_pypdf,
+)
 from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 
@@ -159,6 +166,7 @@ PROPERTY_ADDRESS_PATTERNS = (
     r"address\s+of\s+property\s*[:\-]\s*([^\n]{8,220})",
 )
 DATE_PARSE_FORMATS = (
+    "%Y-%m-%d",
     "%m/%d/%Y",
     "%m-%d-%Y",
     "%m/%d/%y",
@@ -169,6 +177,14 @@ DATE_PARSE_FORMATS = (
     "%b %d %Y",
 )
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+CONTRACT_EXTRACTION_FIELDS = (
+    ("effective_date", "Effective Date", "date"),
+    ("closing_date", "Closing Date", "date"),
+    ("buyer_name", "Buyer Name(s)", "text"),
+    ("seller_name", "Seller Name(s)", "text"),
+    ("property_address", "Property Address", "textarea"),
+)
 
 
 def normalize_address(value):
@@ -371,7 +387,7 @@ def save_extracted_contract_data(
 
 
 def run_contract_extraction(transaction_id, s3_key, submitted_property_address):
-    """Download uploaded contract from S3, OCR it, and persist extraction output."""
+    """Download contract, run triple extraction, and persist confidence results."""
     temp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
@@ -386,14 +402,48 @@ def run_contract_extraction(transaction_id, s3_key, submitted_property_address):
             )
             return
 
-        raw_text = extract_text_from_contract_pdf(temp_path, max_pages=3)
-        extracted_fields = extract_contract_fields_from_text(raw_text)
+        method1_data = extract_via_ocr(temp_path)
+        method2_data = extract_via_pypdf(temp_path)
+        method3_data = extract_via_pdfplumber(temp_path)
+        comparison = compare_extractions(method1_data, method2_data, method3_data)
+        save_contract_extraction_results(transaction_id, comparison)
+
+        preferred_effective = parse_contract_date((comparison.get("effective_date") or {}).get("value"))
+        preferred_closing = parse_contract_date((comparison.get("closing_date") or {}).get("value"))
+        preferred_buyer = normalize_extraction_value("buyer_name", (comparison.get("buyer_name") or {}).get("value"))
+        preferred_seller = normalize_extraction_value("seller_name", (comparison.get("seller_name") or {}).get("value"))
+        preferred_property = normalize_extraction_value(
+            "property_address",
+            (comparison.get("property_address") or {}).get("value"),
+        )
+
+        extracted_fields = {
+            "effective_date": preferred_effective,
+            "closing_date": preferred_closing,
+            "buyer_names": preferred_buyer,
+            "seller_names": preferred_seller,
+            "property_address": preferred_property,
+        }
+        raw_text = (
+            (method1_data.get("_raw_text") or "")
+            or (method2_data.get("_raw_text") or "")
+            or (method3_data.get("_raw_text") or "")
+        )
+        anthropic_api_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+        if anthropic_api_key and raw_text:
+            claude_result = extract_via_anthropic(raw_text, anthropic_api_key)
+            claude_raw = (claude_result.get("raw_response") or "").strip()
+            if claude_raw:
+                raw_text = f"{raw_text}\n\n--- OPTIONAL CLAUDE PARSE ---\n{claude_raw[:1200]}"
+        extraction_errors = [method1_data.get("_error"), method2_data.get("_error"), method3_data.get("_error")]
+        extraction_errors = [error for error in extraction_errors if error]
+        has_any_value = any((comparison.get(field_name) or {}).get("value") for field_name, _, _ in CONTRACT_EXTRACTION_FIELDS)
         save_extracted_contract_data(
             transaction_id=transaction_id,
             submitted_property_address=submitted_property_address,
             extracted_fields=extracted_fields,
-            status="success",
-            error_message=None,
+            status="success" if has_any_value else "failed",
+            error_message=(" | ".join(extraction_errors)[:500] if extraction_errors and not has_any_value else None),
             raw_text_excerpt=raw_text,
         )
     except Exception as exc:
@@ -462,6 +512,249 @@ def ensure_extracted_contract_data_table():
         CREATE UNIQUE INDEX IF NOT EXISTS idx_extracted_contract_data_transaction
         ON extracted_contract_data(transaction_id)
         """
+    )
+
+
+def ensure_contract_extractions_table():
+    """Ensure triple-scan contract extraction table exists."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS contract_extractions (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            field_name VARCHAR(50) NOT NULL,
+            extracted_value TEXT,
+            confidence VARCHAR(10),
+            agreement VARCHAR(10),
+            method1_value TEXT,
+            method2_value TEXT,
+            method3_value TEXT,
+            manually_verified BOOLEAN DEFAULT FALSE,
+            verified_value TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_extractions_txn_field
+        ON contract_extractions(transaction_id, field_name)
+        """
+    )
+
+
+def extraction_field_meta_map():
+    """Return field metadata keyed by extraction field name."""
+    return {field_name: {"label": label, "input_type": input_type} for field_name, label, input_type in CONTRACT_EXTRACTION_FIELDS}
+
+
+def normalize_extraction_value(field_name, raw_value):
+    """Normalize extracted/verified values for DB and form handling."""
+    if raw_value is None:
+        return ""
+    if isinstance(raw_value, date):
+        return raw_value.isoformat()
+
+    value = str(raw_value).strip()
+    if not value:
+        return ""
+
+    if field_name in {"effective_date", "closing_date"}:
+        parsed = parse_contract_date(value)
+        return parsed.isoformat() if parsed else value
+    return value
+
+
+def save_contract_extraction_results(transaction_id, extraction_results):
+    """Persist triple-scan extraction outcomes into contract_extractions."""
+    ensure_contract_extractions_table()
+    for field_name, _, _ in CONTRACT_EXTRACTION_FIELDS:
+        field_result = extraction_results.get(field_name) or {}
+        extracted_value = normalize_extraction_value(field_name, field_result.get("value"))
+        confidence = (field_result.get("confidence") or "low").strip().lower()
+        if confidence not in {"high", "low"}:
+            confidence = "low"
+        agreement = (field_result.get("agreement") or "0/3").strip()
+        method1_value = normalize_extraction_value(field_name, field_result.get("method1_value"))
+        method2_value = normalize_extraction_value(field_name, field_result.get("method2_value"))
+        method3_value = normalize_extraction_value(field_name, field_result.get("method3_value"))
+
+        execute_query(
+            """
+            INSERT INTO contract_extractions (
+                transaction_id,
+                field_name,
+                extracted_value,
+                confidence,
+                agreement,
+                method1_value,
+                method2_value,
+                method3_value,
+                manually_verified,
+                verified_value
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE, NULL)
+            ON CONFLICT (transaction_id, field_name)
+            DO UPDATE SET
+                extracted_value = EXCLUDED.extracted_value,
+                confidence = EXCLUDED.confidence,
+                agreement = EXCLUDED.agreement,
+                method1_value = EXCLUDED.method1_value,
+                method2_value = EXCLUDED.method2_value,
+                method3_value = EXCLUDED.method3_value,
+                manually_verified = FALSE,
+                verified_value = NULL
+            """,
+            (
+                transaction_id,
+                field_name,
+                extracted_value or None,
+                confidence,
+                agreement,
+                method1_value or None,
+                method2_value or None,
+                method3_value or None,
+            ),
+        )
+
+
+def get_contract_extraction_rows(transaction_id):
+    """Fetch contract_extractions rows for one transaction."""
+    ensure_contract_extractions_table()
+    return execute_query(
+        """
+        SELECT id, transaction_id, field_name, extracted_value, confidence, agreement,
+               method1_value, method2_value, method3_value,
+               manually_verified, verified_value, created_at
+        FROM contract_extractions
+        WHERE transaction_id = %s
+        ORDER BY field_name ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+
+
+def _fallback_extraction_value(field_name, extracted_data, transaction):
+    """Fallback value source when contract_extractions row is unavailable."""
+    if field_name == "effective_date":
+        return extracted_data.get("confirmed_effective_date") or extracted_data.get("extracted_effective_date")
+    if field_name == "closing_date":
+        return extracted_data.get("confirmed_closing_date") or extracted_data.get("extracted_closing_date")
+    if field_name == "buyer_name":
+        return extracted_data.get("confirmed_buyer_names") or extracted_data.get("extracted_buyer_names")
+    if field_name == "seller_name":
+        return extracted_data.get("confirmed_seller_names") or extracted_data.get("extracted_seller_names")
+    if field_name == "property_address":
+        return (
+            extracted_data.get("confirmed_property_address")
+            or extracted_data.get("extracted_property_address")
+            or extracted_data.get("submitted_property_address")
+            or transaction.get("property_address")
+        )
+    return ""
+
+
+def build_contract_extraction_review(transaction_id, extracted_data, transaction):
+    """Build review payload for extraction confidence + verification UI."""
+    field_meta = extraction_field_meta_map()
+    row_lookup = {row.get("field_name"): row for row in get_contract_extraction_rows(transaction_id)}
+    fields = []
+    required_count = len(CONTRACT_EXTRACTION_FIELDS)
+    verified_count = 0
+
+    for field_name, _, _ in CONTRACT_EXTRACTION_FIELDS:
+        row = row_lookup.get(field_name, {})
+        suggested_value = normalize_extraction_value(field_name, row.get("extracted_value"))
+        if not suggested_value:
+            suggested_value = normalize_extraction_value(
+                field_name,
+                _fallback_extraction_value(field_name, extracted_data or {}, transaction),
+            )
+
+        verified_value = normalize_extraction_value(field_name, row.get("verified_value"))
+        input_value = verified_value or suggested_value
+        confidence = (row.get("confidence") or "low").strip().lower()
+        if confidence not in {"high", "low"}:
+            confidence = "low"
+        agreement = (row.get("agreement") or "0/3").strip()
+        method_values = [
+            normalize_extraction_value(field_name, row.get("method1_value")),
+            normalize_extraction_value(field_name, row.get("method2_value")),
+            normalize_extraction_value(field_name, row.get("method3_value")),
+        ]
+        method_options = []
+        for candidate in method_values:
+            if candidate and candidate not in method_options:
+                method_options.append(candidate)
+        if suggested_value and suggested_value not in method_options:
+            method_options.insert(0, suggested_value)
+
+        manually_verified = bool(row.get("manually_verified")) and bool(verified_value)
+        if manually_verified:
+            verified_count += 1
+
+        fields.append(
+            {
+                "field_name": field_name,
+                "field_label": field_meta[field_name]["label"],
+                "input_type": field_meta[field_name]["input_type"],
+                "confidence": confidence,
+                "agreement": agreement,
+                "method1_value": method_values[0],
+                "method2_value": method_values[1],
+                "method3_value": method_values[2],
+                "method_options": method_options,
+                "suggested_value": suggested_value,
+                "input_value": input_value,
+                "manual_required": agreement in {"0/3", "1/3"} or not suggested_value,
+                "is_high_confidence": confidence == "high" and agreement == "3/3" and bool(suggested_value),
+                "manually_verified": manually_verified,
+            }
+        )
+
+    return {
+        "fields": fields,
+        "all_verified": verified_count == required_count and required_count > 0,
+        "verified_count": verified_count,
+        "required_count": required_count,
+    }
+
+
+def get_verified_contract_extraction_values(transaction_id):
+    """Return verified extraction values required for approval, if complete."""
+    field_meta = extraction_field_meta_map()
+    rows = get_contract_extraction_rows(transaction_id)
+    row_lookup = {row.get("field_name"): row for row in rows}
+    missing_fields = []
+    values = {}
+
+    for field_name, _, _ in CONTRACT_EXTRACTION_FIELDS:
+        row = row_lookup.get(field_name)
+        if not row or not row.get("manually_verified") or not (row.get("verified_value") or "").strip():
+            missing_fields.append(field_meta[field_name]["label"])
+            continue
+        values[field_name] = normalize_extraction_value(field_name, row.get("verified_value"))
+
+    if missing_fields:
+        return None, missing_fields
+
+    effective_date_value = parse_contract_date(values.get("effective_date"))
+    closing_date_value = parse_contract_date(values.get("closing_date"))
+    if not effective_date_value or not closing_date_value:
+        return None, ["Effective Date", "Closing Date"]
+    if closing_date_value < effective_date_value:
+        return None, ["Closing Date cannot be before Effective Date"]
+
+    return (
+        {
+            "effective_date": effective_date_value,
+            "closing_date": closing_date_value,
+            "buyer_name": values.get("buyer_name", "").strip(),
+            "seller_name": values.get("seller_name", "").strip(),
+            "property_address": values.get("property_address", "").strip(),
+        },
+        [],
     )
 
 
@@ -3246,11 +3539,42 @@ def tc_transaction(transaction_id):
         transaction["created_at"].strftime("%b %d, %Y %I:%M %p") if transaction.get("created_at") else "Unknown"
     )
 
-    extracted_data = get_extracted_contract_data_or_none(transaction_id)
-    prefill_effective = extraction_prefill_value(extracted_data, "confirmed_effective_date", "extracted_effective_date")
-    prefill_closing = extraction_prefill_value(extracted_data, "confirmed_closing_date", "extracted_closing_date")
-    prefill_buyer = extraction_prefill_value(extracted_data, "confirmed_buyer_names", "extracted_buyer_names", "")
-    prefill_seller = extraction_prefill_value(extracted_data, "confirmed_seller_names", "extracted_seller_names", "")
+    extracted_data = get_extracted_contract_data_or_none(transaction_id) or {}
+    extraction_review = build_contract_extraction_review(transaction_id, extracted_data, transaction)
+    verified_values_by_field = {
+        field["field_name"]: field["input_value"]
+        for field in extraction_review["fields"]
+        if field.get("manually_verified") and field.get("input_value")
+    }
+
+    prefill_effective = parse_contract_date(verified_values_by_field.get("effective_date")) or extraction_prefill_value(
+        extracted_data,
+        "confirmed_effective_date",
+        "extracted_effective_date",
+    )
+    prefill_closing = parse_contract_date(verified_values_by_field.get("closing_date")) or extraction_prefill_value(
+        extracted_data,
+        "confirmed_closing_date",
+        "extracted_closing_date",
+    )
+    prefill_buyer = verified_values_by_field.get("buyer_name") or extraction_prefill_value(
+        extracted_data,
+        "confirmed_buyer_names",
+        "extracted_buyer_names",
+        "",
+    )
+    prefill_seller = verified_values_by_field.get("seller_name") or extraction_prefill_value(
+        extracted_data,
+        "confirmed_seller_names",
+        "extracted_seller_names",
+        "",
+    )
+    prefill_property = verified_values_by_field.get("property_address") or extraction_prefill_value(
+        extracted_data,
+        "confirmed_property_address",
+        "extracted_property_address",
+        transaction.get("property_address") or "",
+    )
 
     if prefill_effective and not transaction.get("effective_date"):
         transaction["effective_date"] = prefill_effective
@@ -3277,28 +3601,23 @@ def tc_transaction(transaction_id):
         "status": extracted_data.get("extraction_status") if extracted_data else "pending",
         "status_label": extraction_status_label(extracted_data.get("extraction_status") if extracted_data else "pending"),
         "error": extracted_data.get("extraction_error") if extracted_data else None,
-        "confirmed": bool(extracted_data.get("confirmed")) if extracted_data else False,
+        "confirmed": extraction_review["all_verified"],
         "confirmed_at_label": (
             extracted_data["confirmed_at"].strftime("%b %d, %Y %I:%M %p")
-            if extracted_data and extracted_data.get("confirmed_at")
+            if extracted_data.get("confirmed_at")
             else ""
         ),
-        "confirmed_by": extracted_data.get("confirmed_by") if extracted_data else "",
-        "raw_text_excerpt": extracted_data.get("raw_text_excerpt") if extracted_data else "",
-        "agent_property_address": (extracted_data.get("submitted_property_address") if extracted_data else None)
+        "confirmed_by": extracted_data.get("confirmed_by") or "",
+        "raw_text_excerpt": extracted_data.get("raw_text_excerpt") or "",
+        "agent_property_address": extracted_data.get("submitted_property_address")
         or transaction.get("property_address")
         or "",
-        "property_address_match": extracted_data.get("property_address_match") if extracted_data else None,
+        "property_address_match": extracted_data.get("property_address_match"),
         "effective_date_input": (prefill_effective.isoformat() if prefill_effective else ""),
         "closing_date_input": (prefill_closing.isoformat() if prefill_closing else ""),
         "buyer_names_input": prefill_buyer,
         "seller_names_input": prefill_seller,
-        "property_address_input": extraction_prefill_value(
-            extracted_data,
-            "confirmed_property_address",
-            "extracted_property_address",
-            transaction.get("property_address") or "",
-        ),
+        "property_address_input": prefill_property,
     }
     email_status = get_email_notification_status(
         transaction_id=transaction_id,
@@ -3453,6 +3772,7 @@ def tc_transaction(transaction_id):
         communications=communications,
         payment_context=payment_context,
         extracted_data=extracted_context,
+        extraction_review=extraction_review,
         email_status=email_status,
         client_portal_links=client_portal_links,
     )
@@ -3499,48 +3819,101 @@ def download_transaction_pdf(transaction_id):
     return redirect(url)
 
 
-@app.route("/tc/transaction/<int:transaction_id>/confirm-extraction", methods=["POST"])
-@login_required
-def confirm_extraction(transaction_id):
-    """Confirm (and optionally edit) OCR extracted contract fields."""
-    transaction = get_transaction_or_none(transaction_id)
-    if not transaction:
-        return "Transaction not found", 404
-    if transaction.get("status") in {"COMPLETED", "CANCELLED"}:
-        return "This transaction cannot be modified.", 400
+def _verified_field_value_from_form(form_payload, field_name):
+    """Read verify-extraction values with backward-compatible fallback keys."""
+    legacy_key_map = {
+        "effective_date": "extracted_effective_date",
+        "closing_date": "extracted_closing_date",
+        "buyer_name": "extracted_buyer_names",
+        "seller_name": "extracted_seller_names",
+        "property_address": "extracted_property_address",
+    }
+    preferred_key = f"verified_{field_name}"
+    return (form_payload.get(preferred_key) or form_payload.get(legacy_key_map[field_name]) or "").strip()
 
-    try:
-        confirmed_effective = parse_required_date(
-            request.form.get("extracted_effective_date"),
-            "Effective date",
+
+def _persist_verified_contract_extractions(transaction, transaction_id):
+    """Persist Margaret-verified extraction values and sync legacy table."""
+    transaction_id = int(transaction_id)
+    extracted_data = get_extracted_contract_data_or_none(transaction_id) or {}
+    existing_rows = get_contract_extraction_rows(transaction_id)
+    existing_by_field = {row.get("field_name"): row for row in existing_rows}
+    field_meta = extraction_field_meta_map()
+
+    parsed_dates = {}
+    verified_values = {}
+    for field_name, _, _ in CONTRACT_EXTRACTION_FIELDS:
+        raw_value = _verified_field_value_from_form(request.form, field_name)
+        if not raw_value:
+            raise ValueError(f"{field_meta[field_name]['label']} is required.")
+
+        if field_name in {"effective_date", "closing_date"}:
+            parsed_date = parse_required_date(raw_value, field_meta[field_name]["label"])
+            parsed_dates[field_name] = parsed_date
+            verified_values[field_name] = parsed_date.isoformat()
+        else:
+            verified_values[field_name] = raw_value
+
+    if parsed_dates["closing_date"] < parsed_dates["effective_date"]:
+        raise ValueError("Closing date cannot be before effective date.")
+
+    ensure_contract_extractions_table()
+    for field_name, _, _ in CONTRACT_EXTRACTION_FIELDS:
+        existing_row = existing_by_field.get(field_name, {})
+        extracted_value = normalize_extraction_value(
+            field_name,
+            existing_row.get("extracted_value") or verified_values[field_name],
         )
-        confirmed_closing = parse_required_date(
-            request.form.get("extracted_closing_date"),
-            "Closing date",
+        confidence = (existing_row.get("confidence") or "low").strip().lower()
+        if confidence not in {"high", "low"}:
+            confidence = "low"
+        agreement = (existing_row.get("agreement") or ("3/3" if confidence == "high" else "2/3")).strip()
+
+        execute_query(
+            """
+            INSERT INTO contract_extractions (
+                transaction_id,
+                field_name,
+                extracted_value,
+                confidence,
+                agreement,
+                method1_value,
+                method2_value,
+                method3_value,
+                manually_verified,
+                verified_value
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+            ON CONFLICT (transaction_id, field_name)
+            DO UPDATE SET
+                extracted_value = EXCLUDED.extracted_value,
+                confidence = EXCLUDED.confidence,
+                agreement = EXCLUDED.agreement,
+                method1_value = EXCLUDED.method1_value,
+                method2_value = EXCLUDED.method2_value,
+                method3_value = EXCLUDED.method3_value,
+                manually_verified = TRUE,
+                verified_value = EXCLUDED.verified_value
+            """,
+            (
+                transaction_id,
+                field_name,
+                extracted_value or None,
+                confidence,
+                agreement or "0/3",
+                existing_row.get("method1_value"),
+                existing_row.get("method2_value"),
+                existing_row.get("method3_value"),
+                verified_values[field_name],
+            ),
         )
-    except ValueError as exc:
-        return str(exc), 400
 
-    confirmed_buyer = (request.form.get("extracted_buyer_names") or "").strip()
-    confirmed_seller = (request.form.get("extracted_seller_names") or "").strip()
-    confirmed_property = (request.form.get("extracted_property_address") or "").strip()
-
-    if not confirmed_buyer:
-        return "Buyer name(s) are required for extraction confirmation.", 400
-    if not confirmed_seller:
-        return "Seller name(s) are required for extraction confirmation.", 400
-    if not confirmed_property:
-        return "Property address is required for extraction confirmation.", 400
-    if confirmed_closing < confirmed_effective:
-        return "Closing date cannot be before effective date.", 400
-
-    existing = get_extracted_contract_data_or_none(transaction_id) or {}
-    extraction_status = "success" if existing.get("extraction_status") == "success" else "manual"
-    submitted_property_address = existing.get("submitted_property_address") or transaction.get("property_address") or ""
-    property_match = addresses_match(confirmed_property, submitted_property_address)
+    submitted_property_address = extracted_data.get("submitted_property_address") or transaction.get("property_address") or ""
+    property_match = addresses_match(verified_values["property_address"], submitted_property_address)
     if property_match is None and submitted_property_address:
         property_match = False
 
+    ensure_extracted_contract_data_table()
     execute_query(
         """
         INSERT INTO extracted_contract_data (
@@ -3593,19 +3966,19 @@ def confirm_extraction(transaction_id):
         (
             transaction_id,
             submitted_property_address,
-            existing.get("extracted_effective_date") or confirmed_effective,
-            existing.get("extracted_closing_date") or confirmed_closing,
-            existing.get("extracted_buyer_names") or confirmed_buyer,
-            existing.get("extracted_seller_names") or confirmed_seller,
-            existing.get("extracted_property_address") or confirmed_property,
+            extracted_data.get("extracted_effective_date") or parsed_dates["effective_date"],
+            extracted_data.get("extracted_closing_date") or parsed_dates["closing_date"],
+            extracted_data.get("extracted_buyer_names") or verified_values["buyer_name"],
+            extracted_data.get("extracted_seller_names") or verified_values["seller_name"],
+            extracted_data.get("extracted_property_address") or verified_values["property_address"],
             property_match,
-            existing.get("raw_text_excerpt"),
-            extraction_status,
-            confirmed_effective,
-            confirmed_closing,
-            confirmed_buyer,
-            confirmed_seller,
-            confirmed_property,
+            extracted_data.get("raw_text_excerpt"),
+            "success" if extracted_data.get("extraction_status") == "success" else "manual",
+            parsed_dates["effective_date"],
+            parsed_dates["closing_date"],
+            verified_values["buyer_name"],
+            verified_values["seller_name"],
+            verified_values["property_address"],
             session.get("tc_username", "margaret"),
         ),
     )
@@ -3617,13 +3990,53 @@ def confirm_extraction(transaction_id):
             closing_date = %s,
             buyer_name = %s,
             seller_name = %s,
+            property_address = %s,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = %s
         """,
-        (confirmed_effective, confirmed_closing, confirmed_buyer, confirmed_seller, transaction_id),
+        (
+            parsed_dates["effective_date"],
+            parsed_dates["closing_date"],
+            verified_values["buyer_name"],
+            verified_values["seller_name"],
+            verified_values["property_address"],
+            transaction_id,
+        ),
     )
 
-    return redirect(f"{url_for('tc_transaction', transaction_id=transaction_id)}#review-details")
+
+@app.route("/tc/transaction/<int:transaction_id>/verify-extraction", methods=["POST"])
+@login_required
+def verify_extraction(transaction_id):
+    """Persist Margaret's verified extraction values from triple-scan review."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+    if transaction.get("status") in {"COMPLETED", "CANCELLED"}:
+        return "This transaction cannot be modified.", 400
+
+    try:
+        _persist_verified_contract_extractions(transaction, transaction_id)
+    except ValueError as exc:
+        return str(exc), 400
+    except Exception as exc:
+        print(f"Verify extraction error (txn#{transaction_id}): {exc}")
+        return "Unable to save verified extraction values right now.", 500
+
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice="Extraction fields verified successfully.",
+        doc_notice_type="success",
+    )
+    return redirect(f"{redirect_url}#review-details")
+
+
+@app.route("/tc/transaction/<int:transaction_id>/confirm-extraction", methods=["POST"])
+@login_required
+def confirm_extraction(transaction_id):
+    """Backward-compatible alias for extraction verification."""
+    return verify_extraction(transaction_id)
 
 
 @app.route("/tc/transaction/<int:transaction_id>/approve", methods=["POST"])
@@ -3636,21 +4049,18 @@ def approve_transaction(transaction_id):
     if transaction.get("status") in {"COMPLETED", "CANCELLED"}:
         return "This transaction cannot be approved.", 400
 
-    extraction = get_extracted_contract_data_or_none(transaction_id)
-    if not extraction or not extraction.get("confirmed"):
-        return "Please confirm extracted contract data before activating this transaction.", 400
+    verified_extraction, missing_fields = get_verified_contract_extraction_values(transaction_id)
+    if not verified_extraction:
+        if missing_fields:
+            missing_text = ", ".join(missing_fields)
+            return f"Please verify extraction fields before approval: {missing_text}.", 400
+        return "Please verify extraction fields before approval.", 400
 
-    effective_date_value = extraction.get("confirmed_effective_date")
-    closing_date_value = extraction.get("confirmed_closing_date")
-    buyer_name = (extraction.get("confirmed_buyer_names") or "").strip()
-    seller_name = (extraction.get("confirmed_seller_names") or "").strip()
-
-    if not effective_date_value or not closing_date_value:
-        return "Confirmed extraction must include effective and closing dates.", 400
-    if not buyer_name:
-        return "Confirmed extraction must include buyer name(s).", 400
-    if not seller_name:
-        return "Confirmed extraction must include seller name(s).", 400
+    effective_date_value = verified_extraction["effective_date"]
+    closing_date_value = verified_extraction["closing_date"]
+    buyer_name = verified_extraction["buyer_name"]
+    seller_name = verified_extraction["seller_name"]
+    verified_property_address = verified_extraction["property_address"] or transaction.get("property_address")
 
     try:
         earnest_due_date_value = parse_required_date(request.form.get("earnest_due_date"), "Earnest money due")
@@ -3694,7 +4104,8 @@ def approve_transaction(transaction_id):
     updated = execute_query(
         """
         UPDATE transactions
-        SET effective_date = %s,
+        SET property_address = %s,
+            effective_date = %s,
             option_fee_due_date = %s,
             earnest_due_date = %s,
             seller_disclosure_due_date = %s,
@@ -3719,6 +4130,7 @@ def approve_transaction(transaction_id):
         WHERE id = %s
         """,
         (
+            verified_property_address,
             effective_date_value,
             deadline_dates["option_fee"],
             earnest_due_date_value,
@@ -3753,6 +4165,7 @@ def approve_transaction(transaction_id):
         return "Failed to create tasks.", 500
 
     transaction["id"] = transaction_id
+    transaction["property_address"] = verified_property_address
     transaction["buyer_phone"] = buyer_phone
     transaction["seller_phone"] = seller_phone
     maybe_create_referral(transaction)

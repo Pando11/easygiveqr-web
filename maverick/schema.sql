@@ -306,6 +306,21 @@ CREATE TABLE client_access (
     last_accessed TIMESTAMP
 );
 
+CREATE TABLE contract_extractions (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    field_name VARCHAR(50) NOT NULL,
+    extracted_value TEXT,
+    confidence VARCHAR(10),
+    agreement VARCHAR(10),
+    method1_value TEXT,
+    method2_value TEXT,
+    method3_value TEXT,
+    manually_verified BOOLEAN DEFAULT FALSE,
+    verified_value TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -330,3 +345,4 @@ CREATE UNIQUE INDEX idx_document_requests_txn_doc_type ON document_requests(tran
 CREATE INDEX idx_document_requests_status ON document_requests(status);
 CREATE UNIQUE INDEX idx_client_access_transaction_type ON client_access(transaction_id, client_type);
 CREATE UNIQUE INDEX idx_client_access_token ON client_access(access_token);
+CREATE UNIQUE INDEX idx_contract_extractions_txn_field ON contract_extractions(transaction_id, field_name);

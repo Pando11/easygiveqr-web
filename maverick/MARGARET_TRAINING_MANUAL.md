@@ -89,13 +89,25 @@ When a new contract arrives:
 
 1. Open transaction and review uploaded PDF.
 2. Verify all pages and signatures.
-3. Confirm effective date and closing date.
-4. Enter required parties:
+3. Review **AI Contract Extraction (Triple-Scan Verification)**:
+   - High confidence (`3/3`) can usually be accepted quickly.
+   - Low confidence (`2/3` or `1/3`) requires closer review.
+   - No agreement (`0/3`) requires manual entry.
+4. Use **Accept High-Confidence Values** as a quick start.
+5. For low-confidence fields:
+   - Compare Method 1 (OCR), Method 2 (PyPDF2), Method 3 (pdfplumber)
+   - Choose best value or type manually
+6. Click **Save Verified Extraction**.
+7. Enter required parties/contact details:
    - Buyer name
    - Seller name
    - Title company
-5. Validate date logic (closing after other critical milestones).
-6. Approve and activate transaction.
+8. Validate date logic (closing after other critical milestones).
+9. Approve and activate transaction.
+
+### Approval Gate
+
+The **Approve & Activate Transaction** button stays disabled until all required extraction fields are verified.
 
 ### If Contract Has Errors
 

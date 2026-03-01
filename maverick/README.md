@@ -12,6 +12,7 @@ Core capabilities:
 - Stripe card payments plus Venmo/PayPal fallback links
 - Twilio SMS reminders, updates, and escalation alerts
 - Client portal links for buyer/seller timeline + document upload
+- Triple-scan AI contract extraction with confidence verification (OCR + PyPDF2 + pdfplumber)
 - Automation scripts for reminders, closing protocol, problem detection, and nightly backups
 
 ## Local setup instructions
@@ -63,6 +64,7 @@ STRIPE_ENV=dev
 STRIPE_SECRET_KEY=
 STRIPE_PUBLISHABLE_KEY=
 STRIPE_WEBHOOK_SECRET=
+ANTHROPIC_API_KEY=
 
 VENMO_HANDLE=@GetMaverick
 PAYPAL_EMAIL=pay@getmaverick.com
@@ -112,6 +114,20 @@ These routes power buyer/seller client access using secure UUID tokens:
 TC actions:
 - `POST /tc/transaction/<transaction_id>/generate-client-portal`
 
+## Contract Extraction Verification
+
+Maverick runs three extraction methods on uploaded contracts and compares agreement:
+
+- Method 1: OCR (Tesseract via `pdf2image` + `pytesseract`)
+- Method 2: Direct text (`PyPDF2`)
+- Method 3: Layout-aware text (`pdfplumber`)
+
+Verification workflow routes:
+- `POST /tc/transaction/<transaction_id>/verify-extraction` (save Margaret verified values)
+
+Approval gating:
+- Transaction approval requires all required extraction fields to be verified.
+
 ## Deploy to Railway
 
 This repository is configured to run Maverick from repo root using:
@@ -143,6 +159,7 @@ See `RAILWAY_CRONS.md` for copy/paste schedules and commands for:
 - `MARGARET_TRAINING_MANUAL.md`
 - `CLIENT_PORTAL_USER_GUIDE.md`
 - `API_DOCUMENTATION.md`
+- `EXTRACTION_VERIFICATION_GUIDE.md`
 - `STRIPE_MINIONS_INSTRUCTIONS.md`
 - `STRIPE_DEV_SETUP.md`
 - `LAUNCH_CHECKLIST.md`

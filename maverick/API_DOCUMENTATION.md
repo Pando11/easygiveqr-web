@@ -81,3 +81,27 @@ Client portal uses a unique token URL and does not require login credentials.
 
 ### Generate or re-send client portal links
 - `POST /tc/transaction/<transaction_id>/generate-client-portal`
+
+## TC Extraction Verification Routes
+
+### Save verified extraction values
+- `POST /tc/transaction/<transaction_id>/verify-extraction`
+- Form fields (required):
+  - `verified_effective_date` (YYYY-MM-DD)
+  - `verified_closing_date` (YYYY-MM-DD)
+  - `verified_buyer_name`
+  - `verified_seller_name`
+  - `verified_property_address`
+
+### Legacy alias (still accepted)
+- `POST /tc/transaction/<transaction_id>/confirm-extraction`
+
+## Extraction Engine Notes
+
+Contract uploads trigger asynchronous triple-scan extraction:
+
+1. OCR: `pdf2image` + `pytesseract`
+2. Direct text: `PyPDF2`
+3. Layout-aware text: `pdfplumber`
+
+The system writes field-level confidence rows to `contract_extractions` and requires manual verification before approval.

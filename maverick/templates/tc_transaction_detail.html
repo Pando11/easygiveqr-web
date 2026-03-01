@@ -76,16 +76,16 @@
         </div>
 
         <div class="form-section extraction-section">
-            <h4>AI Contract Extraction</h4>
+            <h4>AI Contract Extraction (Triple-Scan Verification)</h4>
             <p class="hint-text">
-                OCR runs on the first 3 pages of the uploaded contract. Review and confirm these values
+                Maverick compares OCR, PyPDF2, and pdfplumber extraction. Verify all required fields
                 before activating the transaction.
             </p>
             <div class="badge-row">
                 <span class="tag tag-status">{{ extracted_data.status_label }}</span>
-                {% if extracted_data.confirmed %}
-                <span class="tag tag-confirmed">Confirmed{% if extracted_data.confirmed_by %} by {{ extracted_data.confirmed_by }}{% endif %}</span>
-                {% endif %}
+                <span class="tag tag-confirmed">
+                    {{ extraction_review.verified_count }}/{{ extraction_review.required_count }} fields verified
+                </span>
                 {% if extracted_data.property_address_match is sameas true %}
                 <span class="tag tag-match">Address Match</span>
                 {% elif extracted_data.property_address_match is sameas false %}
@@ -104,35 +104,86 @@
             <p><strong>Last confirmed:</strong> {{ extracted_data.confirmed_at_label }}</p>
             {% endif %}
 
-            <form method="post" action="{{ url_for('confirm_extraction', transaction_id=transaction.id) }}"
+            <form method="post" action="{{ url_for('verify_extraction', transaction_id=transaction.id) }}"
                   class="stack-form compact-form">
-                <div class="grid-2">
-                    <div class="form-group">
-                        <label for="extracted_effective_date">Effective Date *</label>
-                        <input type="date" id="extracted_effective_date" name="extracted_effective_date"
-                               value="{{ extracted_data.effective_date_input }}" required>
+                <div class="extraction-grid">
+                    {% for field in extraction_review.fields %}
+                    <div class="extraction-field confidence-{{ field.confidence }}">
+                        <div class="extraction-field-head">
+                            <strong>
+                                {% if field.is_high_confidence %}✅{% elif field.manual_required %}❌{% else %}⚠️{% endif %}
+                                {{ field.field_label }}
+                            </strong>
+                            <span class="agreement-chip">{{ field.agreement }} agreement</span>
+                        </div>
+
+                        {% if field.is_high_confidence %}
+                        <p class="hint-text">High confidence: all 3 methods agree.</p>
+                        {% else %}
+                        <ul class="method-value-list">
+                            <li><strong>Method 1 (OCR):</strong> {{ field.method1_value or "No value" }}</li>
+                            <li><strong>Method 2 (PyPDF2):</strong> {{ field.method2_value or "No value" }}</li>
+                            <li><strong>Method 3 (pdfplumber):</strong> {{ field.method3_value or "No value" }}</li>
+                        </ul>
+                        {% if field.manual_required %}
+                        <p class="warning-text">Manual entry required for this field.</p>
+                        {% endif %}
+                        {% endif %}
+
+                        {% if field.method_options and not field.is_high_confidence %}
+                        <div class="form-group">
+                            <label for="choice_{{ field.field_name }}">Choose extracted value</label>
+                            <select id="choice_{{ field.field_name }}"
+                                    class="extraction-choice"
+                                    data-target="verified_{{ field.field_name }}">
+                                <option value="">Select an extracted value...</option>
+                                {% for option in field.method_options %}
+                                <option value="{{ option }}">{{ option }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        {% endif %}
+
+                        <div class="form-group">
+                            <label for="verified_{{ field.field_name }}">Verified {{ field.field_label }} *</label>
+                            {% if field.input_type == "textarea" %}
+                            <textarea id="verified_{{ field.field_name }}"
+                                      name="verified_{{ field.field_name }}"
+                                      rows="2"
+                                      data-high="{{ 1 if field.is_high_confidence else 0 }}"
+                                      data-suggested="{{ field.suggested_value|e }}"
+                                      required>{{ field.input_value }}</textarea>
+                            {% elif field.input_type == "date" %}
+                            <input type="date"
+                                   id="verified_{{ field.field_name }}"
+                                   name="verified_{{ field.field_name }}"
+                                   value="{{ field.input_value }}"
+                                   data-high="{{ 1 if field.is_high_confidence else 0 }}"
+                                   data-suggested="{{ field.suggested_value|e }}"
+                                   required>
+                            {% else %}
+                            <input type="text"
+                                   id="verified_{{ field.field_name }}"
+                                   name="verified_{{ field.field_name }}"
+                                   value="{{ field.input_value }}"
+                                   data-high="{{ 1 if field.is_high_confidence else 0 }}"
+                                   data-suggested="{{ field.suggested_value|e }}"
+                                   required>
+                            {% endif %}
+                        </div>
+
+                        {% if field.manually_verified %}
+                        <small class="verified-tag">Verified</small>
+                        {% endif %}
                     </div>
-                    <div class="form-group">
-                        <label for="extracted_closing_date">Closing Date *</label>
-                        <input type="date" id="extracted_closing_date" name="extracted_closing_date"
-                               value="{{ extracted_data.closing_date_input }}" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="extracted_buyer_names">Buyer Name(s) *</label>
-                        <input type="text" id="extracted_buyer_names" name="extracted_buyer_names"
-                               value="{{ extracted_data.buyer_names_input }}" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="extracted_seller_names">Seller Name(s) *</label>
-                        <input type="text" id="extracted_seller_names" name="extracted_seller_names"
-                               value="{{ extracted_data.seller_names_input }}" required>
-                    </div>
+                    {% endfor %}
                 </div>
-                <div class="form-group">
-                    <label for="extracted_property_address">Property Address *</label>
-                    <textarea id="extracted_property_address" name="extracted_property_address" rows="2" required>{{ extracted_data.property_address_input }}</textarea>
+                <div class="extraction-actions-row">
+                    <button type="button" class="btn btn-small btn-secondary" id="acceptHighConfidenceBtn">
+                        Accept High-Confidence Values
+                    </button>
+                    <button type="submit" class="btn btn-secondary">Save Verified Extraction</button>
                 </div>
-                <button type="submit" class="btn btn-secondary">Confirm Extracted Data</button>
             </form>
 
             {% if extracted_data.raw_text_excerpt %}
@@ -224,12 +275,12 @@
                 </div>
             </div>
 
-            {% if not extracted_data.confirmed %}
+            {% if not extraction_review.all_verified %}
             <div class="warning-box">
-                Confirm extracted contract data above before approving and creating deadlines.
+                Verify all extraction fields above before approving and creating deadlines.
             </div>
             {% endif %}
-            <button type="submit" class="btn approve-btn" {% if not extracted_data.confirmed %}disabled{% endif %}>
+            <button type="submit" class="btn approve-btn" {% if not extraction_review.all_verified %}disabled{% endif %}>
                 APPROVE & ACTIVATE TRANSACTION
             </button>
         </form>
@@ -821,6 +872,76 @@
     margin-bottom: 12px;
 }
 
+.extraction-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.extraction-field {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 10px;
+    background: #ffffff;
+}
+
+.extraction-field.confidence-high {
+    border-color: #86efac;
+    background: #f0fdf4;
+}
+
+.extraction-field.confidence-low {
+    border-color: #fde68a;
+    background: #fffbeb;
+}
+
+.extraction-field-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.agreement-chip {
+    background: #e2e8f0;
+    color: #1e293b;
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.method-value-list {
+    margin: 0 0 8px 0;
+    padding-left: 18px;
+    color: #334155;
+    font-size: 13px;
+}
+
+.warning-text {
+    color: #991b1b;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.verified-tag {
+    display: inline-block;
+    margin-top: 4px;
+    color: #166534;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+.extraction-actions-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
 .ocr-preview {
     border: 1px solid #cbd5e1;
     border-radius: 8px;
@@ -1097,6 +1218,31 @@ if (effectiveInput) {
     if (effectiveInput.value && (!earnestInput?.value || !optionEndInput?.value || !financingInput?.value)) {
         autoFillContractDates();
     }
+}
+
+document.querySelectorAll(".extraction-choice").forEach((selectEl) => {
+    selectEl.addEventListener("change", (event) => {
+        const targetName = event.target.getAttribute("data-target");
+        if (!targetName) {
+            return;
+        }
+        const targetField = document.querySelector(`[name="${targetName}"]`);
+        if (!targetField || !event.target.value) {
+            return;
+        }
+        targetField.value = event.target.value;
+    });
+});
+
+const acceptHighConfidenceBtn = document.getElementById("acceptHighConfidenceBtn");
+if (acceptHighConfidenceBtn) {
+    acceptHighConfidenceBtn.addEventListener("click", () => {
+        document.querySelectorAll("[data-high='1'][data-suggested]").forEach((inputEl) => {
+            if (inputEl.dataset.suggested) {
+                inputEl.value = inputEl.dataset.suggested;
+            }
+        });
+    });
 }
 </script>
 {% endblock %}
