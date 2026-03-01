@@ -605,6 +605,79 @@ CREATE TABLE problem_detection_results (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE bulk_messages_log (
+    id SERIAL PRIMARY KEY,
+    template_used VARCHAR(255),
+    message_template TEXT,
+    filter_scope VARCHAR(50),
+    filter_status VARCHAR(50),
+    party_type VARCHAR(30),
+    transactions_affected INT DEFAULT 0,
+    total_recipients INT DEFAULT 0,
+    sent_count INT DEFAULT 0,
+    failed_count INT DEFAULT 0,
+    status VARCHAR(20) DEFAULT 'queued',
+    created_by VARCHAR(100),
+    summary JSONB DEFAULT '{}'::jsonb,
+    sent_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+CREATE TABLE bulk_message_recipients (
+    id SERIAL PRIMARY KEY,
+    bulk_message_id INT REFERENCES bulk_messages_log(id) ON DELETE CASCADE,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    party_type VARCHAR(20),
+    recipient_name VARCHAR(200),
+    recipient_phone VARCHAR(25),
+    rendered_message TEXT,
+    status VARCHAR(20) DEFAULT 'pending',
+    provider_message_sid VARCHAR(120),
+    error_text TEXT,
+    attempted_at TIMESTAMP,
+    sent_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE bulk_message_templates (
+    id SERIAL PRIMARY KEY,
+    template_name VARCHAR(120) UNIQUE NOT NULL,
+    template_body TEXT NOT NULL,
+    is_system BOOLEAN DEFAULT FALSE,
+    active BOOLEAN DEFAULT TRUE,
+    created_by VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE task_completion_rules (
+    id SERIAL PRIMARY KEY,
+    task_description_pattern VARCHAR(500) NOT NULL,
+    completion_trigger_type VARCHAR(50) NOT NULL,
+    completion_criteria JSONB DEFAULT '{}'::jsonb,
+    confidence_threshold INT DEFAULT 80,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE task_auto_completion_log (
+    id SERIAL PRIMARY KEY,
+    task_id INT REFERENCES tasks(id) ON DELETE CASCADE,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    rule_id INT REFERENCES task_completion_rules(id) ON DELETE SET NULL,
+    action VARCHAR(50) NOT NULL,
+    confidence INT,
+    explanation TEXT,
+    snapshot JSONB DEFAULT '{}'::jsonb,
+    review_required BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    undone_by VARCHAR(100),
+    undone_at TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -659,3 +732,9 @@ CREATE UNIQUE INDEX idx_problem_detection_results_run_txn ON problem_detection_r
 CREATE INDEX idx_problem_detection_results_bucket_status ON problem_detection_results(bucket, status, created_at DESC);
 CREATE INDEX idx_problem_detection_whitelist_active ON problem_detection_whitelist(active, transaction_id);
 CREATE INDEX idx_problem_detection_runs_completed ON problem_detection_runs(completed_at DESC);
+CREATE INDEX idx_bulk_messages_log_status ON bulk_messages_log(status, created_at DESC);
+CREATE INDEX idx_bulk_messages_log_sent_at ON bulk_messages_log(sent_at DESC);
+CREATE INDEX idx_bulk_message_recipients_bulk ON bulk_message_recipients(bulk_message_id, status, id);
+CREATE UNIQUE INDEX idx_task_completion_rules_unique ON task_completion_rules(task_description_pattern, completion_trigger_type);
+CREATE INDEX idx_task_auto_completion_log_task ON task_auto_completion_log(task_id, created_at DESC);
+CREATE INDEX idx_task_auto_completion_log_action ON task_auto_completion_log(action, created_at DESC);

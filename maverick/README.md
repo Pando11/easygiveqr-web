@@ -20,7 +20,9 @@ Core capabilities:
 - Proactive deadline nudges with two-step escalation and SMS YES inspector recommendations
 - Intelligent nudge automation with configurable timing/templates + response analytics
 - AI-powered problem detection with health scoring, recommendations, and one-click action execution
-- Automation scripts for reminders, closing protocol, problem detection, and nightly backups
+- Bulk SMS broadcasting with smart variables, preview, filtering, and paced queue sends
+- Rule-based auto-task completion with confidence safeguards, undo tracking, and weekly time-saved metrics
+- Automation scripts for reminders, closing protocol, problem detection, task auto-completion, and nightly backups
 
 ## Local setup instructions
 
@@ -204,6 +206,38 @@ Routes:
 - `POST /tc/suggestion/<transaction_id>/accept`
 - `GET|POST /tc/problem-detection-settings`
 
+## Bulk SMS Broadcasting
+
+Margaret can send announcements/reminders at scale without copy/paste:
+
+- Route: `GET|POST /tc/bulk-messages`
+- Features:
+  - built-in + custom template library
+  - smart variables (`{{PROPERTY_ADDRESS}}`, `{{BUYER_NAME}}`, `{{CLOSING_DATE}}`, etc.)
+  - filtering by active scope/closing this week/specific status
+  - targeting by party type (buyer/seller/agent/all)
+  - preview before send
+  - queued processing at 1 SMS/sec with progress reporting
+
+## Auto Task Completion Engine
+
+Maverick can auto-complete low-risk checklist items based on evidence rules:
+
+- Rule table: `task_completion_rules`
+- Run log: `task_auto_completion_log`
+- Trigger types:
+  - `document_uploaded`
+  - `vendor_response`
+  - `email_received`
+- Safety controls:
+  - never auto-completes high-stakes tasks (e.g., final CD verification)
+  - confidence below 80% is flagged for Margaret review, not completed
+  - Margaret can undo auto-completed tasks from the existing task toggle
+
+Manual + scheduled runs:
+- Manual route: `POST /tc/task-completion/run`
+- Cron script: `python3 automation/task_auto_completion.py` (every 15 minutes recommended)
+
 ## Inbound Email AI Routing
 
 Each transaction exposes unique mailbox aliases:
@@ -264,6 +298,7 @@ See `RAILWAY_CRONS.md` for copy/paste schedules and commands for:
 - `send_reminders.py`
 - `closing_protocol.py`
 - `automation/problem_detector.py`
+- `automation/task_auto_completion.py`
 - `backup_db.sh`
 
 `send_reminders.py` now also runs the proactive deadline nudge engine:

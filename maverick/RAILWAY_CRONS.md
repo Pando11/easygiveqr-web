@@ -42,6 +42,14 @@ Use these schedules and commands in Railway Cron.
 - Schedule: `0 */6 * * *`
 - Command: `cd maverick && python3 automation/problem_detector.py`
 
+## Auto Task Completion
+- Schedule: `*/15 * * * *`
+- Command: `cd maverick && python3 automation/task_auto_completion.py`
+- Includes:
+  - rule-based task completion checks
+  - confidence scoring + review flags below 80%
+  - high-stakes task exclusion (never auto-complete)
+
 ## Database Backup
 - Schedule: `0 2 * * *`
 - Command: `bash backup_db.sh`

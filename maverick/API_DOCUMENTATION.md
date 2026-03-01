@@ -97,6 +97,52 @@ Client portal uses a unique token URL and does not require login credentials.
 - Form body:
   - `task_id`
 
+## Bulk SMS Broadcasting (TC)
+
+### Bulk messaging workspace
+- `GET|POST /tc/bulk-messages`
+- Capabilities:
+  - smart variable template rendering (`{{PROPERTY_ADDRESS}}`, `{{BUYER_NAME}}`, etc.)
+  - audience filters (`all_active`, `closing_this_week`, `specific_status`)
+  - party targeting (`buyers_only`, `sellers_only`, `agents_only`, `all_parties`)
+  - preview before queueing send
+  - save custom template library entries
+
+Form `action` options:
+- `preview` (build recipient/message preview only)
+- `queue_send` (enqueue send job at 1 SMS/second pacing)
+- `save_template` (store reusable template)
+
+### Bulk message job progress
+- `GET /tc/bulk-messages/<job_id>/progress`
+- Returns JSON status:
+  - `queued` / `sending` / `completed` / `failed`
+  - `total_recipients`, `sent_count`, `failed_count`, `progress_pct`
+
+## Task Auto-Completion
+
+### Scheduled auto-completion script
+- `python3 automation/task_auto_completion.py`
+- Typical cron schedule: `*/15 * * * *`
+- Behavior:
+  - scans incomplete active-transaction tasks
+  - matches tasks to `task_completion_rules`
+  - evaluates trigger evidence (`document_uploaded`, `vendor_response`, `email_received`)
+  - auto-completes when confidence >= 80 and not high-stakes
+  - flags review note for Margaret when confidence < 80
+  - logs every action to `task_auto_completion_log`
+
+### Manual run from TC UI
+- `POST /tc/task-completion/run`
+- Triggers one immediate pass and redirects to `/tc/tasks` with run summary notice.
+
+### Undo auto-completion
+- Via existing task toggle route:
+  - `POST /tc/task/<task_id>/toggle` with `{ "completed": false }`
+- Behavior:
+  - reopens task
+  - records undo event on latest auto-completion log row
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values

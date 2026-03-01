@@ -20,6 +20,12 @@ from twilio.twiml.messaging_response import MessagingResponse
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
 
+from automation.task_auto_completion import (
+    check_task_completion,
+    ensure_task_completion_tables,
+    fetch_task_auto_completion_metrics,
+    record_auto_completion_undo,
+)
 from automation.problem_detector import (
     analyze_transaction_health,
     deactivate_problem_detection_whitelist,
@@ -34,6 +40,17 @@ from automation.problem_detector import (
     upsert_problem_detection_whitelist,
 )
 from config import Config
+from utils.bulk_messaging import (
+    SMART_TEMPLATE_VARIABLES,
+    build_bulk_message_preview,
+    ensure_bulk_messaging_tables,
+    fetch_bulk_message_history,
+    fetch_bulk_message_progress,
+    fetch_bulk_message_status_options,
+    fetch_bulk_message_templates,
+    queue_bulk_message_job,
+    save_bulk_message_template,
+)
 from utils.db import execute_insert, execute_query
 from utils.email import send_email, send_html_email
 from utils.payments import calculate_payment_breakdown
@@ -6152,6 +6169,23 @@ def mobile_complete_task(task_id):
         if not isinstance(payload, dict):
             payload = {}
         completed = parse_bool_value(payload.get("completed"), default=True)
+        existing_rows = execute_query(
+            """
+            SELECT id, completed, completed_by
+            FROM tasks
+            WHERE id = %s
+            LIMIT 1
+            """,
+            (task_id,),
+            fetch=True,
+        ) or []
+        if not existing_rows:
+            return jsonify({"success": False, "error": "Task not found"}), 404
+        existing_task = existing_rows[0]
+        was_auto_completed = (
+            bool(existing_task.get("completed"))
+            and (existing_task.get("completed_by") or "").strip().lower() == "auto-rule-engine"
+        )
         completed_by = getattr(g, "mobile_username", "mobile-user") if completed else None
         status_value = "completed" if completed else "pending"
 
@@ -6171,6 +6205,10 @@ def mobile_complete_task(task_id):
         if not rows:
             return jsonify({"success": False, "error": "Task not found"}), 404
 
+        undo_logged = False
+        if not completed and was_auto_completed:
+            undo_logged = record_auto_completion_undo(task_id, undone_by=getattr(g, "mobile_username", "mobile-user"))
+
         task_row = rows[0]
         return jsonify(
             {
@@ -6180,6 +6218,7 @@ def mobile_complete_task(task_id):
                 "completed": bool(task_row.get("completed")),
                 "status": task_row.get("status"),
                 "completed_at": json_date_value(task_row.get("completed_at")),
+                "undo_logged": undo_logged,
             }
         )
     except Exception as exc:
@@ -6824,6 +6863,148 @@ def tc_problem_detection_settings():
     )
 
 
+@app.route("/tc/bulk-messages", methods=["GET", "POST"])
+@login_required
+def tc_bulk_messages():
+    """Bulk SMS broadcasting workspace with preview + queued sending."""
+    ensure_bulk_messaging_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    templates = fetch_bulk_message_templates()
+    template_lookup = {str(item["id"]): item for item in templates}
+    status_options = fetch_bulk_message_status_options()
+    if "ACTIVE" not in status_options:
+        status_options = ["ACTIVE", *status_options]
+    history_rows = fetch_bulk_message_history(limit=10)
+
+    form_state = {
+        "filter_scope": "all_active",
+        "filter_status": "ACTIVE",
+        "party_type": "all_parties",
+        "template_id": "",
+        "template_name": "",
+        "template_body": "",
+    }
+    preview_data = None
+
+    job_id = parse_optional_int(request.args.get("job_id"))
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        form_state["filter_scope"] = (request.form.get("filter_scope") or "all_active").strip().lower()
+        form_state["filter_status"] = (request.form.get("filter_status") or "ACTIVE").strip().upper()
+        form_state["party_type"] = (request.form.get("party_type") or "all_parties").strip().lower()
+        form_state["template_id"] = (request.form.get("template_id") or "").strip()
+        form_state["template_name"] = (request.form.get("template_name") or "").strip()
+
+        template_body_input = (request.form.get("template_body") or "").strip()
+        if not template_body_input and form_state["template_id"] in template_lookup:
+            template_body_input = (template_lookup[form_state["template_id"]].get("template_body") or "").strip()
+            if not form_state["template_name"]:
+                form_state["template_name"] = template_lookup[form_state["template_id"]].get("template_name") or ""
+        form_state["template_body"] = template_body_input
+
+        if action == "save_template":
+            template_name = (request.form.get("new_template_name") or "").strip()
+            result = save_bulk_message_template(
+                template_name=template_name,
+                template_body=template_body_input,
+                created_by=session.get("tc_username", "margaret"),
+            )
+            redirect_url = url_for(
+                "tc_bulk_messages",
+                notice=("Template saved." if result.get("success") else result.get("error", "Template save failed.")),
+                notice_type=("success" if result.get("success") else "warning"),
+            )
+            return redirect(redirect_url)
+
+        if action in {"preview", "queue_send"}:
+            if not template_body_input:
+                notice = "Template body is required."
+                notice_type = "warning"
+            else:
+                preview_data = build_bulk_message_preview(
+                    template_body=template_body_input,
+                    filter_scope=form_state["filter_scope"],
+                    filter_status=form_state["filter_status"],
+                    party_type=form_state["party_type"],
+                    max_preview_rows=120,
+                )
+                if action == "queue_send":
+                    queue_result = queue_bulk_message_job(
+                        template_used=form_state["template_name"] or "Custom Template",
+                        template_body=template_body_input,
+                        filter_scope=form_state["filter_scope"],
+                        filter_status=form_state["filter_status"],
+                        party_type=form_state["party_type"],
+                        created_by=session.get("tc_username", "margaret"),
+                    )
+                    if not queue_result.get("success"):
+                        notice = queue_result.get("error", "Unable to queue bulk message send.")
+                        notice_type = "warning"
+                    else:
+                        redirect_url = url_for(
+                            "tc_bulk_messages",
+                            job_id=queue_result["job_id"],
+                            notice=(
+                                "Bulk broadcast queued. Messages send at 1 per second. "
+                                "Keep this page open to track progress."
+                            ),
+                            notice_type="success",
+                        )
+                        return redirect(redirect_url)
+
+    if form_state["template_id"] in template_lookup and not form_state["template_body"]:
+        selected = template_lookup[form_state["template_id"]]
+        form_state["template_name"] = selected.get("template_name") or form_state["template_name"]
+        form_state["template_body"] = selected.get("template_body") or ""
+
+    job_progress = fetch_bulk_message_progress(job_id) if job_id else None
+    return render_template(
+        "tc_bulk_messages.html",
+        notice=notice,
+        notice_type=notice_type,
+        templates=templates,
+        smart_variables=SMART_TEMPLATE_VARIABLES,
+        status_options=status_options,
+        form_state=form_state,
+        preview_data=preview_data,
+        job_id=job_id,
+        job_progress=job_progress,
+        history_rows=history_rows,
+    )
+
+
+@app.route("/tc/bulk-messages/<int:job_id>/progress")
+@login_required
+def tc_bulk_messages_progress(job_id):
+    """Return JSON progress for a queued bulk SMS job."""
+    progress = fetch_bulk_message_progress(job_id)
+    if not progress:
+        return jsonify({"success": False, "error": "Job not found"}), 404
+    return jsonify({"success": True, "job": progress})
+
+
+@app.route("/tc/task-completion/run", methods=["POST"])
+@login_required
+def run_task_completion_now():
+    """Manually run task auto-completion checks from TC UI."""
+    summary = check_task_completion()
+    redirect_url = url_for(
+        "tc_tasks",
+        notice=(
+            "Task auto-completion run complete: "
+            f"checked={summary['checked_tasks']} "
+            f"auto-completed={summary['auto_completed']} "
+            f"review-flags={summary['flagged_review']}"
+        ),
+        notice_type="success",
+    )
+    return redirect(redirect_url)
+
+
 @app.route("/tc/vendors", methods=["GET", "POST"])
 @login_required
 def tc_vendors():
@@ -7261,8 +7442,13 @@ def tc_tasks():
     if selected_filter not in {"all", "pending", "overdue", "completed"}:
         selected_filter = "all"
     transaction_filter = parse_optional_int(request.args.get("transaction_id"))
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
 
     try:
+        ensure_task_completion_tables()
         today = date.today()
         upcoming_horizon = today + timedelta(days=7)
         transaction_clause = " AND t.id = %s" if transaction_filter is not None else ""
@@ -7335,7 +7521,8 @@ def tc_tasks():
         completed_tasks = execute_query(
             f"""
             SELECT tk.id, tk.task_description, tk.task_category, tk.notes, tk.due_date,
-                   tk.completed, tk.status, tk.completed_at, t.id AS transaction_id, t.property_address
+                   tk.completed, tk.status, tk.completed_at, tk.completed_by,
+                   t.id AS transaction_id, t.property_address
             FROM tasks tk
             JOIN transactions t ON t.id = tk.transaction_id
             WHERE (tk.completed = TRUE OR tk.status = 'completed')
@@ -7362,15 +7549,21 @@ def tc_tasks():
             completed_at = task.get("completed_at")
             task["completed_at_label"] = completed_at.strftime("%b %d, %Y %I:%M %p") if completed_at else ""
             task["due_label"] = format_date_label(task.get("due_date"))
+            task["auto_completed"] = (task.get("completed_by") or "").strip().lower() == "auto-rule-engine"
+
+        auto_metrics = fetch_task_auto_completion_metrics(weeks=8)
 
         return render_template(
             "tc_tasks.html",
+            notice=notice,
+            notice_type=notice_type,
             selected_filter=selected_filter,
             transaction_filter=transaction_filter,
             overdue_tasks=overdue_tasks,
             due_today_tasks=due_today_tasks,
             upcoming_tasks=upcoming_tasks,
             completed_tasks=completed_tasks,
+            auto_metrics=auto_metrics,
         )
     except Exception as exc:
         print(f"Task view error: {exc}")
@@ -7384,6 +7577,23 @@ def toggle_task(task_id):
     try:
         payload = request.get_json(silent=True) or request.form
         completed = parse_bool_value(payload.get("completed"), default=False)
+        existing_rows = execute_query(
+            """
+            SELECT id, completed, completed_by
+            FROM tasks
+            WHERE id = %s
+            LIMIT 1
+            """,
+            (task_id,),
+            fetch=True,
+        ) or []
+        if not existing_rows:
+            return jsonify({"success": False, "error": "Task not found"}), 404
+        existing_task = existing_rows[0]
+        was_auto_completed = (
+            bool(existing_task.get("completed"))
+            and (existing_task.get("completed_by") or "").strip().lower() == "auto-rule-engine"
+        )
         completed_by = session.get("tc_username", "margaret") if completed else None
         status_value = "completed" if completed else "pending"
 
@@ -7401,7 +7611,28 @@ def toggle_task(task_id):
             fetch=True,
         ) or []
         if not rows:
-            return jsonify({"success": False, "error": "Task not found"}), 404
+            return jsonify({"success": False, "error": "Unable to update task"}), 500
+
+        undo_logged = False
+        if not completed and was_auto_completed:
+            undo_logged = record_auto_completion_undo(task_id, undone_by=session.get("tc_username", "margaret"))
+            if undo_logged:
+                note_text = (
+                    "[Auto-completion undone] Margaret reopened this task for manual verification."
+                )
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                note_entry = f"[{timestamp}] {note_text}"
+                execute_query(
+                    """
+                    UPDATE tasks
+                    SET notes = CASE
+                        WHEN COALESCE(notes, '') = '' THEN %s
+                        ELSE notes || E'\n' || %s
+                    END
+                    WHERE id = %s
+                    """,
+                    (note_entry, note_entry, task_id),
+                )
 
         return jsonify(
             {
@@ -7409,6 +7640,7 @@ def toggle_task(task_id):
                 "task_id": task_id,
                 "completed": bool(rows[0]["completed"]),
                 "status": rows[0]["status"],
+                "undo_logged": undo_logged,
             }
         )
     except Exception as exc:

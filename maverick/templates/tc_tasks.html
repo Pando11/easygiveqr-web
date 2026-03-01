@@ -23,6 +23,63 @@
     </div>
 </section>
 
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">
+    {{ notice }}
+</div>
+{% endif %}
+
+<section class="card auto-metrics-card">
+    <div class="section-title">
+        <h3>🤖 Auto-Task Completion</h3>
+        <form method="post" action="{{ url_for('run_task_completion_now') }}">
+            <button class="btn btn-secondary btn-small" type="submit">Run check now</button>
+        </form>
+    </div>
+    <div class="auto-metric-grid">
+        <article class="metric-item">
+            <h4>This Week Auto-Completed</h4>
+            <p>{{ auto_metrics.this_week_auto_completed }}</p>
+        </article>
+        <article class="metric-item">
+            <h4>This Week Time Saved</h4>
+            <p>{{ auto_metrics.this_week_time_saved_minutes }} min</p>
+        </article>
+        <article class="metric-item">
+            <h4>Total Time Saved</h4>
+            <p>{{ auto_metrics.time_saved_hours }} hours</p>
+        </article>
+    </div>
+    {% if auto_metrics.weekly %}
+    <div class="table-wrap">
+        <table class="metrics-table">
+            <thead>
+                <tr>
+                    <th>Week Of</th>
+                    <th>Auto-Completed</th>
+                    <th>Flagged Review</th>
+                    <th>Undone</th>
+                    <th>Time Saved</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in auto_metrics.weekly|reverse %}
+                <tr>
+                    <td>{{ row.week_label }}</td>
+                    <td>{{ row.auto_completed_count }}</td>
+                    <td>{{ row.flagged_review_count }}</td>
+                    <td>{{ row.undone_count }}</td>
+                    <td>{{ row.time_saved_minutes }} min</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="subtle">No auto-completion history yet.</p>
+    {% endif %}
+</section>
+
 <section class="tasks-section section-overdue" data-section="overdue">
     <div class="section-title">
         <h3>🚨 Overdue Tasks</h3>
@@ -131,7 +188,12 @@
             <p>
                 <a href="/tc/transaction/{{ task.transaction_id }}">{{ task.property_address }}</a>
             </p>
-            <p class="subtle">Completed {{ task.completed_at_label or "recently" }}</p>
+            <p class="subtle">
+                Completed {{ task.completed_at_label or "recently" }}
+                {% if task.auto_completed %}
+                <span class="badge badge-auto">Auto-completed</span>
+                {% endif %}
+            </p>
             <p class="task-notes {% if not task.notes %}hidden{% endif %}" id="task-note-{{ task.id }}">{{ task.notes or "" }}</p>
         </article>
         {% endfor %}
@@ -170,6 +232,57 @@
 
 .subtle {
     color: #64748b;
+}
+
+.auto-metrics-card {
+    border-left: 6px solid #6366f1;
+}
+
+.auto-metric-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.metric-item {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 10px;
+    background: #f8fafc;
+}
+
+.metric-item h4 {
+    font-size: 13px;
+    color: #334155;
+    margin-bottom: 5px;
+}
+
+.metric-item p {
+    font-size: 22px;
+    font-weight: 700;
+    color: #1e3a8a;
+}
+
+.table-wrap {
+    overflow-x: auto;
+}
+
+.metrics-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.metrics-table th,
+.metrics-table td {
+    border: 1px solid #e2e8f0;
+    padding: 7px 8px;
+    font-size: 13px;
+    text-align: left;
+}
+
+.metrics-table th {
+    background: #f8fafc;
 }
 
 .tasks-section {
@@ -283,6 +396,12 @@
     opacity: 0.55;
 }
 
+.badge-auto {
+    margin-left: 6px;
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
 .empty-state {
     border: 1px dashed #cbd5e1;
     border-radius: 8px;
@@ -297,6 +416,10 @@
 }
 
 @media (max-width: 1024px) {
+    .auto-metric-grid {
+        grid-template-columns: 1fr;
+    }
+
     .task-grid {
         grid-template-columns: 1fr;
     }
@@ -378,7 +501,11 @@ async function toggleTask(taskId, completed, checkboxEl) {
         }
 
         if (window.showSuccess) {
-            window.showSuccess(completed ? "Task completed." : "Task marked pending.");
+            if (!completed && data.undo_logged) {
+                window.showSuccess("Auto-completion undone. Task moved back to pending.");
+            } else {
+                window.showSuccess(completed ? "Task completed." : "Task marked pending.");
+            }
         }
     } catch (error) {
         checkboxEl.checked = !completed;
