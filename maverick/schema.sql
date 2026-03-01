@@ -714,6 +714,70 @@ CREATE TABLE task_auto_completion_log (
     undone_at TIMESTAMP
 );
 
+CREATE TABLE agent_status_update_settings (
+    id SERIAL PRIMARY KEY,
+    enabled BOOLEAN DEFAULT TRUE,
+    schedule_slot VARCHAR(30) DEFAULT 'monday_8am',
+    subject_template TEXT,
+    body_template TEXT,
+    updated_by VARCHAR(100),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE agent_status_update_opt_out (
+    id SERIAL PRIMARY KEY,
+    agent_name VARCHAR(255),
+    agent_email VARCHAR(255),
+    agent_phone VARCHAR(25),
+    reason TEXT,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE agent_status_update_runs (
+    id SERIAL PRIMARY KEY,
+    run_kind VARCHAR(30) DEFAULT 'manual',
+    preview_only BOOLEAN DEFAULT FALSE,
+    triggered_by VARCHAR(100),
+    schedule_slot VARCHAR(30),
+    schedule_week_key VARCHAR(40),
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    status VARCHAR(20) DEFAULT 'running',
+    candidate_count INT DEFAULT 0,
+    sent_count INT DEFAULT 0,
+    failed_count INT DEFAULT 0,
+    questions_this_week INT DEFAULT 0,
+    questions_previous_week INT DEFAULT 0,
+    question_reduction_estimate INT DEFAULT 0,
+    notes TEXT
+);
+
+CREATE TABLE agent_status_update_messages (
+    id SERIAL PRIMARY KEY,
+    run_id INT REFERENCES agent_status_update_runs(id) ON DELETE CASCADE,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    agent_name VARCHAR(255),
+    agent_email VARCHAR(255),
+    property_address VARCHAR(255),
+    health_status VARCHAR(20),
+    progress_pct INT DEFAULT 0,
+    days_to_closing INT,
+    urgent_item_count INT DEFAULT 0,
+    tasks_completed_week INT DEFAULT 0,
+    documents_uploaded_week INT DEFAULT 0,
+    communications_week INT DEFAULT 0,
+    upcoming_deadlines_count INT DEFAULT 0,
+    agent_action_items_count INT DEFAULT 0,
+    subject VARCHAR(255),
+    rendered_body TEXT,
+    status VARCHAR(20) DEFAULT 'preview',
+    failure_reason TEXT,
+    sent_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -781,3 +845,8 @@ CREATE INDEX idx_bulk_message_recipients_bulk ON bulk_message_recipients(bulk_me
 CREATE UNIQUE INDEX idx_task_completion_rules_unique ON task_completion_rules(task_description_pattern, completion_trigger_type);
 CREATE INDEX idx_task_auto_completion_log_task ON task_auto_completion_log(task_id, created_at DESC);
 CREATE INDEX idx_task_auto_completion_log_action ON task_auto_completion_log(action, created_at DESC);
+CREATE INDEX idx_agent_status_update_opt_out_active ON agent_status_update_opt_out(active, agent_email, agent_name);
+CREATE INDEX idx_agent_status_update_runs_started ON agent_status_update_runs(started_at DESC, status);
+CREATE INDEX idx_agent_status_update_runs_week_key ON agent_status_update_runs(schedule_week_key, run_kind, preview_only);
+CREATE INDEX idx_agent_status_update_messages_run ON agent_status_update_messages(run_id, status, sent_at DESC);
+CREATE INDEX idx_agent_status_update_messages_sent ON agent_status_update_messages(sent_at DESC, status);

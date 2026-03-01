@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<body style="margin:0;padding:0;background:#f4f7fb;font-family:Arial,sans-serif;color:#0f172a;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f7fb;padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px;background:#ffffff;border-radius:10px;border:1px solid #dbe3ee;overflow:hidden;">
+          <tr>
+            <td style="background:linear-gradient(135deg,#1e3a8a,#172554);color:#ffffff;padding:18px 20px;">
+              <h2 style="margin:0 0 6px 0;font-size:20px;">Weekly Transaction Status Update</h2>
+              <p style="margin:0;font-size:13px;opacity:.95;">{{ property_address }}</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:20px;">
+              <p style="margin:0 0 12px 0;">Hi {{ agent_name }},</p>
+
+              {% if custom_message_lines %}
+              <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:14px;">
+                {% for line in custom_message_lines %}
+                <p style="margin:0 0 8px 0;font-size:14px;line-height:1.5;">{{ line }}</p>
+                {% endfor %}
+              </div>
+              {% endif %}
+
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:14px;">
+                <tr>
+                  <td style="font-size:14px;padding:2px 0;"><strong>Days to closing:</strong> {{ days_to_closing_label }}</td>
+                  <td style="font-size:14px;padding:2px 0;" align="right"><strong>Health:</strong> {{ health_label }}</td>
+                </tr>
+              </table>
+
+              <div style="margin:0 0 6px 0;font-size:13px;color:#334155;">Progress to closing: {{ progress_pct }}%</div>
+              <div style="width:100%;height:12px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin-bottom:16px;">
+                <div style="height:12px;width:{{ progress_pct }}%;background:linear-gradient(90deg,#2563eb,#10b981);"></div>
+              </div>
+
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:14px;">
+                <tr>
+                  <td width="50%" style="vertical-align:top;padding-right:8px;">
+                    <h3 style="margin:0 0 8px 0;font-size:15px;">This week</h3>
+                    <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.5;">
+                      <li>Tasks completed: {{ tasks_completed_week_count }}</li>
+                      <li>Documents uploaded: {{ documents_uploaded_week_count }}</li>
+                      <li>Communications received: {{ communications_week_count }}</li>
+                    </ul>
+                  </td>
+                  <td width="50%" style="vertical-align:top;padding-left:8px;">
+                    <h3 style="margin:0 0 8px 0;font-size:15px;">Upcoming (7 days)</h3>
+                    <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.5;">
+                      <li>Deadlines: {{ upcoming_deadlines_count }}</li>
+                      <li>Open agent tasks: {{ agent_assigned_open_count }}</li>
+                    </ul>
+                  </td>
+                </tr>
+              </table>
+
+              {% if urgent_items %}
+              <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:14px;">
+                <h3 style="margin:0 0 8px 0;font-size:15px;color:#991b1b;">Urgent items</h3>
+                <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.5;color:#7f1d1d;">
+                  {% for item in urgent_items %}
+                  <li>{{ item }}</li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+
+              {% if in_progress_items %}
+              <h3 style="margin:0 0 8px 0;font-size:15px;">In progress</h3>
+              <ul style="margin:0 0 14px 0;padding-left:18px;font-size:13px;line-height:1.5;">
+                {% for item in in_progress_items %}
+                <li>{{ item }}</li>
+                {% endfor %}
+              </ul>
+              {% endif %}
+
+              {% if due_this_week_items %}
+              <h3 style="margin:0 0 8px 0;font-size:15px;">Due this week</h3>
+              <ul style="margin:0 0 14px 0;padding-left:18px;font-size:13px;line-height:1.5;">
+                {% for item in due_this_week_items %}
+                <li>{{ item }}</li>
+                {% endfor %}
+              </ul>
+              {% endif %}
+
+              {% if agent_action_items %}
+              <h3 style="margin:0 0 8px 0;font-size:15px;">Agent action items</h3>
+              <ul style="margin:0 0 14px 0;padding-left:18px;font-size:13px;line-height:1.5;">
+                {% for item in agent_action_items %}
+                <li>{{ item }}</li>
+                {% endfor %}
+              </ul>
+              {% endif %}
+
+              <p style="margin:14px 0 0 0;font-size:13px;color:#334155;">
+                Need anything prioritized? Reply to this email and Margaret will jump in.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

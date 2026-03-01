@@ -200,6 +200,35 @@ Form `action` options:
   - reopens task
   - records undo event on latest auto-completion log row
 
+## Automated Agent Status Updates
+
+### Status update settings + preview/send UI (TC)
+- `GET|POST /tc/status-updates`
+- Actions via form `action`:
+  - `update_settings` (enable, schedule slot, subject template, body template)
+  - `preview_now` (build per-agent update preview, no email send)
+  - `send_now` (manual send immediately)
+  - `add_opt_out` (disable updates for specific agent)
+  - `remove_opt_out` (reactivate updates for opt-out entry)
+
+### Scheduled status update script
+- `python3 automation/agent_status_updates.py`
+- Recommended cron schedule: hourly (`0 * * * *`)
+- Runtime behavior:
+  - checks configured slot (`monday_8am` or `friday_5pm`)
+  - sends once per week for that slot (dedupe guard)
+  - compiles each active transaction's weekly summary for the agent only
+  - logs sends to `agent_status_update_runs` + `agent_status_update_messages`
+
+### Email content model
+- Weekly summary includes:
+  - tasks completed this week
+  - documents uploaded this week
+  - communications received this week
+  - upcoming deadlines (7-day horizon)
+  - incomplete agent-action tasks
+  - days to closing + health label + progress bar
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values

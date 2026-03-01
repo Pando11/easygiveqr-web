@@ -24,6 +24,7 @@ Core capabilities:
 - Rule-based auto-task completion with confidence safeguards, undo tracking, and weekly time-saved metrics
 - Twilio voice-note capture with transcription, auto task actions, and communication-log playback
 - Smart document classification + renaming before S3 save, with Margaret correction learning loop
+- Automated weekly agent status updates (preview/edit/send controls, schedule choice, opt-out list)
 - Automation scripts for reminders, closing protocol, problem detection, task auto-completion, and nightly backups
 
 ## Local setup instructions
@@ -196,6 +197,22 @@ Margaret override route:
 
 Corrections are stored in `document_classification_corrections` and used to improve future type mapping.
 
+## Automated Agent Status Updates
+
+Maverick can send weekly progress emails to agents for each active transaction:
+
+- TC control route: `GET|POST /tc/status-updates`
+- Scheduler script: `python3 automation/agent_status_updates.py`
+- Schedule options:
+  - Monday at 8:00 AM
+  - Friday at 5:00 PM
+- Features:
+  - preview before send
+  - editable subject/body templates with smart tokens
+  - per-agent opt-out list
+  - manual "send now" trigger
+  - call/text reduction tracking (estimated "questions answered" metric)
+
 ## Timeline Packet + Vendor Outreach Automation
 
 After Margaret approves and activates a transaction, Maverick:
@@ -335,6 +352,7 @@ See `RAILWAY_CRONS.md` for copy/paste schedules and commands for:
 - `send_reminders.py`
 - `closing_protocol.py`
 - `automation/problem_detector.py`
+- `automation/agent_status_updates.py`
 - `automation/task_auto_completion.py`
 - `backup_db.sh`
 

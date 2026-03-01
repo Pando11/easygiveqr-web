@@ -63,6 +63,20 @@ from utils.contract_extraction import (
     extract_via_pypdf,
 )
 from utils.document_analysis import analyze_appraisal, analyze_hoa_documents, analyze_inspection_report
+from utils.agent_status_updates import (
+    AGENT_STATUS_TEMPLATE_TOKENS,
+    SCHEDULE_SLOT_OPTIONS,
+    add_agent_status_opt_out,
+    build_agent_status_update_payloads,
+    deactivate_agent_status_opt_out,
+    dispatch_agent_status_updates,
+    ensure_agent_status_update_tables,
+    fetch_agent_status_opt_outs,
+    fetch_agent_status_update_metrics,
+    fetch_agent_status_update_runs,
+    fetch_agent_status_update_settings,
+    update_agent_status_update_settings,
+)
 from utils.document_processing import (
     ensure_document_classification_corrections_table,
     extract_earnest_amount,
@@ -7242,6 +7256,141 @@ def tc_bulk_messages_progress(job_id):
     if not progress:
         return jsonify({"success": False, "error": "Job not found"}), 404
     return jsonify({"success": True, "job": progress})
+
+
+@app.route("/tc/status-updates", methods=["GET", "POST"])
+@login_required
+def tc_status_updates():
+    """Configure, preview, and send weekly automated agent status updates."""
+    ensure_agent_status_update_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    settings = fetch_agent_status_update_settings()
+    form_state = {
+        "enabled": bool(settings.get("enabled")),
+        "schedule_slot": settings.get("schedule_slot") or "monday_8am",
+        "subject_template": settings.get("subject_template") or "",
+        "body_template": settings.get("body_template") or "",
+    }
+    preview_payloads = []
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        form_state["enabled"] = parse_bool_value(request.form.get("enabled"), default=False)
+        form_state["schedule_slot"] = (request.form.get("schedule_slot") or form_state["schedule_slot"]).strip().lower()
+        form_state["subject_template"] = (request.form.get("subject_template") or "").strip() or settings.get("subject_template")
+        form_state["body_template"] = (request.form.get("body_template") or "").strip() or settings.get("body_template")
+
+        if action == "update_settings":
+            update_agent_status_update_settings(
+                enabled=form_state["enabled"],
+                schedule_slot=form_state["schedule_slot"],
+                subject_template=form_state["subject_template"],
+                body_template=form_state["body_template"],
+                updated_by=session.get("tc_username", "margaret"),
+            )
+            redirect_url = url_for(
+                "tc_status_updates",
+                notice="Status update settings saved.",
+                notice_type="success",
+            )
+            return redirect(redirect_url)
+
+        if action == "add_opt_out":
+            result = add_agent_status_opt_out(
+                agent_name=request.form.get("agent_name") or "",
+                agent_email=request.form.get("agent_email") or "",
+                agent_phone=request.form.get("agent_phone") or "",
+                reason=request.form.get("reason") or "",
+                active=True,
+            )
+            redirect_url = url_for(
+                "tc_status_updates",
+                notice=("Agent opt-out saved." if result.get("success") else result.get("error", "Could not add opt-out.")),
+                notice_type=("success" if result.get("success") else "warning"),
+            )
+            return redirect(redirect_url)
+
+        if action == "remove_opt_out":
+            opt_out_id = parse_optional_int(request.form.get("opt_out_id"))
+            if opt_out_id:
+                deactivate_agent_status_opt_out(opt_out_id)
+                next_notice = "Agent opt-out removed."
+                next_type = "success"
+            else:
+                next_notice = "Invalid opt-out row."
+                next_type = "warning"
+            return redirect(url_for("tc_status_updates", notice=next_notice, notice_type=next_type))
+
+        if action == "send_now":
+            result = dispatch_agent_status_updates(
+                preview_only=False,
+                run_kind="manual",
+                triggered_by=session.get("tc_username", "margaret"),
+                template_overrides={
+                    "subject_template": form_state["subject_template"],
+                    "body_template": form_state["body_template"],
+                },
+                force_send=True,
+            )
+            if not result.get("success"):
+                next_notice = result.get("error") or "Failed to run status updates."
+                next_type = "error"
+            elif result.get("skipped"):
+                next_notice = f"Status update send skipped: {result.get('reason', 'n/a')}."
+                next_type = "warning"
+            else:
+                next_notice = (
+                    f"Status updates sent. Candidates: {result.get('candidate_count', 0)} | "
+                    f"Sent: {result.get('sent_count', 0)} | Failed: {result.get('failed_count', 0)}"
+                )
+                next_type = "success" if result.get("failed_count", 0) == 0 else "warning"
+            return redirect(url_for("tc_status_updates", notice=next_notice, notice_type=next_type))
+
+        if action == "preview_now":
+            preview_result = dispatch_agent_status_updates(
+                preview_only=True,
+                run_kind="manual",
+                triggered_by=session.get("tc_username", "margaret"),
+                template_overrides={
+                    "subject_template": form_state["subject_template"],
+                    "body_template": form_state["body_template"],
+                },
+                force_send=True,
+            )
+            if not preview_result.get("success"):
+                notice = preview_result.get("error") or "Could not generate preview."
+                notice_type = "error"
+            else:
+                preview_payloads = (preview_result.get("payloads") or [])[:24]
+                notice = (
+                    f"Preview generated for {preview_result.get('candidate_count', len(preview_payloads))} "
+                    "agent status updates."
+                )
+                notice_type = "success"
+        else:
+            if action not in {"update_settings", "add_opt_out", "remove_opt_out", "send_now"}:
+                notice = "Unknown status update action."
+                notice_type = "warning"
+
+    opt_out_rows = fetch_agent_status_opt_outs(active_only=False)
+    recent_runs = fetch_agent_status_update_runs(limit=20)
+    metrics = fetch_agent_status_update_metrics(weeks=8)
+    return render_template(
+        "tc_status_updates.html",
+        notice=notice,
+        notice_type=notice_type,
+        form_state=form_state,
+        schedule_slot_options=SCHEDULE_SLOT_OPTIONS,
+        template_tokens=AGENT_STATUS_TEMPLATE_TOKENS,
+        opt_out_rows=opt_out_rows,
+        preview_payloads=preview_payloads,
+        metrics=metrics,
+        recent_runs=recent_runs,
+    )
 
 
 @app.route("/tc/task-completion/run", methods=["POST"])

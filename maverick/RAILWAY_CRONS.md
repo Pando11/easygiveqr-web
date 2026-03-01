@@ -42,6 +42,14 @@ Use these schedules and commands in Railway Cron.
 - Schedule: `0 */6 * * *`
 - Command: `cd maverick && python3 automation/problem_detector.py`
 
+## Automated Agent Status Updates
+- Schedule: `0 * * * *`
+- Command: `cd maverick && python3 automation/agent_status_updates.py`
+- Includes:
+  - schedule-aware send (Monday 8am OR Friday 5pm from TC settings)
+  - one-send-per-week guard for scheduled runs
+  - per-transaction agent update emails with progress + urgent items
+
 ## Auto Task Completion
 - Schedule: `*/15 * * * *`
 - Command: `cd maverick && python3 automation/task_auto_completion.py`
