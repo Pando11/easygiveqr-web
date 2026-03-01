@@ -93,6 +93,10 @@
                 <p>Margaret will review your file and text timeline details shortly.</p>
             </div>
 
+            <div id="warningMessage" class="alert alert-warning" style="display: none;">
+                <p id="warningText"></p>
+            </div>
+
             <div id="errorMessage" class="alert alert-error" style="display: none;">
                 <p id="errorText"></p>
             </div>
@@ -325,6 +329,8 @@ const uploadForm = document.getElementById("uploadForm");
 const submitBtn = document.getElementById("submitBtn");
 const loadingMsg = document.getElementById("loadingMessage");
 const successMsg = document.getElementById("successMessage");
+const warningMsg = document.getElementById("warningMessage");
+const warningText = document.getElementById("warningText");
 const errorMsg = document.getElementById("errorMessage");
 const errorText = document.getElementById("errorText");
 const referralSelect = document.getElementById("referral_source");
@@ -334,6 +340,7 @@ const browseTrigger = document.getElementById("browseTrigger");
 
 function showError(message) {
     successMsg.style.display = "none";
+    warningMsg.style.display = "none";
     errorMsg.style.display = "block";
     errorText.textContent = message;
     if (typeof window.showError === "function") {
@@ -342,6 +349,7 @@ function showError(message) {
 }
 
 function showSuccess(message) {
+    warningMsg.style.display = "none";
     errorMsg.style.display = "none";
     successMsg.style.display = "block";
     if (typeof window.showSuccess === "function") {
@@ -349,8 +357,19 @@ function showSuccess(message) {
     }
 }
 
+function showWarning(message) {
+    successMsg.style.display = "none";
+    errorMsg.style.display = "none";
+    warningMsg.style.display = "block";
+    warningText.textContent = message;
+    if (typeof window.showSuccess === "function") {
+        window.showSuccess(message);
+    }
+}
+
 function resetBanners() {
     successMsg.style.display = "none";
+    warningMsg.style.display = "none";
     errorMsg.style.display = "none";
 }
 
@@ -507,8 +526,8 @@ uploadForm.addEventListener("submit", async (event) => {
             showError(payload.error || "Upload failed. Please review and try again.");
         }
     } catch (_error) {
-        showError(
-            "Upload connection issue. Your contract may still have been received. "
+        showWarning(
+            "Submission sent. Connection dropped before confirmation. "
             + "Please check Margaret's dashboard before submitting again."
         );
     } finally {
