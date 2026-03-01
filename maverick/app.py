@@ -7,11 +7,12 @@ from datetime import date, datetime, timedelta
 from functools import wraps
 from threading import Thread
 from typing import Any
+from uuid import uuid4
 
 import jwt
 import stripe
 from dotenv import load_dotenv
-from flask import Flask, Response, g, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Response, g, has_request_context, jsonify, redirect, render_template, request, session, url_for
 from twilio.twiml.messaging_response import MessagingResponse
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
@@ -55,6 +56,31 @@ REQUIRED_DOCUMENT_TYPES = {
     "loan_approval",
     "insurance_binder",
     "settlement_statement",
+}
+
+CLIENT_TYPES = {"buyer", "seller"}
+
+CLIENT_UPLOAD_DOCUMENT_TYPES = {
+    "signed_amendment",
+    "signed_disclosure",
+    "signed_addendum",
+    "insurance_binder",
+    "loan_approval",
+    "settlement_statement",
+    "other",
+}
+
+DOCUMENT_REQUEST_TARGET = {
+    "contract": "seller",
+    "earnest_receipt": "buyer",
+    "option_receipt": "buyer",
+    "seller_disclosure": "seller",
+    "inspection_report": "buyer",
+    "appraisal": "lender",
+    "title_commitment": "title",
+    "loan_approval": "lender",
+    "insurance_binder": "lender",
+    "settlement_statement": "title",
 }
 
 DEADLINE_BLUEPRINTS = (
@@ -599,6 +625,221 @@ def ensure_document_requests_table():
     )
 
 
+def ensure_client_access_table():
+    """Ensure client portal access table exists."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS client_access (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            client_type VARCHAR(20) NOT NULL,
+            access_token VARCHAR(64) NOT NULL,
+            email VARCHAR(255),
+            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_accessed TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_client_access_token
+        ON client_access(access_token)
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_client_access_txn_client_type
+        ON client_access(transaction_id, client_type)
+        """
+    )
+
+
+def app_base_url():
+    """Resolve public app base URL for link generation."""
+    configured = (os.getenv("APP_BASE_URL") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    if has_request_context():
+        return (request.url_root or "http://localhost:5000").rstrip("/")
+    return "http://localhost:5000"
+
+
+def build_client_portal_url(access_token):
+    """Build a full client portal URL for an access token."""
+    return f"{app_base_url()}/client/{access_token}"
+
+
+def upsert_client_access(transaction_id, client_type, email=None):
+    """Create/get one portal token row per transaction/client type."""
+    normalized_type = (client_type or "").strip().lower()
+    if normalized_type not in CLIENT_TYPES:
+        return None
+
+    ensure_client_access_table()
+    email_value = normalize_email(email)
+    if email_value and not is_email_valid(email_value):
+        email_value = ""
+
+    rows = execute_query(
+        """
+        INSERT INTO client_access (
+            transaction_id, client_type, access_token, email, created_date
+        )
+        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (transaction_id, client_type)
+        DO UPDATE SET
+            email = COALESCE(NULLIF(EXCLUDED.email, ''), client_access.email)
+        RETURNING id, transaction_id, client_type, access_token, email, created_date, last_accessed
+        """,
+        (transaction_id, normalized_type, str(uuid4()), email_value),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+
+    access_row = rows[0]
+    access_row["portal_url"] = build_client_portal_url(access_row["access_token"])
+    access_row["client_type_label"] = access_row["client_type"].title()
+    access_row["created_date_label"] = format_timestamp_label(access_row.get("created_date"))
+    access_row["last_accessed_label"] = format_timestamp_label(access_row.get("last_accessed"))
+    return access_row
+
+
+def ensure_client_access_links(transaction_id, buyer_email=None, seller_email=None):
+    """Ensure buyer/seller portal links exist and return both rows."""
+    links = []
+    buyer_row = upsert_client_access(transaction_id, "buyer", buyer_email)
+    seller_row = upsert_client_access(transaction_id, "seller", seller_email)
+    if buyer_row:
+        links.append(buyer_row)
+    if seller_row:
+        links.append(seller_row)
+    return links
+
+
+def list_client_access_links(transaction_id):
+    """Return portal link rows for transaction detail view."""
+    ensure_client_access_table()
+    rows = execute_query(
+        """
+        SELECT client_type, access_token, email, created_date, last_accessed
+        FROM client_access
+        WHERE transaction_id = %s
+        ORDER BY client_type ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+    for row in rows:
+        row["client_type_label"] = (row.get("client_type") or "").title()
+        row["portal_url"] = build_client_portal_url(row["access_token"])
+        row["created_date_label"] = format_timestamp_label(row.get("created_date"))
+        row["last_accessed_label"] = format_timestamp_label(row.get("last_accessed"))
+    return rows
+
+
+def get_client_access_by_token(access_token, touch=True):
+    """Resolve client portal token to transaction + client context."""
+    ensure_client_access_table()
+    rows = execute_query(
+        """
+        SELECT ca.transaction_id, ca.client_type, ca.access_token, ca.email,
+               ca.created_date, ca.last_accessed,
+               t.id AS tx_id, t.property_address, t.status, t.effective_date, t.closing_date,
+               t.buyer_name, t.buyer_phone, t.seller_name, t.seller_phone,
+               t.agent_name, t.agent_email, t.contract_s3_key
+        FROM client_access ca
+        JOIN transactions t ON t.id = ca.transaction_id
+        WHERE ca.access_token = %s
+        LIMIT 1
+        """,
+        (access_token,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+
+    access_row = rows[0]
+    if touch:
+        execute_query(
+            """
+            UPDATE client_access
+            SET last_accessed = CURRENT_TIMESTAMP
+            WHERE access_token = %s
+            """,
+            (access_token,),
+        )
+        access_row["last_accessed"] = datetime.now()
+
+    access_row["portal_url"] = build_client_portal_url(access_row["access_token"])
+    return access_row
+
+
+def notify_client_portal_links(transaction_id, transaction, access_rows):
+    """Send client portal links by SMS/email for available contacts."""
+    sent_sms = 0
+    sent_email = 0
+    for access in access_rows:
+        client_type = (access.get("client_type") or "").strip().lower()
+        if client_type not in CLIENT_TYPES:
+            continue
+
+        client_name = (transaction.get(f"{client_type}_name") or client_type.title()).strip()
+        client_phone = normalize_phone(transaction.get(f"{client_type}_phone") or "")
+        client_email = normalize_email(access.get("email"))
+        portal_url = build_client_portal_url(access["access_token"])
+        message = f"Track your transaction: {portal_url}"
+
+        if client_phone:
+            send_sms_async(client_phone, message)
+            sent_sms += 1
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'text', %s, %s, %s, %s)
+                """,
+                (
+                    transaction_id,
+                    client_type,
+                    client_name,
+                    "Client portal link sent",
+                    f"to={client_phone} channel=sms",
+                ),
+            )
+
+        if client_email and is_email_valid(client_email):
+            email_subject = f"Maverick Client Portal - {transaction.get('property_address')}"
+            html_body = (
+                "<p>Hello,</p>"
+                f"<p>Your Maverick client portal is ready for <strong>{transaction.get('property_address')}</strong>.</p>"
+                f"<p><a href=\"{portal_url}\">Track your transaction: {portal_url}</a></p>"
+                "<p>Use this portal to view timeline progress and upload signed documents.</p>"
+                "<p>- Maverick TC</p>"
+            )
+            message_id = send_html_email(
+                to_email=client_email,
+                subject=email_subject,
+                html_body=html_body,
+            )
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'email', %s, %s, %s, %s)
+                """,
+                (
+                    transaction_id,
+                    client_type,
+                    client_name,
+                    "Client portal link email sent" if message_id else "Client portal link email failed",
+                    f"to={client_email} message_id={message_id or 'failed'}",
+                ),
+            )
+            if message_id:
+                sent_email += 1
+
+    return {"sent_sms": sent_sms, "sent_email": sent_email}
+
+
 def document_request_status_label(status_value):
     """Readable status text for document request cards."""
     normalized = (status_value or "").strip().lower()
@@ -607,6 +848,484 @@ def document_request_status_label(status_value):
     if normalized == "overdue":
         return "Overdue"
     return "Pending"
+
+
+def document_type_label(document_type):
+    """Readable label for a document type value."""
+    return (document_type or "").replace("_", " ").title()
+
+
+def document_request_target(document_type):
+    """Map document type to requested party."""
+    return DOCUMENT_REQUEST_TARGET.get(document_type, "buyer")
+
+
+def document_request_recipient_email(transaction_row, requested_from):
+    """Pick the best recipient email by request target."""
+    if requested_from == "lender":
+        return normalize_email(transaction_row.get("lender_email"))
+    if requested_from == "title":
+        return normalize_email(transaction_row.get("title_officer_email"))
+    return normalize_email(transaction_row.get("agent_email"))
+
+
+def transaction_has_document(transaction_row, transaction_id, document_type):
+    """Return whether a specific document already exists for transaction."""
+    if document_type == "contract":
+        return bool(transaction_row.get("contract_s3_key"))
+    rows = execute_query(
+        """
+        SELECT id
+        FROM documents
+        WHERE transaction_id = %s
+          AND document_type = %s
+        LIMIT 1
+        """,
+        (transaction_id, document_type),
+        fetch=True,
+    ) or []
+    return bool(rows)
+
+
+def upsert_document_request_record(transaction_id, document_type, requested_from):
+    """Create/update one request row per transaction/document."""
+    ensure_document_requests_table()
+    rows = execute_query(
+        """
+        INSERT INTO document_requests (
+            transaction_id, document_type, requested_from, status, updated_at
+        )
+        VALUES (%s, %s, %s, 'pending', CURRENT_TIMESTAMP)
+        ON CONFLICT (transaction_id, document_type)
+        DO UPDATE SET
+            requested_from = EXCLUDED.requested_from,
+            status = CASE
+                WHEN document_requests.received_date IS NOT NULL THEN 'received'
+                ELSE document_requests.status
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        RETURNING id, email_sent_date, reminder_sent_date, received_date, status
+        """,
+        (transaction_id, document_type, requested_from),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def mark_document_request_email_sent(request_id, is_reminder=False):
+    """Update request timestamps after manual email delivery."""
+    if is_reminder:
+        execute_query(
+            """
+            UPDATE document_requests
+            SET reminder_sent_date = CURRENT_TIMESTAMP,
+                status = CASE
+                    WHEN received_date IS NOT NULL THEN 'received'
+                    WHEN status = 'overdue' THEN 'overdue'
+                    ELSE 'pending'
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (request_id,),
+        )
+    else:
+        execute_query(
+            """
+            UPDATE document_requests
+            SET email_sent_date = CASE
+                    WHEN email_sent_date IS NULL THEN CURRENT_TIMESTAMP
+                    ELSE email_sent_date
+                END,
+                status = CASE
+                    WHEN received_date IS NOT NULL THEN 'received'
+                    WHEN status = 'overdue' THEN 'overdue'
+                    ELSE 'pending'
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (request_id,),
+        )
+
+
+def send_manual_document_request(transaction_row, document_type):
+    """Send an initial request or reminder email for one missing document."""
+    requested_from = document_request_target(document_type)
+    recipient_email = document_request_recipient_email(transaction_row, requested_from)
+    if not recipient_email:
+        return {"success": False, "reason": "missing_recipient", "requested_from": requested_from}
+
+    request_row = upsert_document_request_record(transaction_row["id"], document_type, requested_from)
+    if not request_row:
+        return {"success": False, "reason": "request_row_missing", "requested_from": requested_from}
+    if request_row.get("received_date"):
+        return {"success": False, "reason": "already_received", "requested_from": requested_from}
+
+    closing_date = transaction_row.get("closing_date")
+    days_to_close = (closing_date - date.today()).days if closing_date else None
+    template_name = "document_request.html" if not request_row.get("email_sent_date") else "document_reminder.html"
+    request_kind = "initial" if template_name == "document_request.html" else "reminder"
+    subject = (
+        f"Document Request: {document_type_label(document_type)} - {transaction_row.get('property_address')}"
+        if request_kind == "initial"
+        else f"Reminder: {document_type_label(document_type)} needed - {transaction_row.get('property_address')}"
+    )
+    html_body = render_template(
+        f"emails/{template_name}",
+        property_address=transaction_row.get("property_address"),
+        document_label=document_type_label(document_type),
+        requested_from=requested_from.title(),
+        closing_date_label=closing_date.strftime("%b %d, %Y") if closing_date else "TBD",
+        days_to_close=days_to_close if days_to_close is not None else "N/A",
+        agent_name=transaction_row.get("agent_name") or "Agent",
+    )
+    message_id = send_html_email(to_email=recipient_email, subject=subject, html_body=html_body)
+    if not message_id:
+        return {"success": False, "reason": "send_failed", "requested_from": requested_from}
+
+    mark_document_request_email_sent(request_row["id"], is_reminder=request_kind == "reminder")
+    return {
+        "success": True,
+        "kind": request_kind,
+        "requested_from": requested_from,
+        "recipient_email": recipient_email,
+        "message_id": message_id,
+    }
+
+
+def ensure_client_access_table():
+    """Ensure client portal access table exists."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS client_access (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            client_type VARCHAR(20) NOT NULL,
+            access_token UUID UNIQUE NOT NULL,
+            email VARCHAR(255),
+            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_accessed TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_client_access_transaction_type
+        ON client_access(transaction_id, client_type)
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_client_access_token
+        ON client_access(access_token)
+        """
+    )
+
+
+def client_portal_base_url():
+    """Resolve base URL used in client portal links."""
+    configured = (os.getenv("CLIENT_PORTAL_BASE_URL") or os.getenv("APP_BASE_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    if has_request_context():
+        return request.url_root.rstrip("/")
+    return "https://maverick.com"
+
+
+def client_portal_link_for_token(access_token):
+    """Build external link for a client access token."""
+    return f"{client_portal_base_url()}/client/{access_token}"
+
+
+def upsert_client_access(transaction_id, client_type, email=None):
+    """Create/update one client portal token per role."""
+    if client_type not in CLIENT_TYPES:
+        raise ValueError("Unsupported client type")
+
+    ensure_client_access_table()
+    safe_email = normalize_email(email)
+    generated_token = str(uuid4())
+    rows = execute_query(
+        """
+        INSERT INTO client_access (
+            transaction_id, client_type, access_token, email, created_date
+        )
+        VALUES (%s, %s, %s::uuid, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (transaction_id, client_type)
+        DO UPDATE SET
+            email = CASE
+                WHEN COALESCE(EXCLUDED.email, '') <> '' THEN EXCLUDED.email
+                ELSE client_access.email
+            END
+        RETURNING
+            id,
+            transaction_id,
+            client_type,
+            access_token::text AS access_token,
+            email,
+            created_date,
+            last_accessed
+        """,
+        (transaction_id, client_type, generated_token, safe_email or None),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def fetch_client_access_rows(transaction_id):
+    """Fetch all client access rows for one transaction."""
+    ensure_client_access_table()
+    return execute_query(
+        """
+        SELECT
+            id,
+            transaction_id,
+            client_type,
+            access_token::text AS access_token,
+            email,
+            created_date,
+            last_accessed
+        FROM client_access
+        WHERE transaction_id = %s
+        ORDER BY client_type ASC
+        """,
+        (transaction_id,),
+        fetch=True,
+    ) or []
+
+
+def fetch_client_access_by_token(access_token):
+    """Resolve one client access row using an access token."""
+    ensure_client_access_table()
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            transaction_id,
+            client_type,
+            access_token::text AS access_token,
+            email,
+            created_date,
+            last_accessed
+        FROM client_access
+        WHERE access_token::text = %s
+        LIMIT 1
+        """,
+        ((access_token or "").strip(),),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def mark_client_accessed(access_id):
+    """Stamp latest client portal visit/upload time."""
+    execute_query(
+        """
+        UPDATE client_access
+        SET last_accessed = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (access_id,),
+    )
+
+
+def deliver_client_portal_link(transaction, client_type, link_url, phone_number="", email_address=""):
+    """Send portal link via SMS/email and log outcomes."""
+    sent_count = 0
+    msg = f"Track your transaction: {link_url}"
+    party_label = client_type.title()
+
+    normalized_phone = normalize_phone(phone_number or "")
+    if normalized_phone:
+        send_sms_async(normalized_phone, msg)
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'text', %s, %s, %s, %s)
+            """,
+            (
+                transaction["id"],
+                client_type,
+                party_label,
+                f"Client portal link sent by SMS to {party_label}",
+                f"phone={normalized_phone}",
+            ),
+        )
+        sent_count += 1
+
+    safe_email = normalize_email(email_address)
+    if safe_email and is_email_valid(safe_email):
+        html_body = render_template(
+            "emails/client_portal_access.html",
+            property_address=transaction.get("property_address"),
+            client_type=party_label,
+            portal_url=link_url,
+            closing_date_label=(
+                transaction["closing_date"].strftime("%b %d, %Y") if transaction.get("closing_date") else "TBD"
+            ),
+        )
+        message_id = send_html_email(
+            to_email=safe_email,
+            subject=f"Maverick Client Portal - {transaction.get('property_address')}",
+            html_body=html_body,
+        )
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'email', %s, %s, %s, %s)
+            """,
+            (
+                transaction["id"],
+                client_type,
+                party_label,
+                (
+                    f"Client portal link emailed to {party_label}"
+                    if message_id
+                    else f"Client portal email failed for {party_label}"
+                ),
+                f"to={safe_email} message_id={message_id or 'failed'}",
+            ),
+        )
+        if message_id:
+            sent_count += 1
+
+    return sent_count
+
+
+def provision_client_portal_access(transaction, buyer_email=None, seller_email=None):
+    """Create portal links and send them to buyer/seller contacts."""
+    buyer_access = upsert_client_access(transaction["id"], "buyer", buyer_email)
+    seller_access = upsert_client_access(transaction["id"], "seller", seller_email)
+    if not buyer_access or not seller_access:
+        return {
+            "success": False,
+            "reason": "access_generation_failed",
+            "sent_count": 0,
+            "links": {},
+        }
+
+    buyer_link = client_portal_link_for_token(buyer_access["access_token"])
+    seller_link = client_portal_link_for_token(seller_access["access_token"])
+
+    sent_count = 0
+    sent_count += deliver_client_portal_link(
+        transaction,
+        "buyer",
+        buyer_link,
+        phone_number=transaction.get("buyer_phone"),
+        email_address=buyer_access.get("email"),
+    )
+    sent_count += deliver_client_portal_link(
+        transaction,
+        "seller",
+        seller_link,
+        phone_number=transaction.get("seller_phone"),
+        email_address=seller_access.get("email"),
+    )
+
+    return {
+        "success": True,
+        "sent_count": sent_count,
+        "links": {
+            "buyer": buyer_link,
+            "seller": seller_link,
+        },
+        "emails": {
+            "buyer": buyer_access.get("email") or "",
+            "seller": seller_access.get("email") or "",
+        },
+    }
+
+
+def build_client_portal_context(access_token):
+    """Build context payload for client portal template rendering."""
+    access_row = fetch_client_access_by_token(access_token)
+    if not access_row:
+        return None
+
+    transaction = get_transaction_or_none(access_row["transaction_id"])
+    if not transaction:
+        return None
+
+    mark_client_accessed(access_row["id"])
+
+    timeline_rows = execute_query(
+        """
+        SELECT id, deadline_type, deadline_date, completed
+        FROM deadlines
+        WHERE transaction_id = %s
+        ORDER BY deadline_date ASC, id ASC
+        """,
+        (transaction["id"],),
+        fetch=True,
+    ) or []
+    completed_count = 0
+    for row in timeline_rows:
+        row["deadline_label"] = format_date_label(row.get("deadline_date"))
+        row["name_label"] = (row.get("deadline_type") or "").replace("_", " ").title()
+        row["is_completed"] = bool(row.get("completed"))
+        row["is_overdue"] = bool(row.get("deadline_date")) and row["deadline_date"] < date.today() and not row["is_completed"]
+        if row["is_completed"]:
+            completed_count += 1
+
+    total_count = len(timeline_rows)
+    progress_percent = 0
+    if total_count > 0:
+        progress_percent = int(round((completed_count / total_count) * 100))
+    elif (transaction.get("status") or "").upper() == "COMPLETED":
+        progress_percent = 100
+
+    documents = execute_query(
+        """
+        SELECT id, document_type, filename, uploaded_at, s3_key
+        FROM documents
+        WHERE transaction_id = %s
+        ORDER BY uploaded_at DESC, id DESC
+        """,
+        (transaction["id"],),
+        fetch=True,
+    ) or []
+
+    if transaction.get("contract_s3_key"):
+        documents.insert(
+            0,
+            {
+                "id": 0,
+                "document_type": "contract",
+                "filename": transaction.get("contract_pdf_url") or "contract.pdf",
+                "uploaded_at": transaction.get("created_at"),
+                "s3_key": transaction.get("contract_s3_key"),
+            },
+        )
+
+    uploaded_types = set()
+    for doc in documents:
+        doc["uploaded_at_label"] = format_timestamp_label(doc.get("uploaded_at"))
+        doc["document_label"] = document_type_label(doc.get("document_type"))
+        doc["view_url"] = get_presigned_url(doc["s3_key"], expiration=1800) if doc.get("s3_key") else None
+        uploaded_types.add((doc.get("document_type") or "").lower())
+
+    checklist = []
+    for doc_type in sorted(REQUIRED_DOCUMENT_TYPES):
+        checklist.append(
+            {
+                "document_type": doc_type,
+                "document_label": document_type_label(doc_type),
+                "received": doc_type in uploaded_types,
+            }
+        )
+
+    return {
+        "access": access_row,
+        "transaction": transaction,
+        "timeline": timeline_rows,
+        "documents": documents,
+        "checklist": checklist,
+        "progress_percent": progress_percent,
+        "completed_deadlines": completed_count,
+        "total_deadlines": total_count,
+    }
 
 
 def upsert_commission_tracking(transaction_id, referral_credit_override=None):
@@ -2501,6 +3220,25 @@ def tc_transaction(transaction_id):
         mode = "completed"
     if status == "CANCELLED":
         mode = "completed"
+    doc_notice = (request.args.get("doc_notice") or "").strip()
+    doc_notice_type = (request.args.get("doc_notice_type") or "success").strip().lower()
+    if doc_notice_type not in {"success", "warning", "error"}:
+        doc_notice_type = "success"
+
+    client_portal_links = {
+        "buyer": {"exists": False, "link": "", "email": "", "last_accessed_label": ""},
+        "seller": {"exists": False, "link": "", "email": "", "last_accessed_label": ""},
+    }
+    for access_row in fetch_client_access_rows(transaction_id):
+        role = (access_row.get("client_type") or "").lower()
+        if role not in client_portal_links:
+            continue
+        client_portal_links[role] = {
+            "exists": True,
+            "link": client_portal_link_for_token(access_row.get("access_token")),
+            "email": access_row.get("email") or "",
+            "last_accessed_label": format_timestamp_label(access_row.get("last_accessed")),
+        }
 
     transaction["has_contract_pdf"] = bool(transaction.get("contract_s3_key"))
     transaction["upload_time_ago"] = format_time_ago(transaction.get("created_at"))
@@ -2587,6 +3325,17 @@ def tc_transaction(transaction_id):
     if transaction.get("contract_s3_key"):
         uploaded_document_types.add("contract")
     missing_document_types = sorted(REQUIRED_DOCUMENT_TYPES - uploaded_document_types)
+    missing_document_items = []
+    for doc_type in missing_document_types:
+        requested_from = document_request_target(doc_type)
+        missing_document_items.append(
+            {
+                "document_type": doc_type,
+                "document_label": document_type_label(doc_type),
+                "requested_from": requested_from,
+                "requested_from_label": requested_from.title(),
+            }
+        )
 
     ensure_document_requests_table()
     document_requests = execute_query(
@@ -2608,7 +3357,7 @@ def tc_transaction(transaction_id):
     ) or []
     for req in document_requests:
         req["status_label"] = document_request_status_label(req.get("status"))
-        req["document_label"] = (req.get("document_type") or "").replace("_", " ").title()
+        req["document_label"] = document_type_label(req.get("document_type"))
         req["requested_from_label"] = (req.get("requested_from") or "").replace("_", " ").title()
         req["email_sent_label"] = format_timestamp_label(req.get("email_sent_date"))
         req["reminder_sent_label"] = format_timestamp_label(req.get("reminder_sent_date"))
@@ -2692,8 +3441,11 @@ def tc_transaction(transaction_id):
         transaction=transaction,
         mode=mode,
         status=status,
+        doc_notice=doc_notice,
+        doc_notice_type=doc_notice_type,
         documents=documents,
         missing_document_types=missing_document_types,
+        missing_document_items=missing_document_items,
         document_requests=document_requests,
         timeline=timeline,
         task_preview=task_preview,
@@ -2702,6 +3454,7 @@ def tc_transaction(transaction_id):
         payment_context=payment_context,
         extracted_data=extracted_context,
         email_status=email_status,
+        client_portal_links=client_portal_links,
     )
 
 
@@ -2910,6 +3663,8 @@ def approve_transaction(transaction_id):
 
     buyer_phone = normalize_phone(request.form.get("buyer_phone", "").strip())
     seller_phone = normalize_phone(request.form.get("seller_phone", "").strip())
+    buyer_email = normalize_email(request.form.get("buyer_email"))
+    seller_email = normalize_email(request.form.get("seller_email"))
     lender_name = request.form.get("lender_name", "").strip()
     lender_email = normalize_email(request.form.get("lender_email"))
     title_company = request.form.get("title_company", "").strip()
@@ -2921,6 +3676,10 @@ def approve_transaction(transaction_id):
         return "Lender email must be a valid address.", 400
     if title_company_email and not is_email_valid(title_company_email):
         return "Title company email must be a valid address.", 400
+    if buyer_email and not is_email_valid(buyer_email):
+        return "Buyer email must be a valid address.", 400
+    if seller_email and not is_email_valid(seller_email):
+        return "Seller email must be a valid address.", 400
     if closing_date_value < effective_date_value:
         return "Closing date cannot be before effective date.", 400
 
@@ -2994,6 +3753,8 @@ def approve_transaction(transaction_id):
         return "Failed to create tasks.", 500
 
     transaction["id"] = transaction_id
+    transaction["buyer_phone"] = buyer_phone
+    transaction["seller_phone"] = seller_phone
     maybe_create_referral(transaction)
 
     timeline_dates = {
@@ -3093,6 +3854,12 @@ def approve_transaction(transaction_id):
             ),
         )
 
+    provision_client_portal_access(
+        transaction,
+        buyer_email=buyer_email or None,
+        seller_email=seller_email or None,
+    )
+
     return redirect(url_for("tc_dashboard"))
 
 
@@ -3169,6 +3936,252 @@ def upload_transaction_document(transaction_id):
         ip_address=request.remote_addr or "",
     )
     return redirect(f"{url_for('tc_transaction', transaction_id=transaction_id)}#documents")
+
+
+@app.route("/tc/transaction/<int:transaction_id>/request-document", methods=["POST"])
+@login_required
+def send_document_request_now(transaction_id):
+    """Allow TC to manually trigger a request email for a missing document."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+
+    document_type = (request.form.get("document_type") or "").strip().lower()
+    if document_type not in REQUIRED_DOCUMENT_TYPES:
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Invalid document type selected.",
+            doc_notice_type="error",
+        )
+        return redirect(f"{redirect_url}#documents")
+
+    if transaction_has_document(transaction, transaction_id, document_type):
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice=f"{document_type_label(document_type)} is already on file.",
+            doc_notice_type="warning",
+        )
+        return redirect(f"{redirect_url}#documents")
+
+    result = send_manual_document_request(transaction, document_type)
+    if result.get("success"):
+        action_label = "Request" if result.get("kind") == "initial" else "Reminder"
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice=(
+                f"{action_label} sent for {document_type_label(document_type)} "
+                f"to {result.get('requested_from', 'party').title()}."
+            ),
+            doc_notice_type="success",
+        )
+        return redirect(f"{redirect_url}#documents")
+
+    failure_reason = result.get("reason")
+    if failure_reason == "missing_recipient":
+        notice = (
+            f"Cannot send {document_type_label(document_type)} request: "
+            f"{result.get('requested_from', 'recipient').title()} email is missing."
+        )
+        notice_type = "warning"
+    elif failure_reason == "already_received":
+        notice = f"{document_type_label(document_type)} is already marked as received."
+        notice_type = "warning"
+    else:
+        notice = f"Email send failed for {document_type_label(document_type)}. Please try again."
+        notice_type = "error"
+
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice=notice,
+        doc_notice_type=notice_type,
+    )
+    return redirect(f"{redirect_url}#documents")
+
+
+@app.route("/tc/transaction/<int:transaction_id>/generate-client-portal", methods=["POST"])
+@login_required
+def generate_client_portal_link(transaction_id):
+    """Generate/send buyer and seller client portal links from TC view."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return "Transaction not found", 404
+
+    buyer_email = normalize_email(request.form.get("buyer_email"))
+    seller_email = normalize_email(request.form.get("seller_email"))
+    if buyer_email and not is_email_valid(buyer_email):
+        buyer_email = ""
+    if seller_email and not is_email_valid(seller_email):
+        seller_email = ""
+
+    result = provision_client_portal_access(transaction, buyer_email=buyer_email, seller_email=seller_email)
+    if not result.get("success"):
+        redirect_url = url_for(
+            "tc_transaction",
+            transaction_id=transaction_id,
+            doc_notice="Unable to generate client portal links right now.",
+            doc_notice_type="error",
+        )
+        return redirect(redirect_url)
+
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice=f"Client portal links generated. Sent via {result.get('sent_count', 0)} channel(s).",
+        doc_notice_type="success",
+    )
+    return redirect(redirect_url)
+
+
+def _render_client_portal_page(access_token, active_tab):
+    """Render client portal with a selected tab."""
+    portal_context = build_client_portal_context(access_token)
+    if not portal_context:
+        return "Client portal link is invalid or expired.", 404
+
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    return render_template(
+        "client_portal.html",
+        active_tab=active_tab,
+        portal_notice=notice,
+        portal_notice_type=notice_type,
+        **portal_context,
+    )
+
+
+@app.route("/client/<access_token>")
+def client_portal_home(access_token):
+    """Client portal landing page."""
+    return _render_client_portal_page(access_token, active_tab="overview")
+
+
+@app.route("/client/<access_token>/timeline")
+def client_portal_timeline(access_token):
+    """Client portal timeline view."""
+    return _render_client_portal_page(access_token, active_tab="timeline")
+
+
+@app.route("/client/<access_token>/documents")
+def client_portal_documents(access_token):
+    """Client portal documents + upload view."""
+    return _render_client_portal_page(access_token, active_tab="documents")
+
+
+@app.route("/client/<access_token>/upload", methods=["POST"])
+def client_portal_upload(access_token):
+    """Upload signed client documents into the transaction record."""
+    access_row = fetch_client_access_by_token(access_token)
+    if not access_row:
+        return "Client portal link is invalid or expired.", 404
+
+    transaction = get_transaction_or_none(access_row["transaction_id"])
+    if not transaction:
+        return "Transaction not found.", 404
+
+    if "document_file" not in request.files:
+        redirect_url = url_for(
+            "client_portal_documents",
+            access_token=access_token,
+            notice="Please choose a file before uploading.",
+            notice_type="warning",
+        )
+        return redirect(redirect_url)
+
+    file = request.files["document_file"]
+    if not file or not file.filename:
+        redirect_url = url_for(
+            "client_portal_documents",
+            access_token=access_token,
+            notice="Please choose a file before uploading.",
+            notice_type="warning",
+        )
+        return redirect(redirect_url)
+
+    safe_filename = secure_filename(file.filename)
+    extension = file_extension(safe_filename)
+    if extension not in ALLOWED_DOCUMENT_EXTENSIONS:
+        redirect_url = url_for(
+            "client_portal_documents",
+            access_token=access_token,
+            notice="Invalid file type. Please upload PDF, JPG, JPEG, or PNG.",
+            notice_type="error",
+        )
+        return redirect(redirect_url)
+
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    if file_size > MAX_FILE_SIZE:
+        redirect_url = url_for(
+            "client_portal_documents",
+            access_token=access_token,
+            notice="File exceeds 16MB upload limit.",
+            notice_type="error",
+        )
+        return redirect(redirect_url)
+    file.seek(0)
+
+    document_type = (request.form.get("document_type") or "other").strip().lower()
+    valid_upload_types = CLIENT_UPLOAD_DOCUMENT_TYPES | REQUIRED_DOCUMENT_TYPES
+    if document_type not in valid_upload_types:
+        document_type = "other"
+
+    s3_key = upload_document(file, transaction["id"], document_type, safe_filename)
+    if not s3_key:
+        redirect_url = url_for(
+            "client_portal_documents",
+            access_token=access_token,
+            notice="Upload failed. Please try again.",
+            notice_type="error",
+        )
+        return redirect(redirect_url)
+
+    execute_insert(
+        """
+        INSERT INTO documents (
+            transaction_id, document_type, filename, s3_key, file_size, uploaded_by, uploaded_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            transaction["id"],
+            document_type,
+            safe_filename,
+            s3_key,
+            file_size,
+            f"client_{access_row.get('client_type')}",
+        ),
+    )
+
+    ensure_document_requests_table()
+    execute_query(
+        """
+        UPDATE document_requests
+        SET received_date = COALESCE(received_date, CURRENT_TIMESTAMP),
+            status = 'received',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE transaction_id = %s
+          AND document_type = %s
+          AND status <> 'received'
+        """,
+        (transaction["id"], document_type),
+    )
+
+    mark_client_accessed(access_row["id"])
+
+    redirect_url = url_for(
+        "client_portal_documents",
+        access_token=access_token,
+        notice=f"Uploaded {document_type_label(document_type)} successfully.",
+        notice_type="success",
+    )
+    return redirect(redirect_url)
 
 
 @app.route("/tc/document/<int:document_id>/view")

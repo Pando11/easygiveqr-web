@@ -296,6 +296,16 @@ CREATE TABLE document_requests (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE client_access (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    client_type VARCHAR(20) NOT NULL,
+    access_token UUID UNIQUE NOT NULL,
+    email VARCHAR(255),
+    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_accessed TIMESTAMP
+);
+
 -- INDEXES for performance:
 CREATE INDEX idx_transactions_status ON transactions(status);
 CREATE INDEX idx_transactions_agent_phone ON transactions(agent_phone);
@@ -318,3 +328,5 @@ CREATE UNIQUE INDEX idx_commission_tracking_transaction ON commission_tracking(t
 CREATE INDEX idx_commission_tracking_month ON commission_tracking(month);
 CREATE UNIQUE INDEX idx_document_requests_txn_doc_type ON document_requests(transaction_id, document_type);
 CREATE INDEX idx_document_requests_status ON document_requests(status);
+CREATE UNIQUE INDEX idx_client_access_transaction_type ON client_access(transaction_id, client_type);
+CREATE UNIQUE INDEX idx_client_access_token ON client_access(access_token);

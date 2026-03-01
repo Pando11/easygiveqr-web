@@ -11,6 +11,7 @@ Core capabilities:
 - Document storage with AWS S3 + access logs
 - Stripe card payments plus Venmo/PayPal fallback links
 - Twilio SMS reminders, updates, and escalation alerts
+- Client portal links for buyer/seller timeline + document upload
 - Automation scripts for reminders, closing protocol, problem detection, and nightly backups
 
 ## Local setup instructions
@@ -40,6 +41,7 @@ DATABASE_CONNECT_TIMEOUT=8
 
 SECRET_KEY=generate-random-secret-key
 APP_BASE_URL=http://localhost:5000
+CLIENT_PORTAL_BASE_URL=https://maverick.com
 
 TC_USERNAME=margaret
 TC_PASSWORD=secure-hashed-password
@@ -77,6 +79,7 @@ Useful endpoints:
 - Agent upload: `http://localhost:5000/`
 - TC login: `http://localhost:5000/tc`
 - Health check: `http://localhost:5000/health`
+- Client portal: `http://localhost:5000/client/<access_token>`
 
 ## Mobile API (JWT)
 
@@ -96,6 +99,18 @@ Mobile clients authenticate with TC credentials and receive a bearer token.
    - `POST /api/mobile/call/<deadline_id>/complete`
    - `GET /api/mobile/transaction/<transaction_id>/communications`
    - `POST /api/mobile/transaction/<transaction_id>/communications`
+
+## Client Portal Routes
+
+These routes power buyer/seller client access using secure UUID tokens:
+
+- `GET /client/<access_token>` (portal overview)
+- `GET /client/<access_token>/timeline` (timeline)
+- `GET /client/<access_token>/documents` (documents + upload UI)
+- `POST /client/<access_token>/upload` (signed document upload)
+
+TC actions:
+- `POST /tc/transaction/<transaction_id>/generate-client-portal`
 
 ## Deploy to Railway
 
@@ -126,6 +141,8 @@ See `RAILWAY_CRONS.md` for copy/paste schedules and commands for:
 ## Additional operational docs
 
 - `MARGARET_TRAINING_MANUAL.md`
+- `CLIENT_PORTAL_USER_GUIDE.md`
+- `API_DOCUMENTATION.md`
 - `STRIPE_MINIONS_INSTRUCTIONS.md`
 - `STRIPE_DEV_SETUP.md`
 - `LAUNCH_CHECKLIST.md`

@@ -8,9 +8,10 @@
 5. Document Tracking
 6. Communication Logging
 7. Payment Tracking
-8. Troubleshooting
-9. Texas TC Best Practices
-10. Quick Reference
+8. Client Portal Management
+9. Troubleshooting
+10. Texas TC Best Practices
+11. Quick Reference
 
 ---
 
@@ -160,6 +161,16 @@ Common issues:
 3. Assign document type.
 4. Confirm in list and verify accessibility.
 
+### Manual "Send request now" Button
+
+If a required document is missing:
+
+1. Open the transaction.
+2. Go to **Documents**.
+3. Click **Send request now** next to the missing document.
+4. Confirm the status banner at the top.
+5. Verify request timestamps in the **Document Requests** box.
+
 ### Access and Retention
 
 - Documents are stored in S3.
@@ -217,7 +228,32 @@ Agents may pay by:
 
 ---
 
-## 8. TROUBLESHOOTING
+## 8. CLIENT PORTAL MANAGEMENT
+
+### What Clients Can Do
+
+Buyer and seller portal links let clients:
+- View transaction progress
+- See deadline timeline
+- View document checklist
+- Upload signed documents directly
+
+### Your Responsibilities
+
+1. During review/approval, capture optional buyer/seller email in the form.
+2. After activation, use **Generate Client Portal Link** on the transaction page.
+3. Confirm links appear in the Actions card.
+4. Re-send links if clients report they cannot find the message.
+
+### Best Practices
+
+- Always verify buyer/seller phone numbers are correct before approving.
+- Encourage clients to upload signed items in portal rather than texting photos.
+- If a client upload appears missing, refresh the Documents section and check timestamps.
+
+---
+
+## 9. TROUBLESHOOTING
 
 ### SMS Not Sending
 
@@ -245,7 +281,7 @@ Agents may pay by:
 
 ---
 
-## 9. TEXAS TC BEST PRACTICES
+## 10. TEXAS TC BEST PRACTICES
 
 ### Critical Deadlines to Protect
 
@@ -275,7 +311,7 @@ If overloaded:
 
 ---
 
-## 10. QUICK REFERENCE
+## 11. QUICK REFERENCE
 
 ### Login
 - URL: `/tc/login`

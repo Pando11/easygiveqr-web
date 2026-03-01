@@ -19,6 +19,12 @@
     </div>
 </section>
 
+{% if doc_notice %}
+<div class="alert alert-{{ 'error' if doc_notice_type == 'error' else ('warning' if doc_notice_type == 'warning' else 'success') }} notice-banner">
+    {{ doc_notice }}
+</div>
+{% endif %}
+
 {% if mode == "review" %}
 <section class="layout-two-col review-layout">
     <div class="card">
@@ -184,12 +190,20 @@
                         <input type="tel" id="buyer_phone" name="buyer_phone" value="{{ transaction.buyer_phone or '' }}">
                     </div>
                     <div class="form-group">
+                        <label for="buyer_email">Buyer Email (for client portal)</label>
+                        <input type="email" id="buyer_email" name="buyer_email" value="{{ client_portal_links.buyer.email or '' }}">
+                    </div>
+                    <div class="form-group">
                         <label for="seller_name">Seller Name *</label>
                         <input type="text" id="seller_name" name="seller_name" value="{{ transaction.seller_name or '' }}" required>
                     </div>
                     <div class="form-group">
                         <label for="seller_phone">Seller Phone</label>
                         <input type="tel" id="seller_phone" name="seller_phone" value="{{ transaction.seller_phone or '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="seller_email">Seller Email (for client portal)</label>
+                        <input type="email" id="seller_email" name="seller_email" value="{{ client_portal_links.seller.email or '' }}">
                     </div>
                     <div class="form-group">
                         <label for="lender_name">Lender Name</label>
@@ -272,7 +286,22 @@
 
             {% if missing_document_types %}
             <div class="warning-box">
-                <strong>Missing documents:</strong> {{ missing_document_types|join(", ") }}
+                <strong>Missing documents:</strong>
+                {% for item in missing_document_items %}
+                    {{ item.document_label }}{% if not loop.last %}, {% endif %}
+                {% endfor %}
+                <div class="missing-doc-actions">
+                    {% for item in missing_document_items %}
+                    <form method="post" action="{{ url_for('send_document_request_now', transaction_id=transaction.id) }}"
+                          class="inline-doc-request-form">
+                        <input type="hidden" name="document_type" value="{{ item.document_type }}">
+                        <button type="submit" class="btn btn-small btn-secondary">
+                            Send request now: {{ item.document_label }}
+                        </button>
+                        <p class="request-target-note">Recipient: {{ item.requested_from_label }}</p>
+                    </form>
+                    {% endfor %}
+                </div>
             </div>
             {% endif %}
 
@@ -443,6 +472,31 @@
 
         <article class="card actions-card">
             <h3>Actions</h3>
+            <form method="post" action="{{ url_for('generate_client_portal_link', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Generate Client Portal Link</button>
+            </form>
+            <div class="portal-links-box">
+                <p><strong>Buyer Portal:</strong>
+                    {% if client_portal_links.buyer.exists %}
+                    <a href="{{ client_portal_links.buyer.link }}" target="_blank" rel="noopener">{{ client_portal_links.buyer.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                {% if client_portal_links.buyer.last_accessed_label %}
+                <p><small>Last buyer access: {{ client_portal_links.buyer.last_accessed_label }}</small></p>
+                {% endif %}
+                <p><strong>Seller Portal:</strong>
+                    {% if client_portal_links.seller.exists %}
+                    <a href="{{ client_portal_links.seller.link }}" target="_blank" rel="noopener">{{ client_portal_links.seller.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                {% if client_portal_links.seller.last_accessed_label %}
+                <p><small>Last seller access: {{ client_portal_links.seller.last_accessed_label }}</small></p>
+                {% endif %}
+            </div>
             <a class="btn action-btn" href="{{ url_for('mark_transaction_complete', transaction_id=transaction.id) }}">
                 Mark Complete
             </a>
@@ -844,6 +898,30 @@
     color: #854d0e;
 }
 
+.notice-banner {
+    margin-bottom: 14px;
+}
+
+.missing-doc-actions {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 8px;
+}
+
+.inline-doc-request-form {
+    background: rgba(255, 255, 255, 0.6);
+    border: 1px solid #fde68a;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+.request-target-note {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #92400e;
+}
+
 .doc-requests-box {
     border: 1px solid #e2e8f0;
     border-radius: 8px;
@@ -919,6 +997,21 @@
     width: 100%;
     margin-bottom: 10px;
     text-align: center;
+}
+
+.portal-links-box {
+    border: 1px solid #dbeafe;
+    background: #f8fbff;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+    font-size: 13px;
+    word-break: break-word;
+}
+
+.portal-links-box a {
+    color: #1d4ed8;
+    text-decoration: none;
 }
 
 .empty-box {

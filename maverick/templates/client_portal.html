@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+
+{% block title %}Client Portal - Maverick TC{% endblock %}
+{% block subtitle %}Track Your Transaction{% endblock %}
+
+{% block content %}
+<section class="card portal-top">
+    <div>
+        <h2>{{ transaction.property_address }}</h2>
+        <p class="muted-line">
+            {{ access.client_type.title() }} Portal • Transaction #{{ transaction.id }}
+        </p>
+    </div>
+    <div class="status-chip status-{{ transaction.status|lower|replace('_', '-') }}">
+        {{ transaction.status.replace('_', ' ') }}
+    </div>
+</section>
+
+{% if portal_notice %}
+<div class="alert alert-{{ 'error' if portal_notice_type == 'error' else ('warning' if portal_notice_type == 'warning' else 'success') }}">
+    {{ portal_notice }}
+</div>
+{% endif %}
+
+<section class="card">
+    <h3>Progress</h3>
+    <p class="muted-line">{{ completed_deadlines }} of {{ total_deadlines }} milestones completed</p>
+    <div class="progress-shell" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ progress_percent }}">
+        <div class="progress-fill" style="width: {{ progress_percent }}%;"></div>
+    </div>
+    <p class="progress-label">{{ progress_percent }}% complete</p>
+</section>
+
+<section class="portal-tabs">
+    <a class="tab-link {% if active_tab == 'overview' %}active{% endif %}"
+       href="{{ url_for('client_portal_home', access_token=access.access_token) }}">Overview</a>
+    <a class="tab-link {% if active_tab == 'timeline' %}active{% endif %}"
+       href="{{ url_for('client_portal_timeline', access_token=access.access_token) }}">Timeline</a>
+    <a class="tab-link {% if active_tab == 'documents' %}active{% endif %}"
+       href="{{ url_for('client_portal_documents', access_token=access.access_token) }}">Documents</a>
+</section>
+
+{% if active_tab == "overview" %}
+<section class="layout-two-col portal-layout">
+    <article class="card">
+        <h3>Timeline Snapshot</h3>
+        {% if timeline %}
+        <ul class="simple-list">
+            {% for item in timeline[:8] %}
+            <li class="list-row {% if item.is_completed %}state-complete{% elif item.is_overdue %}state-overdue{% endif %}">
+                <span>{{ item.name_label }}</span>
+                <small>{{ item.deadline_label }}</small>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="empty-box">Timeline is being prepared.</div>
+        {% endif %}
+    </article>
+
+    <article class="card">
+        <h3>Document Checklist</h3>
+        <ul class="simple-list">
+            {% for item in checklist %}
+            <li class="list-row {% if item.received %}state-complete{% else %}state-pending{% endif %}">
+                <span>{{ item.document_label }}</span>
+                <strong>{{ "Received" if item.received else "Pending" }}</strong>
+            </li>
+            {% endfor %}
+        </ul>
+    </article>
+</section>
+{% elif active_tab == "timeline" %}
+<section class="card">
+    <h3>Timeline</h3>
+    {% if timeline %}
+    <ul class="simple-list">
+        {% for item in timeline %}
+        <li class="list-row {% if item.is_completed %}state-complete{% elif item.is_overdue %}state-overdue{% endif %}">
+            <div>
+                <strong>{{ item.name_label }}</strong>
+                <p class="muted-line">{{ item.deadline_label }}</p>
+            </div>
+            <span class="badge {{ 'badge-green' if item.is_completed else ('badge-red' if item.is_overdue else 'badge-yellow') }}">
+                {{ "Completed" if item.is_completed else ("Overdue" if item.is_overdue else "Pending") }}
+            </span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty-box">Timeline is being prepared.</div>
+    {% endif %}
+</section>
+{% else %}
+<section class="layout-two-col portal-layout">
+    <article class="card">
+        <h3>Upload Signed Documents</h3>
+        <form method="post" action="{{ url_for('client_portal_upload', access_token=access.access_token) }}"
+              enctype="multipart/form-data" class="stack-form">
+            <div class="form-group">
+                <label for="document_type">Document Type</label>
+                <select id="document_type" name="document_type" required>
+                    <option value="">Select document type...</option>
+                    <option value="signed_amendment">Signed Amendment</option>
+                    <option value="signed_disclosure">Signed Disclosure</option>
+                    <option value="signed_addendum">Signed Addendum</option>
+                    <option value="insurance_binder">Insurance Binder</option>
+                    <option value="loan_approval">Loan Approval</option>
+                    <option value="settlement_statement">Settlement Statement</option>
+                    <option value="other">Other</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="document_file">File</label>
+                <input id="document_file" type="file" name="document_file" accept=".pdf,.jpg,.jpeg,.png" required>
+            </div>
+            <button type="submit" class="btn">Upload Document</button>
+        </form>
+    </article>
+
+    <article class="card">
+        <h3>Document Checklist</h3>
+        <ul class="simple-list">
+            {% for item in checklist %}
+            <li class="list-row {% if item.received %}state-complete{% else %}state-pending{% endif %}">
+                <span>{{ item.document_label }}</span>
+                <strong>{{ "Received" if item.received else "Pending" }}</strong>
+            </li>
+            {% endfor %}
+        </ul>
+    </article>
+</section>
+
+<section class="card">
+    <h3>Uploaded Documents</h3>
+    {% if documents %}
+    <ul class="simple-list">
+        {% for doc in documents %}
+        <li class="list-row">
+            <div>
+                <strong>{{ doc.document_label }}</strong>
+                <p class="muted-line">{{ doc.filename }}{% if doc.uploaded_at_label %} • {{ doc.uploaded_at_label }}{% endif %}</p>
+            </div>
+            {% if doc.view_url %}
+            <a class="text-link" href="{{ doc.view_url }}" target="_blank" rel="noopener">View</a>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty-box">No documents available yet.</div>
+    {% endif %}
+</section>
+{% endif %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.portal-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+}
+
+.status-chip {
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    background: #e2e8f0;
+    color: #334155;
+}
+
+.progress-shell {
+    width: 100%;
+    background: #e2e8f0;
+    border-radius: 999px;
+    height: 14px;
+    overflow: hidden;
+    margin-top: 8px;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #10b981, #059669);
+    border-radius: 999px;
+}
+
+.progress-label {
+    margin-top: 8px;
+    font-weight: 700;
+    color: #1e293b;
+}
+
+.portal-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+
+.tab-link {
+    text-decoration: none;
+    background: #e2e8f0;
+    color: #0f172a;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-weight: 700;
+}
+
+.tab-link.active {
+    background: #1d4ed8;
+    color: #ffffff;
+}
+
+.portal-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+
+.simple-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.list-row {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+}
+
+.state-overdue {
+    background: #fff1f2;
+    border-color: #fda4af;
+}
+
+.state-complete {
+    background: #f0fdf4;
+    border-color: #86efac;
+}
+
+.state-pending {
+    background: #f8fafc;
+}
+
+.muted-line {
+    color: #64748b;
+}
+
+.text-link {
+    color: #1d4ed8;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+@media (max-width: 900px) {
+    .portal-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .portal-top {
+        flex-direction: column;
+    }
+}
+</style>
+{% endblock %}
