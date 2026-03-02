@@ -99,12 +99,133 @@ def default_communication_scenarios() -> list[dict[str, Any]]:
             "usage_count": 0,
             "success_rate": 0.68,
         },
+        {
+            "scenario_name": "Seller Won't Repair",
+            "category": "negotiation",
+            "trigger_conditions": {
+                "situation_type": "seller_wont_repair",
+                "trigger": "manual_or_ai_detection",
+            },
+            "scripts": [
+                {
+                    "approach": "Credit at Closing Instead of Repairs",
+                    "buyer_message": (
+                        "Hi {{BUYER_NAME}}, seller is hesitant to complete repairs directly. A common path is requesting "
+                        "a closing credit so you can control the work after closing. We can propose a credit around "
+                        "{{CREDIT_AMOUNT}} and keep timing on track for {{CLOSING_DATE}}."
+                    ),
+                    "seller_message": (
+                        "Hi {{SELLER_NAME}}, to keep this transaction moving, would you consider a closing credit instead "
+                        "of coordinating repairs? This often reduces your logistics and gives buyer flexibility after closing."
+                    ),
+                    "agent_message": (
+                        "Hi {{AGENT_NAME}}, seller repair resistance detected. Suggest offering a credit-in-lieu approach "
+                        "to preserve timeline and reduce negotiation friction."
+                    ),
+                },
+                {
+                    "approach": "Safety Items Only",
+                    "buyer_message": (
+                        "Hi {{BUYER_NAME}}, if seller won't address everything, we can narrow requests to safety/major "
+                        "items only. That focused ask often gets approved and still protects your risk."
+                    ),
+                    "seller_message": (
+                        "Hi {{SELLER_NAME}}, buyer is willing to narrow the request to top safety items so we can avoid a "
+                        "larger amendment and stay on schedule."
+                    ),
+                    "agent_message": (
+                        "Hi {{AGENT_NAME}}, recommending a safety-items-only repair scope to improve odds of agreement."
+                    ),
+                },
+                {
+                    "approach": "Price Adjustment + Fast Close",
+                    "buyer_message": (
+                        "Hi {{BUYER_NAME}}, another option is a purchase-price adjustment instead of repair coordination. "
+                        "This simplifies execution and helps us maintain closing momentum."
+                    ),
+                    "seller_message": (
+                        "Hi {{SELLER_NAME}}, buyer may accept a price adjustment in exchange for no repair coordination, "
+                        "which can keep us on a clean path to {{CLOSING_DATE}}."
+                    ),
+                    "agent_message": (
+                        "Hi {{AGENT_NAME}}, proposing price-adjustment-for-speed as a third path when repair negotiations stall."
+                    ),
+                },
+            ],
+            "usage_count": 0,
+            "success_rate": 0.67,
+        },
+        {
+            "scenario_name": "Buyer Cold Feet",
+            "category": "problem",
+            "trigger_conditions": {
+                "situation_type": "buyer_cold_feet",
+                "trigger": "manual_or_ai_detection",
+            },
+            "scripts": [
+                {
+                    "approach": "Decision Framework + Facts",
+                    "buyer_message": (
+                        "Hi {{BUYER_NAME}}, I hear your concerns and that's completely normal before closing. Let's walk "
+                        "through your top 3 concerns and separate emotional stress from contract facts so you can make a "
+                        "confident decision."
+                    ),
+                    "agent_message": (
+                        "Hi {{AGENT_NAME}}, buyer hesitation detected. Recommending a calm decision framework call today "
+                        "to address concerns and stabilize the transaction."
+                    ),
+                },
+                {
+                    "approach": "24-Hour Pause + Reconfirm Plan",
+                    "buyer_message": (
+                        "Hi {{BUYER_NAME}}, let's take a 24-hour pause to review numbers, timelines, and your must-haves. "
+                        "We'll reconnect tomorrow with a clear yes/no plan and next steps."
+                    ),
+                    "agent_message": (
+                        "Hi {{AGENT_NAME}}, proposing a short structured pause with follow-up tomorrow to reduce panic-driven decisions."
+                    ),
+                },
+            ],
+            "usage_count": 0,
+            "success_rate": 0.64,
+        },
+        {
+            "scenario_name": "Lender Delays",
+            "category": "problem",
+            "trigger_conditions": {
+                "situation_type": "lender_delay",
+                "trigger": "manual_or_ai_detection",
+            },
+            "scripts": [
+                {
+                    "approach": "Escalate with Document Checklist",
+                    "agent_message": (
+                        "Hi {{AGENT_NAME}}, lender timeline is slipping. I’m sending a same-day checklist request so we can "
+                        "clear conditions quickly and protect {{CLOSING_DATE}}."
+                    ),
+                    "lender_message": (
+                        "Hi {{LENDER_NAME}}, can you share remaining conditions and priority order today so we can coordinate "
+                        "documents immediately and keep closing on track?"
+                    ),
+                },
+                {
+                    "approach": "Extension Buffer + Rate Lock Protection",
+                    "agent_message": (
+                        "Hi {{AGENT_NAME}}, if lender confirms a delay, we should prep a short extension now to avoid last-minute "
+                        "risk and protect the client’s rate lock position."
+                    ),
+                    "buyer_message": (
+                        "Hi {{BUYER_NAME}}, lender processing may require a short extension. We’re proactively managing this "
+                        "to keep costs and stress as low as possible."
+                    ),
+                },
+            ],
+            "usage_count": 0,
+            "success_rate": 0.66,
+        },
     ]
 
     additional_metadata = [
-        ("Seller Won't Repair - Credit Alternative", "negotiation", "seller_wont_repair"),
-        ("Buyer Cold Feet - Decision Framework", "problem", "buyer_cold_feet"),
-        ("Lender Delay - Rate Lock Extension", "problem", "lender_delay"),
         ("Title Issue - Curative Timeline", "problem", "title_issue"),
         ("Extension Request - Cooperative Ask", "coordination", "extension_request"),
         ("Termination Notice - Professional Closeout", "update", "termination"),

@@ -4342,7 +4342,7 @@ def personalize_scripts(scripts, transaction, situation_data):
     return personalized_approaches
 
 
-def find_matching_scenarios(transaction, situation_type, situation_data, limit=5):
+def find_matching_scenarios(transaction, situation_type, situation_data, limit=3):
     """Return ranked scenarios for this transaction + situation."""
     ensure_communication_scenarios_table()
     rows = execute_query(
@@ -4372,7 +4372,7 @@ def find_matching_scenarios(transaction, situation_type, situation_data, limit=5
         row["match_score"] = round(total_score, 3)
         ranked.append(row)
     ranked.sort(key=lambda item: item.get("match_score", 0), reverse=True)
-    return ranked[: max(1, min(int(limit or 5), 12))]
+    return ranked[: max(1, min(int(limit or 3), 12))]
 
 
 def fetch_script_effectiveness_stats(situation_type="", limit=8):
@@ -19253,11 +19253,12 @@ def suggest_scripts(transaction_id):
         transaction=transaction,
         situation_type=situation_type,
         situation_data=payload,
-        limit=6,
+        limit=3,
     )
     personalized_scenarios = []
     for scenario in scenario_rows:
         scripts = parse_json_field(scenario.get("scripts"), [])
+        personalized_approaches = personalize_scripts(scripts, transaction, payload)
         personalized_scenarios.append(
             {
                 "scenario_id": scenario.get("id"),
@@ -19265,11 +19266,32 @@ def suggest_scripts(transaction_id):
                 "category": scenario.get("category"),
                 "success_rate": float(scenario.get("success_rate") or 0.0),
                 "usage_count": int(scenario.get("usage_count") or 0),
-                "approaches": personalize_scripts(scripts, transaction, payload),
+                "approaches": personalized_approaches[:3],
             }
         )
+    strategic_approaches = []
+    for scenario in personalized_scenarios:
+        for approach in scenario.get("approaches") or []:
+            strategic_approaches.append(
+                {
+                    "scenario_id": scenario.get("scenario_id"),
+                    "scenario_name": scenario.get("scenario_name"),
+                    "category": scenario.get("category"),
+                    "success_rate": scenario.get("success_rate"),
+                    "usage_count": scenario.get("usage_count"),
+                    "approach": approach,
+                }
+            )
+    strategic_approaches = strategic_approaches[:3]
     stats = fetch_script_effectiveness_stats(situation_type=situation_type, limit=6)
-    return jsonify({"success": True, "scenarios": personalized_scenarios, "stats": stats})
+    return jsonify(
+        {
+            "success": True,
+            "scenarios": personalized_scenarios,
+            "strategic_approaches": strategic_approaches,
+            "stats": stats,
+        }
+    )
 
 
 @app.route("/tc/transaction/<int:transaction_id>/track-script-usage", methods=["POST"])
