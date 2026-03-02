@@ -852,6 +852,35 @@ CREATE TABLE transaction_risk_flags (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE email_drafts (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+    original_email_id VARCHAR(200),
+    from_email VARCHAR(200),
+    from_name VARCHAR(200),
+    to_email VARCHAR(200),
+    subject TEXT,
+    original_message TEXT,
+    question_detected TEXT,
+    question_type VARCHAR(100),
+    confidence FLOAT,
+    draft_subject TEXT,
+    draft_body TEXT,
+    draft_data_sources JSONB DEFAULT '{}'::jsonb,
+    status VARCHAR(50),
+    reviewed_at TIMESTAMP,
+    sent_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE email_draft_feedback (
+    id SERIAL PRIMARY KEY,
+    draft_id INT REFERENCES email_drafts(id) ON DELETE CASCADE,
+    feedback_type VARCHAR(50),
+    edits_made TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE deadline_nudges (
     id SERIAL PRIMARY KEY,
     transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
@@ -1339,6 +1368,10 @@ CREATE INDEX idx_inbound_email_messages_transaction ON inbound_email_messages(tr
 CREATE INDEX idx_inbound_email_messages_qa ON inbound_email_messages(qa_decision, qa_match_id, received_at DESC);
 CREATE UNIQUE INDEX idx_inbound_email_rules_txn_role ON inbound_email_rules(transaction_id, sender_role);
 CREATE UNIQUE INDEX idx_transaction_risk_flags_txn ON transaction_risk_flags(transaction_id);
+CREATE UNIQUE INDEX idx_email_drafts_original_email ON email_drafts(original_email_id);
+CREATE INDEX idx_email_drafts_status_created ON email_drafts(status, created_at DESC);
+CREATE INDEX idx_email_drafts_transaction ON email_drafts(transaction_id, created_at DESC);
+CREATE INDEX idx_email_draft_feedback_draft ON email_draft_feedback(draft_id, created_at DESC);
 CREATE INDEX idx_common_qa_category_reuse ON common_qa(category, times_reused DESC, updated_at DESC);
 CREATE INDEX idx_common_qa_auto_answer ON common_qa(auto_answer, times_reused DESC);
 CREATE INDEX idx_common_qa_transaction ON common_qa(transaction_id, updated_at DESC);

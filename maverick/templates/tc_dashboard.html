@@ -20,6 +20,7 @@
         <a href="/tc/health-report" class="btn">Health Report</a>
         <a href="/tc/status-updates" class="btn btn-secondary">Status Updates</a>
         <a href="/tc/common-qa" class="btn btn-secondary">Smart Q&A</a>
+        <a href="/tc/email-drafts" class="btn btn-secondary">Email Drafts ({{ pending_email_draft_count }})</a>
         <a href="/tc/templates" class="btn btn-secondary">Text Templates</a>
         <a href="/tc/batch-upload" class="btn btn-secondary" title="Shortcut: Ctrl+U">📁 Batch Upload ({{ pending_batch_upload_count }})</a>
         <a href="/tc/calendar-sync" class="btn btn-secondary">Calendar Sync</a>
@@ -37,6 +38,15 @@
     {{ notice }}
 </div>
 {% endif %}
+
+<div class="email-drafts-notification" id="draftNotification" style="{% if pending_email_draft_count > 0 %}display:flex{% else %}display:none{% endif %};">
+    <div class="notification-content">
+        <span class="icon">📧</span>
+        <span class="message"><strong id="draftCount">{{ pending_email_draft_count }}</strong> email drafts ready for review</span>
+        <a href="/tc/email-drafts" class="btn btn-small btn-secondary">Review Now</a>
+        <button type="button" class="dismiss-btn" onclick="dismissDraftNotification()">✕</button>
+    </div>
+</div>
 
 <section class="status-section section-blue">
     <div class="section-title-row">
@@ -522,6 +532,38 @@
     background: rgba(248, 250, 252, 0.75);
 }
 
+.email-drafts-notification {
+    border: 1px solid #c7d2fe;
+    background: #eef2ff;
+    border-radius: 10px;
+    margin-bottom: 14px;
+}
+
+.notification-content {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 12px;
+    flex-wrap: wrap;
+}
+
+.notification-content .icon {
+    font-size: 18px;
+}
+
+.notification-content .message {
+    flex: 1;
+    color: #1e3a8a;
+}
+
+.dismiss-btn {
+    border: none;
+    background: transparent;
+    color: #475569;
+    cursor: pointer;
+    font-size: 14px;
+}
+
 @media (max-width: 1024px) {
     .cards-grid,
     .cards-grid-compact,
@@ -566,5 +608,37 @@ document.addEventListener("keydown", function(event) {
         window.location.href = "/tc/batch-upload";
     }
 });
+
+let draftNotificationDismissed = false;
+function dismissDraftNotification() {
+    draftNotificationDismissed = true;
+    const banner = document.getElementById("draftNotification");
+    if (banner) {
+        banner.style.display = "none";
+    }
+}
+
+async function refreshDraftCount() {
+    try {
+        const response = await fetch("/tc/email-drafts/count");
+        const payload = await response.json();
+        if (!response.ok || payload.success === false) {
+            return;
+        }
+        const count = Number(payload.count || 0);
+        const countEl = document.getElementById("draftCount");
+        const banner = document.getElementById("draftNotification");
+        if (countEl) {
+            countEl.textContent = String(count);
+        }
+        if (banner) {
+            banner.style.display = (count > 0 && !draftNotificationDismissed) ? "flex" : "none";
+        }
+    } catch (_error) {
+        // Silent polling failure.
+    }
+}
+
+setInterval(refreshDraftCount, 30000);
 </script>
 {% endblock %}

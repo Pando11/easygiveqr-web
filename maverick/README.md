@@ -626,6 +626,29 @@ Behavior:
 - Supports sensitive handling (e.g., buyer concerns not forwarded to seller)
 - Supports per-transaction routing rules (e.g., always notify Margaret for lender emails)
 
+## AI Email Draft Assistant (Human Approval)
+
+Maverick now auto-generates reply drafts for inbound transaction emails and routes them to a review queue.
+
+Primary review routes:
+- `GET /tc/email-drafts`
+- `GET /tc/email-drafts/count`
+- `POST /tc/email-draft/<draft_id>/send`
+- `POST /tc/email-draft/<draft_id>/reject`
+- `POST /tc/email-draft/<draft_id>/regenerate`
+
+Monitoring/intake options:
+- Existing inbound mailbox pipeline: `POST /webhooks/inbound-email` (transaction aliases)
+- Forwarding-only intake: `POST /webhooks/email-drafts-forward`
+
+Behavior:
+- analyzes inbound email question intent (Claude + fallback heuristics)
+- pulls transaction facts (status, deadlines, document state, recent activity)
+- generates concise, professional draft response with confidence + urgency
+- stores drafts as `pending_review`; Margaret can send as-is, edit+send, reject, or regenerate
+- logs feedback in `email_draft_feedback` for iterative learning
+- dashboard polls every 30s and surfaces pending draft notification banner
+
 ## Intelligent Nudge Automation
 
 Maverick includes a dedicated proactive nudge engine:

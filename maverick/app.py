@@ -5,6 +5,7 @@ import io
 import json
 import hashlib
 import tempfile
+from html import escape
 from difflib import SequenceMatcher
 from datetime import date, datetime, time, timedelta
 from functools import wraps
@@ -237,6 +238,16 @@ ALLOWED_EXTENSIONS = set(app.config.get("ALLOWED_EXTENSIONS", {"pdf"}))
 MAX_FILE_SIZE = app.config["MAX_CONTENT_LENGTH"]
 ALLOWED_DOCUMENT_EXTENSIONS = {"pdf", "jpg", "jpeg", "png"}
 BATCH_UPLOAD_MAX_FILES = 20
+EMAIL_DRAFT_QUESTION_TYPES = {
+    "closing_date",
+    "status_update",
+    "document_status",
+    "deadline_inquiry",
+    "general_question",
+    "urgent_issue",
+    "complaint",
+    "other",
+}
 
 DATE_CASCADE_SUPPORTED_FIELDS = {
     "closing_date",
@@ -4760,6 +4771,1031 @@ def ensure_inbound_email_tables():
     ensure_transaction_risk_flags_table()
 
 
+def ensure_email_draft_tables():
+    """Store AI-generated outbound draft responses and feedback."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS email_drafts (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+            original_email_id VARCHAR(200),
+            from_email VARCHAR(200),
+            from_name VARCHAR(200),
+            to_email VARCHAR(200),
+            subject TEXT,
+            original_message TEXT,
+            question_detected TEXT,
+            question_type VARCHAR(100),
+            confidence FLOAT,
+            draft_subject TEXT,
+            draft_body TEXT,
+            draft_data_sources JSONB DEFAULT '{}'::jsonb,
+            status VARCHAR(50),
+            reviewed_at TIMESTAMP,
+            sent_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS email_draft_feedback (
+            id SERIAL PRIMARY KEY,
+            draft_id INT REFERENCES email_drafts(id) ON DELETE CASCADE,
+            feedback_type VARCHAR(50),
+            edits_made TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_email_drafts_original_email
+        ON email_drafts(original_email_id)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_drafts_status_created
+        ON email_drafts(status, created_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_drafts_transaction
+        ON email_drafts(transaction_id, created_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_email_draft_feedback_draft
+        ON email_draft_feedback(draft_id, created_at DESC)
+        """
+    )
+
+
+def fetch_pending_email_draft_count():
+    """Return count of pending AI drafts awaiting Margaret review."""
+    ensure_email_draft_tables()
+    rows = execute_query(
+        """
+        SELECT COUNT(*) AS pending_count
+        FROM email_drafts
+        WHERE COALESCE(status, 'pending_review') = 'pending_review'
+        """,
+        fetch=True,
+    ) or []
+    return int((rows[0] or {}).get("pending_count") or 0) if rows else 0
+
+
+def infer_sender_display_name(sender_email):
+    """Convert sender email local-part into display name."""
+    local_part = (normalize_email(sender_email).split("@")[0] if sender_email else "").strip()
+    if not local_part:
+        return "Contact"
+    cleaned = re.sub(r"[^a-z0-9._-]+", " ", local_part, flags=re.IGNORECASE)
+    cleaned = cleaned.replace(".", " ").replace("_", " ").replace("-", " ")
+    return re.sub(r"\s+", " ", cleaned).strip().title() or "Contact"
+
+
+def extract_document_type_from_email(original_email):
+    """Infer requested document type keywords from email text."""
+    text = (original_email or "").lower()
+    keyword_map = {
+        "inspection": "inspection_report",
+        "appraisal": "appraisal",
+        "survey": "survey",
+        "title commitment": "title_commitment",
+        "hoa": "hoa_docs",
+        "earnest": "earnest_receipt",
+        "option fee": "option_receipt",
+        "repair addendum": "repair_addendum",
+        "closing disclosure": "settlement_statement",
+        "cd": "settlement_statement",
+        "contract": "contract",
+    }
+    for keyword, document_type in keyword_map.items():
+        if keyword in text:
+            return normalize_document_type(document_type, fallback="other")
+    return ""
+
+
+def identify_transaction_from_email(email_content, sender_email):
+    """Resolve likely transaction from sender email + body text clues."""
+    normalized_sender = normalize_email(sender_email)
+    if normalized_sender and is_email_valid(normalized_sender):
+        sender_rows = execute_query(
+            """
+            SELECT id
+            FROM transactions
+            WHERE COALESCE(status, '') IN ('ACTIVE', 'NEEDS_MARGARET_REVIEW')
+              AND (
+                  LOWER(COALESCE(agent_email, '')) = %s
+                  OR LOWER(COALESCE(buyer_email, '')) = %s
+                  OR LOWER(COALESCE(seller_email, '')) = %s
+                  OR LOWER(COALESCE(lender_email, '')) = %s
+                  OR LOWER(COALESCE(title_officer_email, '')) = %s
+              )
+            ORDER BY COALESCE(closing_date, CURRENT_DATE + INTERVAL '365 days') ASC, id DESC
+            LIMIT 1
+            """,
+            (normalized_sender, normalized_sender, normalized_sender, normalized_sender, normalized_sender),
+            fetch=True,
+        ) or []
+        if sender_rows:
+            return fetch_timeline_transaction(sender_rows[0]["id"])
+
+    candidates = execute_query(
+        """
+        SELECT id, property_address, buyer_name, seller_name, status, closing_date
+        FROM transactions
+        WHERE COALESCE(status, '') IN ('ACTIVE', 'NEEDS_MARGARET_REVIEW')
+        ORDER BY COALESCE(closing_date, CURRENT_DATE + INTERVAL '365 days') ASC, id DESC
+        LIMIT 400
+        """,
+        fetch=True,
+    ) or []
+    identifiers = _extract_batch_identifiers(email_content or "")
+    if not isinstance(identifiers, dict):
+        identifiers = {}
+    analysis = {
+        "transaction_identifiers": identifiers,
+        "property_address": identifiers.get("property_address") or "",
+    }
+    match = find_matching_transaction(analysis, candidates=candidates)
+    transaction_id = parse_optional_int(match.get("transaction_id"))
+    return fetch_timeline_transaction(transaction_id) if transaction_id else None
+
+
+def fetch_recent_activities_for_draft(transaction_id, limit=5):
+    """Summarize latest communication/activity items for status responses."""
+    rows = execute_query(
+        """
+        SELECT summary, outcome, created_at
+        FROM communications
+        WHERE transaction_id = %s
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (int(transaction_id), max(1, min(int(limit or 5), 20))),
+        fetch=True,
+    ) or []
+    payload = []
+    for row in rows:
+        payload.append(
+            {
+                "summary": row.get("summary") or "",
+                "outcome": row.get("outcome") or "",
+                "created_at": json_date_value(row.get("created_at")),
+                "time_ago": format_time_ago(row.get("created_at")),
+            }
+        )
+    return payload
+
+
+def fetch_pending_items_for_draft(transaction_id, limit=8):
+    """Return top pending task/deadline items for draft generation."""
+    tasks = execute_query(
+        """
+        SELECT task_description AS description, due_date
+        FROM tasks
+        WHERE transaction_id = %s
+          AND completed = FALSE
+          AND COALESCE(status, 'pending') <> 'completed'
+        ORDER BY due_date ASC NULLS LAST, id ASC
+        LIMIT %s
+        """,
+        (int(transaction_id), max(1, min(int(limit or 8), 20))),
+        fetch=True,
+    ) or []
+    payload = []
+    today_value = date.today()
+    for row in tasks:
+        due_date = row.get("due_date")
+        payload.append(
+            {
+                "description": row.get("description") or "",
+                "due_date": json_date_value(due_date),
+                "days_away": ((due_date - today_value).days if isinstance(due_date, date) else None),
+            }
+        )
+    return payload
+
+
+def fetch_completed_today_for_draft(transaction_id, limit=8):
+    """Return tasks completed today for quick status responses."""
+    rows = execute_query(
+        """
+        SELECT task_description AS description, completed_at
+        FROM tasks
+        WHERE transaction_id = %s
+          AND completed = TRUE
+          AND completed_at::date = CURRENT_DATE
+        ORDER BY completed_at DESC, id DESC
+        LIMIT %s
+        """,
+        (int(transaction_id), max(1, min(int(limit or 8), 20))),
+        fetch=True,
+    ) or []
+    payload = []
+    for row in rows:
+        payload.append(
+            {
+                "description": row.get("description") or "",
+                "completed_at": json_date_value(row.get("completed_at")),
+            }
+        )
+    return payload
+
+
+def fetch_document_by_type_for_draft(transaction_id, document_type):
+    """Fetch latest transaction document by normalized type."""
+    normalized_type = normalize_document_type(document_type, fallback="other")
+    rows = execute_query(
+        """
+        SELECT id, filename, uploaded_at
+        FROM documents
+        WHERE transaction_id = %s
+          AND document_type = %s
+        ORDER BY uploaded_at DESC, id DESC
+        LIMIT 1
+        """,
+        (int(transaction_id), normalized_type),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def fetch_documents_received_for_draft(transaction_id):
+    """Return currently received document types."""
+    rows = execute_query(
+        """
+        SELECT document_type, COUNT(*) AS doc_count, MAX(uploaded_at) AS latest_uploaded_at
+        FROM documents
+        WHERE transaction_id = %s
+        GROUP BY document_type
+        ORDER BY latest_uploaded_at DESC NULLS LAST, document_type ASC
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    payload = []
+    for row in rows:
+        payload.append(
+            {
+                "document_type": row.get("document_type") or "",
+                "count": int(row.get("doc_count") or 0),
+                "latest_uploaded_at": json_date_value(row.get("latest_uploaded_at")),
+            }
+        )
+    return payload
+
+
+def fetch_documents_pending_for_draft(transaction_id):
+    """Return outstanding requested docs, if request records exist."""
+    ensure_document_requests_table()
+    rows = execute_query(
+        """
+        SELECT document_type, due_date, status
+        FROM document_requests
+        WHERE transaction_id = %s
+          AND COALESCE(status, '') <> 'received'
+        ORDER BY due_date ASC NULLS LAST, id ASC
+        LIMIT 30
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    payload = []
+    today_value = date.today()
+    for row in rows:
+        due_date = row.get("due_date")
+        payload.append(
+            {
+                "document_type": row.get("document_type") or "",
+                "status": row.get("status") or "pending",
+                "due_date": json_date_value(due_date),
+                "days_away": ((due_date - today_value).days if isinstance(due_date, date) else None),
+            }
+        )
+    return payload
+
+
+def fetch_upcoming_deadlines_for_draft(transaction_id, days_ahead=30):
+    """Return upcoming deadlines used in inquiry responses."""
+    horizon = date.today() + timedelta(days=max(1, int(days_ahead or 30)))
+    rows = execute_query(
+        """
+        SELECT description, deadline_type, deadline_date, completed
+        FROM deadlines
+        WHERE transaction_id = %s
+          AND deadline_date <= %s
+        ORDER BY deadline_date ASC, id ASC
+        LIMIT 40
+        """,
+        (int(transaction_id), horizon),
+        fetch=True,
+    ) or []
+    payload = []
+    today_value = date.today()
+    for row in rows:
+        deadline_value = row.get("deadline_date")
+        payload.append(
+            {
+                "description": row.get("description") or (row.get("deadline_type") or "").replace("_", " ").title(),
+                "date": json_date_value(deadline_value),
+                "days_away": ((deadline_value - today_value).days if isinstance(deadline_value, date) else None),
+                "completed": bool(row.get("completed")),
+            }
+        )
+    return payload
+
+
+def fetch_email_thread_context(transaction_id, sender_email, limit=5):
+    """Collect recent thread snippets for continuity-aware draft generation."""
+    if not transaction_id:
+        return []
+    normalized_sender = normalize_email(sender_email)
+    inbound_rows = execute_query(
+        """
+        SELECT subject, body_text, received_at
+        FROM inbound_email_messages
+        WHERE transaction_id = %s
+          AND (%s = '' OR LOWER(COALESCE(sender_email, '')) = %s)
+        ORDER BY received_at DESC, id DESC
+        LIMIT %s
+        """,
+        (int(transaction_id), normalized_sender, normalized_sender, max(1, min(int(limit or 5), 20))),
+        fetch=True,
+    ) or []
+    outbound_rows = execute_query(
+        """
+        SELECT summary, outcome, created_at
+        FROM communications
+        WHERE transaction_id = %s
+          AND communication_type = 'email'
+        ORDER BY created_at DESC, id DESC
+        LIMIT %s
+        """,
+        (int(transaction_id), max(1, min(int(limit or 5), 20))),
+        fetch=True,
+    ) or []
+    thread = []
+    for row in inbound_rows:
+        thread.append(
+            {
+                "direction": "inbound",
+                "subject": row.get("subject") or "(No subject)",
+                "snippet": inbound_email_excerpt(row.get("body_text"), max_chars=320),
+                "at": json_date_value(row.get("received_at")),
+            }
+        )
+    for row in outbound_rows:
+        thread.append(
+            {
+                "direction": "outbound",
+                "subject": row.get("summary") or "Outbound email",
+                "snippet": inbound_email_excerpt((row.get("outcome") or row.get("summary") or ""), max_chars=220),
+                "at": json_date_value(row.get("created_at")),
+            }
+        )
+    thread.sort(key=lambda item: item.get("at") or "", reverse=True)
+    return thread[: max(1, min(int(limit or 5), 12))]
+
+
+def analyze_incoming_email(email_content, sender_email, subject, transaction=None):
+    """Use Claude + heuristics to extract question intent from inbound email."""
+    body_text = str(email_content or "").strip()
+    subject_text = (subject or "").strip()
+    combined = f"{subject_text}\n{body_text}".strip().lower()
+    question_candidates = [snippet.strip() for snippet in re.findall(r"([^?]{8,}\?)", body_text)[:4]]
+    fallback_question = (
+        question_candidates[0]
+        if question_candidates
+        else (inbound_email_excerpt(body_text, max_chars=220) or subject_text or "General transaction question")
+    )
+
+    fallback_type = "general_question"
+    if (
+        ("closing" in combined and any(token in combined for token in ["when", "date", "time"]))
+        or "closing date" in combined
+    ):
+        fallback_type = "closing_date"
+    elif "deadline" in combined or "due" in combined or "option period" in combined or "earnest" in combined:
+        fallback_type = "deadline_inquiry"
+    elif "status" in combined or "update" in combined or "where are we" in combined:
+        fallback_type = "status_update"
+    elif any(token in combined for token in ["document", "report", "appraisal", "inspection", "survey", "title commitment", "hoa"]):
+        fallback_type = "document_status"
+    elif any(token in combined for token in ["urgent", "asap", "immediately", "today", "critical"]):
+        fallback_type = "urgent_issue"
+    elif any(token in combined for token in ["frustrated", "complaint", "disappointed", "unhappy"]):
+        fallback_type = "complaint"
+
+    urgency = "low"
+    if any(token in combined for token in ["critical", "immediately", "wire fraud", "lawsuit"]):
+        urgency = "critical"
+    elif any(token in combined for token in ["urgent", "asap", "today", "need now"]):
+        urgency = "high"
+    elif any(token in combined for token in ["soon", "follow up", "update"]):
+        urgency = "medium"
+
+    fallback_confidence = 0.72
+    requires_research = fallback_type in {"general_question", "urgent_issue", "complaint"}
+    analysis = {
+        "question_detected": fallback_question,
+        "question_type": fallback_type,
+        "urgency": urgency,
+        "requires_research": requires_research,
+        "transaction_mentioned": (transaction.get("property_address") if transaction else ""),
+        "confidence": fallback_confidence,
+        "questions": question_candidates or [fallback_question],
+        "source": "heuristic",
+    }
+
+    api_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    if not api_key or not body_text:
+        return analysis
+
+    transaction_context = ""
+    if transaction:
+        transaction_context = (
+            f"Transaction context: {transaction.get('property_address')}, "
+            f"closing {json_date_value(transaction.get('closing_date')) or 'TBD'}"
+        )
+    prompt = (
+        "Analyze this inbound real-estate transaction email and extract the main question(s).\n\n"
+        f"From: {normalize_email(sender_email)}\n"
+        f"Subject: {subject_text or '(No subject)'}\n"
+        f"Message:\n{body_text[:5000]}\n\n"
+        f"{transaction_context or 'No transaction identified'}\n\n"
+        "Return JSON only:\n"
+        "{\n"
+        '  "question_detected": "main question in plain language",\n'
+        '  "questions": ["question 1", "question 2"],\n'
+        '  "question_type": "closing_date|status_update|document_status|deadline_inquiry|general_question|urgent_issue|complaint|other",\n'
+        '  "urgency": "low|medium|high|critical",\n'
+        '  "requires_research": true,\n'
+        '  "transaction_mentioned": "address or id if present",\n'
+        '  "confidence": 0-100\n'
+        "}"
+    )
+    try:
+        from anthropic import Anthropic
+
+        client = Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=(os.getenv("EMAIL_DRAFT_ANALYSIS_MODEL") or "claude-sonnet-4-20250514"),
+            max_tokens=900,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        payload = _extract_json_from_model_text(_extract_model_text_content(response))
+        if isinstance(payload, dict):
+            question_type = (payload.get("question_type") or "").strip().lower().replace("-", "_")
+            if question_type not in EMAIL_DRAFT_QUESTION_TYPES:
+                question_type = analysis["question_type"]
+            urgency_value = (payload.get("urgency") or "").strip().lower()
+            if urgency_value not in {"low", "medium", "high", "critical"}:
+                urgency_value = analysis["urgency"]
+            confidence_value = payload.get("confidence")
+            try:
+                confidence_value = float(confidence_value)
+                if confidence_value > 1:
+                    confidence_value = confidence_value / 100.0
+                confidence_value = max(0.0, min(confidence_value, 1.0))
+            except (TypeError, ValueError):
+                confidence_value = analysis["confidence"]
+
+            model_questions = payload.get("questions")
+            if not isinstance(model_questions, list):
+                model_questions = []
+            model_questions = [str(item).strip() for item in model_questions if str(item).strip()][:5]
+            if not model_questions:
+                model_questions = analysis["questions"]
+
+            analysis = {
+                "question_detected": (payload.get("question_detected") or analysis["question_detected"]).strip(),
+                "question_type": question_type,
+                "urgency": urgency_value,
+                "requires_research": bool(payload.get("requires_research")),
+                "transaction_mentioned": (payload.get("transaction_mentioned") or analysis["transaction_mentioned"]).strip(),
+                "confidence": confidence_value,
+                "questions": model_questions,
+                "source": "claude",
+            }
+    except Exception as exc:
+        log_system_error("email_draft_analysis", f"Claude fallback used: {str(exc)[:320]}")
+    return analysis
+
+
+def lookup_answer(question_type, transaction, original_email):
+    """Look up response data directly from Maverick transaction records."""
+    if not transaction:
+        return {
+            "transaction_found": False,
+            "next_step": "Ask a clarifying question to identify the transaction address or file number.",
+        }
+
+    question_key = (question_type or "general_question").strip().lower()
+    answer_data = {
+        "transaction_found": True,
+        "transaction_id": transaction.get("id"),
+        "property_address": transaction.get("property_address") or "",
+    }
+    closing_date = transaction.get("closing_date")
+    if question_key == "closing_date":
+        answer_data.update(
+            {
+                "closing_date": json_date_value(closing_date),
+                "closing_time": transaction.get("closing_time") or "2:00 PM",
+                "closing_location": transaction.get("title_company") or "title company",
+                "closing_contact": transaction.get("title_officer_name") or "",
+            }
+        )
+    elif question_key == "status_update":
+        days_to_closing = (closing_date - date.today()).days if isinstance(closing_date, date) else None
+        answer_data.update(
+            {
+                "status": transaction.get("status") or "ACTIVE",
+                "days_to_closing": days_to_closing,
+                "recent_activities": fetch_recent_activities_for_draft(transaction["id"], limit=5),
+                "pending_items": fetch_pending_items_for_draft(transaction["id"], limit=8),
+                "completed_today": fetch_completed_today_for_draft(transaction["id"], limit=8),
+            }
+        )
+    elif question_key == "document_status":
+        doc_type = extract_document_type_from_email(original_email)
+        if doc_type:
+            document = fetch_document_by_type_for_draft(transaction["id"], doc_type)
+            answer_data.update(
+                {
+                    "document_type": doc_type,
+                    "received": bool(document),
+                    "received_date": json_date_value(document.get("uploaded_at")) if document else None,
+                    "available_in_portal": bool(document),
+                }
+            )
+        else:
+            answer_data.update(
+                {
+                    "documents_received": fetch_documents_received_for_draft(transaction["id"]),
+                    "documents_pending": fetch_documents_pending_for_draft(transaction["id"]),
+                }
+            )
+    elif question_key == "deadline_inquiry":
+        answer_data.update({"deadlines": fetch_upcoming_deadlines_for_draft(transaction["id"], days_ahead=30)})
+    else:
+        answer_data.update(
+            {
+                "status": transaction.get("status") or "ACTIVE",
+                "next_deadlines": fetch_upcoming_deadlines_for_draft(transaction["id"], days_ahead=14)[:5],
+                "pending_items": fetch_pending_items_for_draft(transaction["id"], limit=6),
+            }
+        )
+    return answer_data
+
+
+def _default_email_draft_text(question_analysis, answer_data, transaction, sender_name):
+    """Generate a deterministic fallback draft when model output is unavailable."""
+    sender = sender_name or "there"
+    question_type = (question_analysis.get("question_type") or "general_question").strip().lower()
+    property_address = (transaction or {}).get("property_address") or answer_data.get("property_address") or "the transaction"
+    lines = [f"Hi {sender},", ""]
+    if not answer_data.get("transaction_found", True):
+        lines.append(
+            "Thanks for the note. I want to make sure I answer accurately—could you share the property address "
+            "or transaction file number so I can confirm details?"
+        )
+    elif question_type == "closing_date":
+        lines.append(
+            f"Closing for {property_address} is currently set for "
+            f"{answer_data.get('closing_date') or 'TBD'} at {answer_data.get('closing_time') or '2:00 PM'}."
+        )
+        if answer_data.get("closing_location"):
+            lines.append(f"Location: {answer_data.get('closing_location')}.")
+    elif question_type == "document_status":
+        if "received" in answer_data:
+            if answer_data.get("received"):
+                lines.append(
+                    f"We do have the {document_type_label(answer_data.get('document_type'))} on file "
+                    f"(received {answer_data.get('received_date') or 'recently'})."
+                )
+            else:
+                lines.append(
+                    f"We do not have the {document_type_label(answer_data.get('document_type'))} yet. "
+                    "Once received, I'll confirm right away."
+                )
+        else:
+            received_count = len(answer_data.get("documents_received") or [])
+            pending_count = len(answer_data.get("documents_pending") or [])
+            lines.append(f"We currently have {received_count} document types received and {pending_count} still pending.")
+    elif question_type == "deadline_inquiry":
+        deadlines = answer_data.get("deadlines") or []
+        if deadlines:
+            lines.append("Upcoming deadlines:")
+            for row in deadlines[:4]:
+                lines.append(f"- {row.get('description')}: {row.get('date') or 'TBD'}")
+        else:
+            lines.append("There are no upcoming deadlines currently scheduled in the next 30 days.")
+    else:
+        lines.append(
+            f"Quick update for {property_address}: status is {answer_data.get('status') or ((transaction or {}).get('status') or 'ACTIVE')}."
+        )
+        pending_items = answer_data.get("pending_items") or []
+        if pending_items:
+            lines.append("Top pending items:")
+            for row in pending_items[:3]:
+                lines.append(f"- {row.get('description')}")
+
+    lines.extend(["", "Let me know if you need anything else! - Margaret"])
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def generate_email_draft(question_analysis, answer_data, transaction, original_email, sender_name, original_subject="", thread_context=None):
+    """Use Claude (with fallback) to generate a professional response draft."""
+    subject_line = f"Re: {(original_subject or 'Transaction update').strip()}"
+    fallback_body = _default_email_draft_text(question_analysis, answer_data, transaction, sender_name)
+    draft = {"subject": subject_line, "body": fallback_body, "source": "fallback"}
+    api_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    if not api_key:
+        return draft
+
+    transaction_label = (transaction or {}).get("property_address") or answer_data.get("property_address") or "this transaction"
+    prompt = (
+        "You are Margaret, a professional Texas real estate transaction coordinator.\n"
+        "Generate a concise, warm response email draft.\n\n"
+        f"Original email from {sender_name or 'Contact'}:\n{(original_email or '')[:5000]}\n\n"
+        f"Detected question: {question_analysis.get('question_detected')}\n"
+        f"Question type: {question_analysis.get('question_type')}\n"
+        f"Urgency: {question_analysis.get('urgency')}\n\n"
+        "Information to include:\n"
+        f"{json.dumps(answer_data or {}, indent=2, default=str)}\n\n"
+        "Recent thread context (if any):\n"
+        f"{json.dumps(thread_context or [], indent=2, default=str)}\n\n"
+        f"Transaction: {transaction_label}\n\n"
+        "Requirements:\n"
+        "1) Directly answer all detected questions.\n"
+        "2) Keep tone professional and friendly.\n"
+        "3) Keep under 150 words unless the question is complex.\n"
+        "4) End with exactly: Let me know if you need anything else! - Margaret\n\n"
+        "Return JSON only:\n"
+        "{\n"
+        '  "subject": "Re: ...",\n'
+        '  "body": "response text"\n'
+        "}"
+    )
+    try:
+        from anthropic import Anthropic
+
+        client = Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=(os.getenv("EMAIL_DRAFT_MODEL") or "claude-sonnet-4-20250514"),
+            max_tokens=1400,
+            temperature=0.2,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        payload = _extract_json_from_model_text(_extract_model_text_content(response))
+        if isinstance(payload, dict):
+            model_subject = (payload.get("subject") or "").strip()
+            model_body = (payload.get("body") or "").strip()
+            if model_subject:
+                draft["subject"] = model_subject
+            if model_body:
+                if not model_body.endswith("Let me know if you need anything else! - Margaret"):
+                    model_body = f"{model_body.rstrip()}\n\nLet me know if you need anything else! - Margaret"
+                draft["body"] = model_body
+            draft["source"] = "claude"
+    except Exception as exc:
+        log_system_error("email_draft_generate", f"Claude fallback used: {str(exc)[:320]}", transaction_id=(transaction or {}).get("id"))
+    return draft
+
+
+def suggest_email_draft_attachments(transaction_id, question_type):
+    """Auto-suggest attachments for draft send (timeline packet, etc.)."""
+    suggestions = []
+    if not transaction_id:
+        return suggestions
+    question_key = (question_type or "").strip().lower()
+    if question_key not in {"deadline_inquiry", "status_update", "closing_date"}:
+        return suggestions
+    try:
+        ensure_timeline_packets_table()
+        rows = execute_query(
+            """
+            SELECT timeline_s3_key, timeline_filename
+            FROM timeline_packets
+            WHERE transaction_id = %s
+            LIMIT 1
+            """,
+            (int(transaction_id),),
+            fetch=True,
+        ) or []
+        if rows and rows[0].get("timeline_s3_key"):
+            filename = (rows[0].get("timeline_filename") or "timeline_packet.pdf").strip() or "timeline_packet.pdf"
+            presigned_url = get_presigned_url(
+                rows[0]["timeline_s3_key"],
+                expiration=1800,
+                download_filename=filename,
+            )
+            if presigned_url:
+                suggestions.append(
+                    {
+                        "filename": filename,
+                        "url": presigned_url,
+                        "content_type": "application/pdf",
+                        "label": "Current Timeline PDF",
+                    }
+                )
+    except Exception:
+        return suggestions
+    return suggestions
+
+
+def create_email_draft_for_review(
+    transaction_id,
+    original_email_id,
+    from_email,
+    from_name,
+    to_email,
+    subject,
+    original_message,
+):
+    """Create one pending-review email draft from inbound email content."""
+    ensure_email_draft_tables()
+    normalized_from = normalize_email(from_email)
+    if not normalized_from or not is_email_valid(normalized_from):
+        return None
+    normalized_to = normalize_email(to_email)
+    if normalized_to and not is_email_valid(normalized_to):
+        normalized_to = ""
+
+    safe_original_id = (original_email_id or "").strip()[:200]
+    if safe_original_id:
+        existing_rows = execute_query(
+            """
+            SELECT id
+            FROM email_drafts
+            WHERE original_email_id = %s
+            LIMIT 1
+            """,
+            (safe_original_id,),
+            fetch=True,
+        ) or []
+        if existing_rows:
+            return existing_rows[0]["id"]
+
+    transaction = fetch_timeline_transaction(transaction_id) if transaction_id else None
+    if not transaction:
+        inferred_transaction = identify_transaction_from_email(original_message, normalized_from)
+        transaction = inferred_transaction or None
+        transaction_id = transaction.get("id") if transaction else None
+
+    question_analysis = analyze_incoming_email(
+        email_content=original_message,
+        sender_email=normalized_from,
+        subject=subject,
+        transaction=transaction,
+    )
+    answer_data = lookup_answer(
+        question_type=question_analysis.get("question_type"),
+        transaction=transaction,
+        original_email=original_message,
+    )
+    thread_context = fetch_email_thread_context(transaction_id, normalized_from, limit=5) if transaction_id else []
+    generated = generate_email_draft(
+        question_analysis=question_analysis,
+        answer_data=answer_data,
+        transaction=transaction,
+        original_email=original_message,
+        sender_name=from_name,
+        original_subject=subject,
+        thread_context=thread_context,
+    )
+    attachments = suggest_email_draft_attachments(transaction_id, question_analysis.get("question_type"))
+    data_sources = {
+        "analysis": question_analysis,
+        "answer_data": answer_data,
+        "thread_context": thread_context,
+        "attachments": attachments,
+        "generated_source": generated.get("source") or "fallback",
+    }
+    confidence_value = float(question_analysis.get("confidence") or 0.0)
+    if confidence_value > 1:
+        confidence_value = confidence_value / 100.0
+    confidence_value = max(0.0, min(confidence_value, 1.0))
+    return execute_insert(
+        """
+        INSERT INTO email_drafts (
+            transaction_id,
+            original_email_id,
+            from_email,
+            from_name,
+            to_email,
+            subject,
+            original_message,
+            question_detected,
+            question_type,
+            confidence,
+            draft_subject,
+            draft_body,
+            draft_data_sources,
+            status,
+            created_at
+        )
+        VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 'pending_review', CURRENT_TIMESTAMP
+        )
+        RETURNING id
+        """,
+        (
+            int(transaction_id) if transaction_id else None,
+            safe_original_id or None,
+            normalized_from,
+            (from_name or infer_sender_display_name(normalized_from))[:200],
+            normalized_to or None,
+            (subject or "(No subject)")[:500],
+            (original_message or "")[:40000],
+            (question_analysis.get("question_detected") or "")[:4000],
+            (question_analysis.get("question_type") or "other")[:100],
+            confidence_value,
+            (generated.get("subject") or f"Re: {(subject or 'Update').strip()}")[:500],
+            (generated.get("body") or "")[:15000],
+            json.dumps(data_sources, default=str),
+        ),
+    )
+
+
+def queue_email_draft_generation_async(
+    transaction_id,
+    sender_email,
+    sender_role,
+    mailbox_address,
+    subject,
+    body_text,
+    original_email_id,
+    qa_decision,
+):
+    """Generate an email draft in the background to keep webhook responsive."""
+    if qa_decision == "auto_answer":
+        return
+
+    def _run():
+        with app.app_context():
+            try:
+                draft_id = create_email_draft_for_review(
+                    transaction_id=transaction_id,
+                    original_email_id=original_email_id,
+                    from_email=sender_email,
+                    from_name=infer_sender_display_name(sender_email),
+                    to_email=mailbox_address,
+                    subject=subject,
+                    original_message=body_text,
+                )
+                if not draft_id:
+                    return
+                confidence_rows = execute_query(
+                    """
+                    SELECT confidence, question_type, from_email, draft_data_sources
+                    FROM email_drafts
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (int(draft_id),),
+                    fetch=True,
+                ) or []
+                confidence_row = confidence_rows[0] if confidence_rows else {}
+                urgency = ((parse_json_field((confidence_row or {}).get("draft_data_sources"), {}) or {}).get("analysis") or {}).get("urgency")
+                confidence_value = float((confidence_row or {}).get("confidence") or 0.0)
+                if confidence_value < 0.45:
+                    urgency = "high"
+                if urgency in {"high", "critical"}:
+                    margaret_phone = normalize_phone(os.getenv("MARGARET_PHONE") or "")
+                    if margaret_phone:
+                        send_sms_async(
+                            margaret_phone,
+                            (
+                                f"📧 New {'urgent ' if urgency == 'critical' else ''}draft ready: "
+                                f"{(subject or '(No subject)')[:80]} "
+                                f"(txn #{transaction_id}). Review: {os.getenv('APP_BASE_URL', '').rstrip('/')}/tc/email-drafts"
+                            )[:320],
+                        )
+                execute_query(
+                    """
+                    INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                    VALUES (%s, 'note', 'system', 'email_draft', %s, %s)
+                    """,
+                    (
+                        int(transaction_id),
+                        "AI email draft generated",
+                        (
+                            f"draft_id={draft_id} sender_role={sender_role} "
+                            f"qa_decision={qa_decision} source_email={normalize_email(sender_email)}"
+                        )[:1800],
+                    ),
+                )
+            except Exception as exc:
+                log_system_error("email_draft_queue", str(exc), transaction_id=transaction_id)
+
+    Thread(target=_run, daemon=True).start()
+
+
+def fetch_email_draft_or_none(draft_id):
+    """Return one email draft row with parsed data-source payload."""
+    ensure_email_draft_tables()
+    rows = execute_query(
+        """
+        SELECT
+            d.*,
+            t.property_address,
+            t.status AS transaction_status
+        FROM email_drafts d
+        LEFT JOIN transactions t ON t.id = d.transaction_id
+        WHERE d.id = %s
+        LIMIT 1
+        """,
+        (int(draft_id),),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    row["draft_data_sources"] = parse_json_field(row.get("draft_data_sources"), {})
+    if not isinstance(row["draft_data_sources"], dict):
+        row["draft_data_sources"] = {}
+    return row
+
+
+def log_draft_feedback(draft_id, feedback_type, edits_made=None):
+    """Insert one draft feedback row."""
+    ensure_email_draft_tables()
+    return execute_insert(
+        """
+        INSERT INTO email_draft_feedback (draft_id, feedback_type, edits_made, created_at)
+        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            int(draft_id),
+            (feedback_type or "unknown")[:50],
+            (edits_made or "")[:15000] or None,
+        ),
+    )
+
+
+def learn_from_feedback(draft_id, feedback_type, edits):
+    """Capture lightweight edit/rejection patterns for future prompts."""
+    ensure_email_draft_tables()
+    feedback_key = (feedback_type or "").strip().lower()
+    details = {"feedback_type": feedback_key, "learned_at": datetime.now().isoformat()}
+    if edits:
+        try:
+            edit_payload = json.loads(edits) if isinstance(edits, str) else edits
+            if isinstance(edit_payload, dict):
+                original_body = str(edit_payload.get("original_body") or "")
+                edited_body = str(edit_payload.get("edited_body") or "")
+                details["edited"] = True
+                details["body_delta_chars"] = len(edited_body) - len(original_body)
+                details["subject_changed"] = (
+                    (edit_payload.get("original_subject") or "").strip()
+                    != (edit_payload.get("edited_subject") or "").strip()
+                )
+        except Exception:
+            details["edited"] = True
+    if feedback_key == "rejected":
+        details["requires_human_research"] = True
+    execute_query(
+        """
+        UPDATE email_drafts
+        SET draft_data_sources = COALESCE(draft_data_sources, '{}'::jsonb) || %s::jsonb
+        WHERE id = %s
+        """,
+        (json.dumps({"learning": details}, default=str), int(draft_id)),
+    )
+
+
+def send_email_draft_message(to_email, subject, body_text, reply_to="", attachments=None):
+    """Send one draft email body as simple HTML + text."""
+    normalized_to = normalize_email(to_email)
+    if not normalized_to or not is_email_valid(normalized_to):
+        return None
+    normalized_reply_to = normalize_email(reply_to)
+    if normalized_reply_to and not is_email_valid(normalized_reply_to):
+        normalized_reply_to = ""
+    body = (body_text or "").strip()
+    if not body:
+        return None
+    html_body = "<p>" + escape(body).replace("\n", "<br>") + "</p>"
+    return send_html_email(
+        to_email=normalized_to,
+        subject=(subject or "Re: Transaction Update").strip(),
+        html_body=html_body,
+        text_body=body,
+        attachments=(attachments if isinstance(attachments, list) else []),
+        reply_to=(normalized_reply_to or None),
+    )
+
+
 def ensure_deadline_nudges_table():
     """Store proactive deadline nudges and response/escalation state."""
     execute_query(
@@ -6275,6 +7311,20 @@ def process_inbound_email_message(
             latest_message_id=message_id,
         )
 
+    try:
+        queue_email_draft_generation_async(
+            transaction_id=transaction["id"],
+            sender_email=sender_email,
+            sender_role=sender_role,
+            mailbox_address=mailbox_address,
+            subject=(subject or "(No subject)"),
+            body_text=body_text,
+            original_email_id=((provider_message_id or f"inbound-{message_id}")[:200]),
+            qa_decision=qa_decision,
+        )
+    except Exception as exc:
+        log_system_error("email_draft_queue", str(exc), transaction_id=transaction["id"])
+
     return {
         "message_id": message_id,
         "analysis": analysis,
@@ -6286,6 +7336,7 @@ def process_inbound_email_message(
         "qa_confidence": qa_confidence,
         "qa_match_id": qa_match_id,
         "qa_used": qa_used,
+        "email_draft_queued": (qa_decision != "auto_answer"),
     }
 
 
@@ -11642,6 +12693,73 @@ def inbound_email_webhook():
     )
 
 
+@app.route("/webhooks/email-drafts-forward", methods=["POST"])
+def email_drafts_forward_webhook():
+    """Email-forwarding intake endpoint for draft generation (human approval required)."""
+    ensure_email_draft_tables()
+    configured_secret = (os.getenv("EMAIL_DRAFT_WEBHOOK_SECRET") or "").strip()
+    if configured_secret:
+        provided_secret = (
+            request.headers.get("X-Email-Draft-Secret")
+            or request.headers.get("X-Webhook-Secret")
+            or request.args.get("secret")
+            or request.form.get("secret")
+            or ""
+        ).strip()
+        if provided_secret != configured_secret:
+            return jsonify({"success": False, "error": "Unauthorized"}), 403
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = dict(request.form or {})
+
+    sender_email = parse_inbound_sender_from_payload(payload)
+    subject = (payload.get("subject") or payload.get("Subject") or "").strip() or "(No subject)"
+    body_text = (
+        payload.get("text")
+        or payload.get("body-plain")
+        or payload.get("stripped-text")
+        or payload.get("body")
+        or payload.get("TextBody")
+        or ""
+    )
+    body_text = str(body_text or "").strip()
+    if not body_text:
+        body_text = str(payload.get("html") or payload.get("stripped-html") or "")[:4000]
+    if not sender_email or not body_text:
+        return jsonify({"success": False, "error": "Missing sender or body"}), 400
+
+    recipients = parse_inbound_recipients_from_payload(payload)
+    to_email = recipients[0] if recipients else ""
+    transaction = identify_transaction_from_email(body_text, sender_email)
+    original_email_id = (
+        payload.get("message_id")
+        or payload.get("Message-Id")
+        or payload.get("Message-ID")
+        or payload.get("message-id")
+        or f"forward-{uuid4()}"
+    )
+    draft_id = create_email_draft_for_review(
+        transaction_id=(transaction.get("id") if transaction else None),
+        original_email_id=(str(original_email_id)[:200]),
+        from_email=sender_email,
+        from_name=infer_sender_display_name(sender_email),
+        to_email=to_email,
+        subject=subject,
+        original_message=body_text,
+    )
+    if not draft_id:
+        return jsonify({"success": False, "error": "Unable to create draft"}), 500
+    return jsonify(
+        {
+            "success": True,
+            "draft_id": draft_id,
+            "transaction_id": (transaction.get("id") if transaction else None),
+            "pending_count": fetch_pending_email_draft_count(),
+        }
+    )
+
+
 @app.route("/calendar-webhook", methods=["GET", "POST"])
 def calendar_webhook():
     """
@@ -12363,6 +13481,7 @@ def tc_dashboard():
         print(f"Portal walkthrough reminder sweep error: {exc}")
     uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
     pending_batch_upload_count = fetch_batch_upload_pending_count(uploaded_by)
+    pending_email_draft_count = fetch_pending_email_draft_count()
     session["batch_upload_pending_count"] = pending_batch_upload_count
 
     notice = (request.args.get("notice") or "").strip()
@@ -12492,7 +13611,285 @@ def tc_dashboard():
         heads_up_watch=heads_up_report["open_watch"][:3],
         heads_up_urgent=heads_up_report["open_urgent"][:3],
         pending_batch_upload_count=pending_batch_upload_count,
+        pending_email_draft_count=pending_email_draft_count,
     )
+
+
+@app.route("/tc/email-drafts")
+@login_required
+def tc_email_drafts():
+    """Review AI-generated outbound email drafts before sending."""
+    ensure_email_draft_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    rows = execute_query(
+        """
+        SELECT
+            d.id,
+            d.transaction_id,
+            d.original_email_id,
+            d.from_email,
+            d.from_name,
+            d.to_email,
+            d.subject,
+            d.original_message,
+            d.question_detected,
+            d.question_type,
+            d.confidence,
+            d.draft_subject,
+            d.draft_body,
+            d.draft_data_sources,
+            d.status,
+            d.created_at,
+            t.property_address
+        FROM email_drafts d
+        LEFT JOIN transactions t ON t.id = d.transaction_id
+        WHERE COALESCE(d.status, 'pending_review') = 'pending_review'
+        ORDER BY d.created_at DESC, d.id DESC
+        LIMIT 200
+        """,
+        fetch=True,
+    ) or []
+
+    drafts = []
+    for row in rows:
+        sources = parse_json_field(row.get("draft_data_sources"), {})
+        if not isinstance(sources, dict):
+            sources = {}
+        analysis = sources.get("analysis")
+        if not isinstance(analysis, dict):
+            analysis = {}
+        confidence_value = float(row.get("confidence") or 0.0)
+        if confidence_value > 1:
+            confidence_value = confidence_value / 100.0
+        urgency = (analysis.get("urgency") or "low").strip().lower()
+        if urgency not in {"low", "medium", "high", "critical"}:
+            urgency = "low"
+        drafts.append(
+            {
+                "id": row["id"],
+                "transaction_id": row.get("transaction_id"),
+                "property_address": row.get("property_address") or "Unknown property",
+                "from_email": row.get("from_email") or "",
+                "from_name": row.get("from_name") or infer_sender_display_name(row.get("from_email")),
+                "to_email": row.get("to_email") or "",
+                "subject": row.get("subject") or "(No subject)",
+                "original_message": row.get("original_message") or "",
+                "question_detected": row.get("question_detected") or "",
+                "question_type": (row.get("question_type") or "other").replace("_", " ").title(),
+                "confidence": confidence_value,
+                "confidence_pct": int(round(confidence_value * 100)),
+                "draft_subject": row.get("draft_subject") or "",
+                "draft_body": row.get("draft_body") or "",
+                "draft_data_sources": sources,
+                "created_at_label": format_timestamp_label(row.get("created_at")),
+                "created_at_ago": format_time_ago(row.get("created_at")),
+                "urgency": urgency,
+            }
+        )
+    return render_template(
+        "tc_email_drafts.html",
+        notice=notice,
+        notice_type=notice_type,
+        drafts=drafts,
+        pending_count=len(drafts),
+    )
+
+
+@app.route("/tc/email-drafts/count")
+@login_required
+def tc_email_drafts_count():
+    """Return pending draft count for dashboard polling."""
+    return jsonify({"success": True, "count": fetch_pending_email_draft_count()})
+
+
+@app.route("/tc/email-draft/<int:draft_id>/send", methods=["POST"])
+@login_required
+def send_email_draft_route(draft_id):
+    """Send approved email draft (as-is or with edits)."""
+    ensure_email_draft_tables()
+    draft = fetch_email_draft_or_none(draft_id)
+    if not draft:
+        return jsonify({"success": False, "error": "Draft not found"}), 404
+    if (draft.get("status") or "pending_review") in {"sent", "rejected"}:
+        return jsonify({"success": False, "error": "Draft already finalized"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    action = (payload.get("action") or "").strip().lower()
+    if action not in {"send_as_is", "send_edited"}:
+        return jsonify({"success": False, "error": "Invalid action"}), 400
+
+    if action == "send_edited":
+        subject = (payload.get("subject") or "").strip()
+        body = (payload.get("body") or "").strip()
+        if not subject or not body:
+            return jsonify({"success": False, "error": "Edited subject/body required"}), 400
+        feedback_type = "edited_before_send"
+    else:
+        subject = (draft.get("draft_subject") or "").strip()
+        body = (draft.get("draft_body") or "").strip()
+        feedback_type = "sent_as_is"
+    if not subject or not body:
+        return jsonify({"success": False, "error": "Draft content is empty"}), 400
+
+    data_sources = draft.get("draft_data_sources")
+    if not isinstance(data_sources, dict):
+        data_sources = {}
+    transaction_id = parse_optional_int(draft.get("transaction_id"))
+    attachments = suggest_email_draft_attachments(transaction_id, draft.get("question_type"))
+    if not attachments:
+        attachments = data_sources.get("attachments")
+        if not isinstance(attachments, list):
+            attachments = []
+    message_id = send_email_draft_message(
+        to_email=draft.get("from_email"),
+        subject=subject,
+        body_text=body,
+        reply_to=draft.get("to_email") or "",
+        attachments=attachments,
+    )
+    if not message_id:
+        return jsonify({"success": False, "error": "Email send failed"}), 500
+
+    execute_query(
+        """
+        UPDATE email_drafts
+        SET draft_subject = %s,
+            draft_body = %s,
+            status = 'sent',
+            reviewed_at = CURRENT_TIMESTAMP,
+            sent_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (subject, body, int(draft_id)),
+    )
+    edits_payload = None
+    if action == "send_edited":
+        edits_payload = json.dumps(
+            {
+                "original_subject": draft.get("draft_subject") or "",
+                "edited_subject": subject,
+                "original_body": draft.get("draft_body") or "",
+                "edited_body": body,
+            },
+            default=str,
+        )
+    log_draft_feedback(draft_id=draft_id, feedback_type=feedback_type, edits_made=edits_payload)
+    learn_from_feedback(draft_id=draft_id, feedback_type=feedback_type, edits=edits_payload)
+
+    if transaction_id:
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'email', 'external', %s, %s, %s)
+            """,
+            (
+                int(transaction_id),
+                draft.get("from_email") or "",
+                "AI draft email sent",
+                (
+                    f"draft_id={draft_id} action={action} to={draft.get('from_email')} "
+                    f"message_id={message_id}"
+                )[:1800],
+            ),
+        )
+    return jsonify({"success": True, "message_id": message_id})
+
+
+@app.route("/tc/email-draft/<int:draft_id>/reject", methods=["POST"])
+@login_required
+def reject_email_draft_route(draft_id):
+    """Reject AI draft for manual handling."""
+    ensure_email_draft_tables()
+    draft = fetch_email_draft_or_none(draft_id)
+    if not draft:
+        return jsonify({"success": False, "error": "Draft not found"}), 404
+    execute_query(
+        """
+        UPDATE email_drafts
+        SET status = 'rejected',
+            reviewed_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (int(draft_id),),
+    )
+    log_draft_feedback(draft_id=draft_id, feedback_type="rejected", edits_made=None)
+    learn_from_feedback(draft_id=draft_id, feedback_type="rejected", edits=None)
+    return jsonify({"success": True})
+
+
+@app.route("/tc/email-draft/<int:draft_id>/regenerate", methods=["POST"])
+@login_required
+def regenerate_email_draft_route(draft_id):
+    """Regenerate AI draft body using latest context."""
+    ensure_email_draft_tables()
+    draft = fetch_email_draft_or_none(draft_id)
+    if not draft:
+        return jsonify({"success": False, "error": "Draft not found"}), 404
+    transaction_id = parse_optional_int(draft.get("transaction_id"))
+    transaction = fetch_timeline_transaction(transaction_id) if transaction_id else None
+    question_analysis = analyze_incoming_email(
+        email_content=draft.get("original_message") or "",
+        sender_email=draft.get("from_email") or "",
+        subject=draft.get("subject") or "",
+        transaction=transaction,
+    )
+    answer_data = lookup_answer(
+        question_type=question_analysis.get("question_type"),
+        transaction=transaction,
+        original_email=draft.get("original_message") or "",
+    )
+    thread_context = fetch_email_thread_context(transaction_id, draft.get("from_email"), limit=5) if transaction_id else []
+    regenerated = generate_email_draft(
+        question_analysis=question_analysis,
+        answer_data=answer_data,
+        transaction=transaction,
+        original_email=draft.get("original_message") or "",
+        sender_name=draft.get("from_name") or "",
+        original_subject=draft.get("subject") or "",
+        thread_context=thread_context,
+    )
+    attachments = suggest_email_draft_attachments(transaction_id, question_analysis.get("question_type"))
+    updated_sources = {
+        "analysis": question_analysis,
+        "answer_data": answer_data,
+        "thread_context": thread_context,
+        "attachments": attachments,
+        "generated_source": regenerated.get("source") or "fallback",
+        "regenerated_at": datetime.now().isoformat(),
+    }
+    confidence_value = float(question_analysis.get("confidence") or 0.0)
+    if confidence_value > 1:
+        confidence_value = confidence_value / 100.0
+    confidence_value = max(0.0, min(confidence_value, 1.0))
+    execute_query(
+        """
+        UPDATE email_drafts
+        SET question_detected = %s,
+            question_type = %s,
+            confidence = %s,
+            draft_subject = %s,
+            draft_body = %s,
+            draft_data_sources = %s::jsonb,
+            status = 'pending_review'
+        WHERE id = %s
+        """,
+        (
+            (question_analysis.get("question_detected") or "")[:4000],
+            (question_analysis.get("question_type") or "other")[:100],
+            confidence_value,
+            (regenerated.get("subject") or draft.get("draft_subject") or "")[:500],
+            (regenerated.get("body") or draft.get("draft_body") or "")[:15000],
+            json.dumps(updated_sources, default=str),
+            int(draft_id),
+        ),
+    )
+    return jsonify({"success": True})
 
 
 @app.route("/tc/heads-up")

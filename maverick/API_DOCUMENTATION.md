@@ -942,6 +942,56 @@ Accepted payload fields (provider-dependent):
   - `override_notes` (optional)
   - `clear_risk` (`true` to clear at-risk state)
 
+## AI Email Draft Assistant Endpoints
+
+### Review queue page (TC)
+- `GET /tc/email-drafts`
+- Shows pending AI-generated reply drafts with:
+  - original inbound email
+  - detected question + confidence + urgency
+  - editable subject/body
+  - underlying data sources used in draft generation
+
+### Pending count (TC)
+- `GET /tc/email-drafts/count`
+- JSON:
+  - `count` = number of `pending_review` drafts
+
+### Send draft (TC)
+- `POST /tc/email-draft/<draft_id>/send`
+- JSON body:
+  - `action`: `send_as_is` or `send_edited`
+  - if edited: `subject`, `body`
+- Behavior:
+  - sends via SMTP (`send_html_email`)
+  - updates draft status to `sent` + timestamps
+  - logs communication + feedback entry
+
+### Reject draft (TC)
+- `POST /tc/email-draft/<draft_id>/reject`
+- Behavior:
+  - marks draft as `rejected`
+  - records rejection feedback for learning
+
+### Regenerate draft (TC)
+- `POST /tc/email-draft/<draft_id>/regenerate`
+- Behavior:
+  - re-runs analysis + answer lookup + draft generation with latest context
+  - updates draft body/subject + confidence in-place
+
+### Forwarding intake webhook (optional)
+- `POST /webhooks/email-drafts-forward`
+- Optional auth:
+  - `EMAIL_DRAFT_WEBHOOK_SECRET` via header `X-Email-Draft-Secret` (or query/form `secret`)
+- Purpose:
+  - accept forwarded inbox emails and create pending review drafts
+
+### Data model
+- `email_drafts`
+  - one row per generated draft with analysis metadata + status lifecycle
+- `email_draft_feedback`
+  - send/edit/reject outcomes used for improvement
+
 ## SMS Webhook Behavior (Nudge Replies)
 
 Route:
