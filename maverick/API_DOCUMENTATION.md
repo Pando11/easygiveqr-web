@@ -389,6 +389,40 @@ Form `action` options:
 - Critical call queue from deadline windows
 - Recent good news (completions, completed tasks, positive reviews)
 
+## Automation Analytics Dashboard
+
+### Route (TC)
+- `GET /tc/analytics`
+
+### Metrics included
+- Time savings (daily / weekly / monthly):
+  - manual tasks avoided
+  - auto-completed tasks
+  - auto-sent messages
+  - questions auto-answered
+  - time saved
+  - transactions handled, avg hours/txn, efficiency improvement
+  - capacity increase, revenue enabled, ROI
+- Quality:
+  - auto-classification error %
+  - auto-completion error %
+  - missed deadlines
+  - client satisfaction average
+- Engagement:
+  - agent questions reduced %
+  - review response rate
+  - referrals generated
+- Feature adoption:
+  - bulk SMS uses/week
+  - voice notes uses/week
+  - auto-complete tasks/week
+  - morning briefing read/not read
+  - one-click completion uses/month
+- Feature time savings:
+  - auto-vendor scheduling (hrs/month)
+  - problem detection (hrs/month)
+  - bulk messaging (hrs/month)
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values

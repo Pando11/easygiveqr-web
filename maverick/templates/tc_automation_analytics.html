@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+
+{% block title %}Automation Analytics - Maverick TC{% endblock %}
+{% block subtitle %}Measure Success{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="section-header">
+        <div>
+            <h2>Automation Analytics Dashboard</h2>
+            <p class="hint-text">Updated {{ metrics.generated_at.strftime("%b %d, %Y %I:%M %p") if metrics.generated_at else "just now" }}</p>
+        </div>
+        <a href="{{ url_for('tc_dashboard') }}" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<section class="card">
+    <div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+</section>
+{% endif %}
+
+<section class="card">
+    <h3>Time Savings Metrics</h3>
+    <div class="grid-three">
+        <article class="subcard">
+            <h4>Daily</h4>
+            <ul class="metric-list">
+                <li><span>Manual tasks avoided</span><strong>{{ metrics.time_savings.daily.manual_tasks_avoided }}</strong></li>
+                <li><span>Auto-completed tasks</span><strong>{{ metrics.time_savings.daily.auto_completed_tasks }}</strong></li>
+                <li><span>Auto-sent messages</span><strong>{{ metrics.time_savings.daily.auto_sent_messages }}</strong></li>
+                <li><span>Questions auto-answered</span><strong>{{ metrics.time_savings.daily.questions_auto_answered }}</strong></li>
+                <li><span>Time saved today</span><strong>{{ metrics.time_savings.daily.time_saved_label }}</strong></li>
+            </ul>
+        </article>
+
+        <article class="subcard">
+            <h4>Weekly</h4>
+            <ul class="metric-list">
+                <li><span>Transactions handled</span><strong>{{ metrics.time_savings.weekly.transactions_handled }}</strong></li>
+                <li><span>Avg hours per transaction</span><strong>{{ "%.1f"|format(metrics.time_savings.weekly.average_hours_per_transaction) }} h</strong></li>
+                <li><span>Total time saved</span><strong>{{ "%.1f"|format(metrics.time_savings.weekly.total_time_saved_hours) }} h</strong></li>
+                <li><span>Efficiency improvement</span><strong>{{ "%+.1f"|format(metrics.time_savings.weekly.efficiency_improvement_pct) }}%</strong></li>
+            </ul>
+        </article>
+
+        <article class="subcard">
+            <h4>Monthly</h4>
+            <ul class="metric-list">
+                <li><span>Capacity increase</span><strong>+{{ metrics.time_savings.monthly.capacity_increase_transactions }} txn</strong></li>
+                <li><span>Margaret's hours worked</span><strong>{{ "%.1f"|format(metrics.time_savings.monthly.margaret_hours_worked) }} h</strong></li>
+                <li><span>Revenue enabled</span><strong>${{ "{:,.2f}".format(metrics.time_savings.monthly.revenue_enabled) }}</strong></li>
+                <li><span>ROI this month</span><strong>{{ "%.1f"|format(metrics.time_savings.monthly.roi_pct) }}%</strong></li>
+            </ul>
+        </article>
+    </div>
+</section>
+
+<section class="grid-two">
+    <article class="card">
+        <h3>Quality Metrics</h3>
+        <ul class="metric-list">
+            <li><span>Auto-classification errors</span><strong>{{ "%.2f"|format(metrics.quality.auto_classification_errors_pct) }}%</strong></li>
+            <li><span>Auto-completion errors</span><strong>{{ "%.2f"|format(metrics.quality.auto_completion_errors_pct) }}%</strong></li>
+            <li><span>Missed deadlines</span><strong>{{ metrics.quality.missed_deadlines }}</strong></li>
+            <li>
+                <span>Client satisfaction</span>
+                <strong>{{ "%.2f"|format(metrics.quality.avg_rating) }}/5</strong>
+                <small>{{ metrics.quality.review_count }} reviews</small>
+            </li>
+        </ul>
+    </article>
+
+    <article class="card">
+        <h3>Engagement Metrics</h3>
+        <ul class="metric-list">
+            <li><span>Agent questions reduced</span><strong>{{ "%+.1f"|format(metrics.engagement.agent_questions_reduced_pct) }}%</strong></li>
+            <li><span>Agent review responses</span><strong>{{ "%.1f"|format(metrics.engagement.agent_review_responses_pct) }}%</strong></li>
+            <li><span>Referrals generated</span><strong>{{ metrics.engagement.referrals_generated }}</strong></li>
+        </ul>
+    </article>
+</section>
+
+<section class="grid-two">
+    <article class="card">
+        <h3>Feature Adoption</h3>
+        <ol class="metric-rank">
+            <li>Bulk SMS: <strong>{{ metrics.feature_adoption.bulk_sms_uses_week }}</strong> uses/week</li>
+            <li>Voice notes: <strong>{{ metrics.feature_adoption.voice_notes_uses_week }}</strong> uses/week</li>
+            <li>Auto-complete: <strong>{{ metrics.feature_adoption.auto_complete_tasks_week }}</strong> tasks/week</li>
+            <li>Morning briefing: <strong>{{ metrics.feature_adoption.morning_briefing_read_status }}</strong></li>
+            <li>Transaction completion: <strong>{{ metrics.feature_adoption.transaction_completion_uses_month }}</strong> uses/month</li>
+        </ol>
+    </article>
+
+    <article class="card">
+        <h3>Features Saving the Most Time</h3>
+        <ol class="metric-rank">
+            <li>Auto-vendor scheduling: <strong>{{ "%.1f"|format(metrics.feature_time_savings.auto_vendor_scheduling_hours_month) }} hrs/month</strong></li>
+            <li>Problem detection: <strong>{{ "%.1f"|format(metrics.feature_time_savings.problem_detection_hours_month) }} hrs/month</strong></li>
+            <li>Bulk messaging: <strong>{{ "%.1f"|format(metrics.feature_time_savings.bulk_messaging_hours_month) }} hrs/month</strong></li>
+        </ol>
+    </article>
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.hint-text {
+    color: #475569;
+    font-size: 13px;
+}
+
+.grid-three {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+}
+
+.grid-two {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 14px;
+}
+
+.subcard {
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    padding: 12px;
+    background: #f8fbff;
+}
+
+.subcard h4 {
+    margin-top: 0;
+    margin-bottom: 8px;
+}
+
+.metric-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.metric-list li {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 0;
+    border-bottom: 1px solid #e2e8f0;
+    align-items: center;
+}
+
+.metric-list li:last-child {
+    border-bottom: 0;
+}
+
+.metric-list span {
+    color: #334155;
+}
+
+.metric-list strong {
+    color: #0f172a;
+}
+
+.metric-list small {
+    color: #64748b;
+    font-size: 12px;
+    margin-left: 8px;
+}
+
+.metric-rank {
+    margin: 0;
+    padding-left: 18px;
+}
+
+.metric-rank li {
+    margin: 8px 0;
+}
+
+@media (max-width: 980px) {
+    .grid-three,
+    .grid-two {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}

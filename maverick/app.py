@@ -145,6 +145,7 @@ from utils.agent_status_updates import (
     fetch_agent_status_update_settings,
     update_agent_status_update_settings,
 )
+from utils.automation_analytics import build_automation_analytics_snapshot
 from utils.document_processing import (
     ensure_document_classification_corrections_table,
     extract_earnest_amount,
@@ -10198,6 +10199,24 @@ def tc_nudge_analytics():
         resolved_without_escalation=resolved_without_escalation,
         estimated_minutes_saved=estimated_minutes_saved,
         total_nudges=int(time_saved.get("total_nudges") or 0),
+    )
+
+
+@app.route("/tc/analytics")
+@login_required
+def tc_automation_analytics():
+    """Render consolidated automation analytics dashboard."""
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    metrics = build_automation_analytics_snapshot(reference_date=date.today())
+    return render_template(
+        "tc_automation_analytics.html",
+        notice=notice,
+        notice_type=notice_type,
+        metrics=metrics,
     )
 
 

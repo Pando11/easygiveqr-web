@@ -356,6 +356,15 @@ Morning briefing behavior:
 - includes completion celebrations
 - sends via SMS + email
 
+## Automation Analytics Dashboard
+
+- Route: `GET /tc/analytics`
+- Consolidates:
+  - time-savings metrics (daily/weekly/monthly)
+  - quality metrics (classification/completion accuracy, missed deadlines, satisfaction)
+  - engagement metrics (question reduction, review response rate, referrals)
+  - feature adoption + time-saved-by-feature rankings
+
 ## Timeline Packet + Vendor Outreach Automation
 
 After Margaret approves and activates a transaction, Maverick:
