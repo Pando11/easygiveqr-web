@@ -1,0 +1,480 @@
+{% extends "base.html" %}
+
+{% block title %}Daily Plan - Maverick TC{% endblock %}
+{% block subtitle %}Intelligent Task Prioritization + Time Blocking{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="section-header">
+        <div>
+            <h2>Daily Plan</h2>
+            <p class="hint-text">AI-prioritized time blocks with adaptive reshuffling and learning feedback.</p>
+        </div>
+        <a href="{{ url_for('tc_dashboard') }}" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<section class="card">
+    <div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+</section>
+{% endif %}
+
+<section class="grid-two">
+    <article class="card">
+        <h3>Automation</h3>
+        <form method="post" class="stack-form compact-form">
+            <input type="hidden" name="action" value="generate_now">
+            <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+            <label><input type="checkbox" name="send_messages" value="1" checked> Send SMS + email to Margaret</label>
+            <label><input type="checkbox" name="sync_calendar" value="1" checked> Sync time blocks to Google Calendar</label>
+            <button type="submit" class="btn">Generate Daily Plan Now</button>
+        </form>
+
+        <form method="post" class="stack-form top-gap">
+            <input type="hidden" name="action" value="reorganize_now">
+            <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+            <button type="submit" class="btn btn-secondary">Reorganize Remaining Day</button>
+        </form>
+    </article>
+
+    <article class="card">
+        <h3>Learning Snapshot (45 days)</h3>
+        <div class="metric-grid two-col">
+            <div class="metric-item"><span>Estimate accuracy</span><strong>{{ learning_metrics.estimate_accuracy_pct }}%</strong></div>
+            <div class="metric-item"><span>Completed samples</span><strong>{{ learning_metrics.completed_samples }}</strong></div>
+            <div class="metric-item"><span>Manual reorders</span><strong>{{ learning_metrics.reorder_events }}</strong></div>
+            <div class="metric-item"><span>Adaptive replans</span><strong>{{ learning_metrics.replan_events }}</strong></div>
+        </div>
+        {% if learning_metrics.slow_categories %}
+        <p class="hint-text top-gap"><strong>Tasks taking longer than estimated:</strong></p>
+        <ul class="simple-list">
+            {% for row in learning_metrics.slow_categories %}
+            <li>{{ row.category.replace('_', ' ').title() }} · {{ row.ratio }}x (avg +{{ row.avg_extra_minutes }} min)</li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="hint-text top-gap">No significant estimate overruns detected.</p>
+        {% endif %}
+    </article>
+</section>
+
+{% if plan %}
+<section class="card">
+    <div class="section-header">
+        <div>
+            <h3>{{ selected_date.strftime("%A, %b %d, %Y") }} Plan Timeline</h3>
+            <p class="hint-text">
+                Generated: {{ plan.generated_at }} · Total tasks: {{ plan.total_tasks }}
+                {% if plan.calendar_synced %}· Calendar synced{% endif %}
+            </p>
+        </div>
+        <div class="summary-badges">
+            <span class="badge">Pending: {{ item_summary.pending_count }}</span>
+            <span class="badge success">Done: {{ item_summary.completed_count }}</span>
+            <span class="badge warning">Deferred: {{ item_summary.deferred_count }}</span>
+            <span class="badge dark">Est. end: <strong id="estimatedEndLabel">{{ plan.estimated_end_time.strftime("%I:%M %p").lstrip("0") if plan.estimated_end_time else "--" }}</strong></span>
+        </div>
+    </div>
+
+    <div class="top-gap">
+        <button type="button" class="btn btn-secondary" id="runningBehindBtn">I'm running behind</button>
+        <button type="button" class="btn btn-secondary" id="urgentPromptBtn">New urgent task added</button>
+        <span class="hint-text" id="liveStatusMessage"></span>
+    </div>
+</section>
+
+<section class="timeline-grid" id="dailyPlanTimeline">
+    {% for block in blocks %}
+    <article class="card block-card {{ block.tier_class }}" style="--accent-color: {{ block.accent_color }};" data-block-id="{{ block.id }}">
+        <div class="block-header">
+            <div>
+                <h4>{{ block.start_label }} - {{ block.end_label }} · {{ block.title }}</h4>
+                <p class="hint-text">{{ block.duration_minutes }} min · {{ (block.tier or "routine").replace("_", " ").title() }}</p>
+            </div>
+            <span class="pill">{{ block.tasks|length }} tasks</span>
+        </div>
+        <ul class="task-list" data-block-id="{{ block.id }}">
+            {% if block.tasks %}
+                {% for item in block.tasks %}
+                <li
+                    class="plan-item {{ item.tier_class }} {% if item.is_completed %}is-complete{% endif %}"
+                    data-item-id="{{ item.id }}"
+                    data-estimated-minutes="{{ item.estimated_minutes or 0 }}"
+                    draggable="true"
+                >
+                    <label class="item-check">
+                        <input type="checkbox" class="item-status-toggle" {% if item.is_completed %}checked{% endif %}>
+                        <span>
+                            <strong>{{ item.title }}</strong>
+                            <small>{{ item.estimated_minutes }} min · {{ item.status_label }}</small>
+                        </span>
+                    </label>
+                    {% if item.details %}
+                    <p class="item-details">{{ item.details }}</p>
+                    {% endif %}
+                    <div class="item-meta">
+                        {% if item.transaction_id %}
+                        <a href="{{ item.transaction_url }}">Transaction #{{ item.transaction_id }}</a>
+                        {% endif %}
+                        <span>{{ (item.priority_tier or "routine").replace("_", " ").title() }}</span>
+                    </div>
+                </li>
+                {% endfor %}
+            {% else %}
+            <li class="empty-row">No tasks in this block.</li>
+            {% endif %}
+        </ul>
+    </article>
+    {% endfor %}
+</section>
+{% else %}
+<section class="card">
+    <p class="hint-text">No daily plan found yet. Generate one using the automation card above.</p>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.grid-two {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.hint-text {
+    color: #475569;
+    font-size: 13px;
+}
+
+.top-gap {
+    margin-top: 10px;
+}
+
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.metric-grid.two-col {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.metric-item {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    background: #f8fbff;
+    padding: 10px;
+}
+
+.metric-item span {
+    display: block;
+    font-size: 12px;
+    color: #64748b;
+}
+
+.metric-item strong {
+    font-size: 20px;
+    color: #0f172a;
+}
+
+.simple-list {
+    margin: 0;
+    padding-left: 18px;
+    color: #334155;
+}
+
+.summary-badges {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.badge {
+    background: #e2e8f0;
+    color: #1e293b;
+    border-radius: 999px;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+
+.badge.success {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.badge.warning {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.badge.dark {
+    background: #0f172a;
+    color: #f8fafc;
+}
+
+.timeline-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.block-card {
+    border-left: 5px solid var(--accent-color, #94a3b8);
+}
+
+.block-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.pill {
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    border-radius: 999px;
+    padding: 4px 9px;
+    font-size: 12px;
+    color: #334155;
+}
+
+.task-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 8px;
+    min-height: 45px;
+}
+
+.plan-item {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 9px;
+    background: #ffffff;
+    cursor: grab;
+}
+
+.plan-item.dragging {
+    opacity: 0.55;
+}
+
+.plan-item.is-complete {
+    background: #f0fdf4;
+    border-color: #86efac;
+}
+
+.item-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.item-check small {
+    display: block;
+    color: #64748b;
+}
+
+.item-details {
+    margin: 7px 0;
+    color: #334155;
+    font-size: 13px;
+}
+
+.item-meta {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: #475569;
+}
+
+.empty-row {
+    color: #94a3b8;
+    font-style: italic;
+}
+
+@media (max-width: 980px) {
+    .grid-two,
+    .timeline-grid,
+    .metric-grid,
+    .metric-grid.two-col {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+{% if plan %}
+<script>
+(() => {
+    const planId = {{ plan.id }};
+    const timeline = document.getElementById('dailyPlanTimeline');
+    const statusMessage = document.getElementById('liveStatusMessage');
+    const estimatedEndLabel = document.getElementById('estimatedEndLabel');
+    const runningBehindBtn = document.getElementById('runningBehindBtn');
+    const urgentPromptBtn = document.getElementById('urgentPromptBtn');
+    if (!timeline) return;
+
+    const setStatusMessage = (text, tone = 'info') => {
+        if (!statusMessage) return;
+        statusMessage.textContent = text || '';
+        statusMessage.style.color = tone === 'error' ? '#b91c1c' : (tone === 'success' ? '#166534' : '#475569');
+    };
+
+    const allItems = () => Array.from(document.querySelectorAll('.plan-item[data-item-id]'));
+    const orderedItemIds = () => allItems().map((item) => Number(item.dataset.itemId));
+
+    const recomputeEstimatedEnd = () => {
+        const remainingMinutes = allItems()
+            .filter((item) => !item.classList.contains('is-complete'))
+            .reduce((acc, item) => acc + Number(item.dataset.estimatedMinutes || 0), 0);
+        const now = new Date();
+        const estimate = new Date(now.getTime() + (remainingMinutes + 30) * 60 * 1000);
+        const formatted = estimate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        if (estimatedEndLabel) estimatedEndLabel.textContent = formatted;
+    };
+
+    const saveOrder = async () => {
+        try {
+            const response = await fetch('/tc/daily-plan/reorder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    plan_id: planId,
+                    ordered_item_ids: orderedItemIds(),
+                }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.success) {
+                throw new Error(payload.error || 'reorder_failed');
+            }
+            setStatusMessage('Order saved.', 'success');
+        } catch (error) {
+            console.error(error);
+            setStatusMessage('Could not save order.', 'error');
+        }
+    };
+
+    const updateItemStatus = async (itemId, isComplete) => {
+        try {
+            const response = await fetch(`/tc/daily-plan/item/${itemId}/update`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    status: isComplete ? 'completed' : 'pending',
+                    completed_now: isComplete,
+                }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.success) {
+                throw new Error(payload.error || 'status_update_failed');
+            }
+            if (estimatedEndLabel && payload.estimated_end_time) {
+                estimatedEndLabel.textContent = payload.estimated_end_time;
+            } else {
+                recomputeEstimatedEnd();
+            }
+            setStatusMessage('Task status updated.', 'success');
+        } catch (error) {
+            console.error(error);
+            setStatusMessage('Could not update task status.', 'error');
+        }
+    };
+
+    const reorganizeRemaining = async (reason) => {
+        try {
+            runningBehindBtn.disabled = true;
+            const response = await fetch('/tc/daily-plan/reorganize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plan_id: planId, reason }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.success) {
+                throw new Error(payload.error || 'reorganize_failed');
+            }
+            setStatusMessage('Afternoon reorganized. Refreshing...', 'success');
+            window.setTimeout(() => window.location.reload(), 450);
+        } catch (error) {
+            console.error(error);
+            setStatusMessage('Could not reorganize right now.', 'error');
+        } finally {
+            runningBehindBtn.disabled = false;
+        }
+    };
+
+    timeline.addEventListener('change', (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement) || !target.classList.contains('item-status-toggle')) return;
+        const itemEl = target.closest('.plan-item[data-item-id]');
+        if (!itemEl) return;
+        itemEl.classList.toggle('is-complete', target.checked);
+        updateItemStatus(Number(itemEl.dataset.itemId), target.checked);
+        recomputeEstimatedEnd();
+    });
+
+    let draggedEl = null;
+    timeline.addEventListener('dragstart', (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement) || !target.classList.contains('plan-item')) return;
+        draggedEl = target;
+        target.classList.add('dragging');
+    });
+    timeline.addEventListener('dragend', (event) => {
+        const target = event.target;
+        if (target instanceof HTMLElement) target.classList.remove('dragging');
+        draggedEl = null;
+    });
+
+    timeline.querySelectorAll('.task-list').forEach((listEl) => {
+        listEl.addEventListener('dragover', (event) => {
+            event.preventDefault();
+            const dragging = draggedEl;
+            if (!dragging) return;
+            const list = event.currentTarget;
+            if (!(list instanceof HTMLElement)) return;
+            const siblings = Array.from(list.querySelectorAll('.plan-item:not(.dragging)'));
+            const next = siblings.find((sibling) => {
+                const rect = sibling.getBoundingClientRect();
+                return event.clientY <= rect.top + rect.height / 2;
+            });
+            if (next) list.insertBefore(dragging, next);
+            else list.appendChild(dragging);
+        });
+        listEl.addEventListener('drop', (event) => {
+            event.preventDefault();
+            saveOrder();
+        });
+    });
+
+    if (runningBehindBtn) {
+        runningBehindBtn.addEventListener('click', () => reorganizeRemaining('running_behind'));
+    }
+    if (urgentPromptBtn) {
+        urgentPromptBtn.addEventListener('click', () => {
+            const shouldReplan = window.confirm('New urgent task added. Want me to reorganize your afternoon?');
+            if (shouldReplan) {
+                reorganizeRemaining('urgent_item');
+            } else {
+                setStatusMessage('Keeping current plan order.', 'info');
+            }
+        });
+    }
+})();
+</script>
+{% endif %}
+{% endblock %}

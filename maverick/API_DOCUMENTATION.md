@@ -389,6 +389,62 @@ Form `action` options:
 - Critical call queue from deadline windows
 - Recent good news (completions, completed tasks, positive reviews)
 
+## Intelligent Daily Plan + Time Blocking
+
+### Interactive route (TC)
+- `GET|POST /tc/daily-plan`
+  - Form actions:
+    - `generate_now` (force-generate plan; optional send + calendar sync toggles)
+    - `reorganize_now` (manual adaptive reshuffle)
+
+### Item update API
+- `POST /tc/daily-plan/item/<item_id>/update`
+- Auth: TC login required
+- JSON/form fields:
+  - `status`: `pending|completed|deferred|skipped`
+  - `notes` (optional)
+  - `actual_minutes` (optional)
+  - `started_now` (optional boolean)
+  - `completed_now` (optional boolean)
+- Response includes updated item status + refreshed estimated end time.
+
+### Reorder API (drag/drop)
+- `POST /tc/daily-plan/reorder`
+- JSON body:
+  - `plan_id`
+  - `ordered_item_ids` (array of item IDs in new order)
+
+### Adaptive reshuffle API
+- `POST /tc/daily-plan/reorganize`
+- JSON body:
+  - `plan_id`
+  - `reason` (`running_behind|urgent_item|manual_reorganize|...`)
+- Behavior:
+  - recategorizes remaining tasks
+  - reorders pending queue by current urgency
+  - updates estimated end-time projection
+
+### Automation script
+- `python3 automation/generate_daily_plan.py`
+  - `--force`
+  - `--dry-run`
+  - `--skip-calendar`
+
+### Google Calendar integration
+- Each generated block is synced as event type: `daily_plan_block`
+- Mapping `source_ref` format: `daily_plan:<plan_id>:block:<block_id>`
+- Existing daily-plan block events are replaced on regeneration/re-sync.
+
+### Data model
+- `daily_plans`
+  - one row/day with summary, estimated end time, delivery + sync status
+- `daily_plan_blocks`
+  - scheduled block rows with start/end, tier, and color
+- `daily_plan_items`
+  - task rows inside blocks with status, estimate, and actual timing
+- `daily_plan_learning_events`
+  - reorder/replan/status signals used for estimate-learning analytics
+
 ## Automation Analytics Dashboard
 
 ### Route (TC)

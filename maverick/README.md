@@ -356,6 +356,44 @@ Morning briefing behavior:
 - includes completion celebrations
 - sends via SMS + email
 
+## Intelligent Daily Plan + Time Blocking
+
+Maverick now supports a dedicated pre-briefing scheduler that builds Margaret’s day into focused blocks.
+
+- Interactive route: `GET|POST /tc/daily-plan`
+- Task update API: `POST /tc/daily-plan/item/<item_id>/update`
+- Drag/drop reorder API: `POST /tc/daily-plan/reorder`
+- Adaptive reshuffle API: `POST /tc/daily-plan/reorganize`
+- Automation script: `python3 automation/generate_daily_plan.py`
+  - `--force` regenerate even if today already exists
+  - `--dry-run` skip SMS/email sends
+  - `--skip-calendar` skip Google Calendar block sync
+
+Daily-plan behavior:
+- pulls open tasks + transaction signals (closings today/week, urgent issues, new contracts)
+- uses AI categorization into:
+  - critical
+  - high priority
+  - batch-able
+  - routine
+  - delegate/automate
+- creates color-coded time blocks with breaks + buffer
+- sends:
+  - concise SMS summary
+  - detailed email timeline (`emails/daily_plan.html`)
+- supports interactive execution:
+  - check off tasks
+  - drag/drop reorder
+  - real-time end-time estimate updates
+  - “I’m running behind” adaptive reshuffle
+  - urgent-item prompt (`Want me to reorganize your afternoon?`)
+- syncs each block to Google Calendar as `daily_plan_block` events
+- tracks learning:
+  - estimate accuracy
+  - reorder frequency
+  - replan frequency
+  - categories that consistently run long
+
 ## Automation Analytics Dashboard
 
 - Route: `GET /tc/analytics`

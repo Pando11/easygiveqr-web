@@ -289,6 +289,78 @@ CREATE TABLE morning_briefing_items (
     completed_at TIMESTAMP
 );
 
+CREATE TABLE daily_plans (
+    id SERIAL PRIMARY KEY,
+    plan_date DATE UNIQUE NOT NULL,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(20) DEFAULT 'ready',
+    estimated_end_time TIMESTAMP,
+    total_tasks INT DEFAULT 0,
+    total_work_minutes INT DEFAULT 0,
+    summary JSONB DEFAULT '{}'::jsonb,
+    payload JSONB DEFAULT '{}'::jsonb,
+    sent_sms BOOLEAN DEFAULT FALSE,
+    sent_email BOOLEAN DEFAULT FALSE,
+    sms_sid VARCHAR(120),
+    email_message_id VARCHAR(255),
+    send_error TEXT,
+    calendar_synced BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE daily_plan_blocks (
+    id SERIAL PRIMARY KEY,
+    plan_id INT REFERENCES daily_plans(id) ON DELETE CASCADE,
+    block_key VARCHAR(80),
+    title TEXT NOT NULL,
+    tier VARCHAR(30),
+    color VARCHAR(20),
+    focus VARCHAR(40),
+    start_time TIMESTAMP,
+    end_time TIMESTAMP,
+    duration_minutes INT DEFAULT 0,
+    display_order INT DEFAULT 999,
+    source_data JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE daily_plan_items (
+    id SERIAL PRIMARY KEY,
+    plan_id INT REFERENCES daily_plans(id) ON DELETE CASCADE,
+    block_id INT REFERENCES daily_plan_blocks(id) ON DELETE CASCADE,
+    task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+    transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    details TEXT,
+    category VARCHAR(60),
+    priority_tier VARCHAR(30) DEFAULT 'routine',
+    estimated_minutes INT DEFAULT 10,
+    actual_minutes INT,
+    best_time VARCHAR(20),
+    batch_key VARCHAR(120),
+    status VARCHAR(20) DEFAULT 'pending',
+    display_order INT DEFAULT 999,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    deferred BOOLEAN DEFAULT FALSE,
+    notes TEXT,
+    source_data JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE daily_plan_learning_events (
+    id SERIAL PRIMARY KEY,
+    plan_id INT REFERENCES daily_plans(id) ON DELETE CASCADE,
+    item_id INT REFERENCES daily_plan_items(id) ON DELETE SET NULL,
+    event_type VARCHAR(50) NOT NULL,
+    event_payload JSONB DEFAULT '{}'::jsonb,
+    created_by VARCHAR(100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE document_classification_corrections (
     id SERIAL PRIMARY KEY,
     document_id INT REFERENCES documents(id) ON DELETE SET NULL,
@@ -1227,3 +1299,7 @@ CREATE INDEX idx_closing_lender_requirements_active ON closing_lender_requiremen
 CREATE INDEX idx_morning_briefings_date ON morning_briefings(briefing_date DESC, generated_at DESC);
 CREATE INDEX idx_morning_briefing_items_briefing ON morning_briefing_items(briefing_id, display_order, id);
 CREATE INDEX idx_morning_briefing_items_status ON morning_briefing_items(status, deferred_to_date, updated_at DESC);
+CREATE INDEX idx_daily_plans_plan_date ON daily_plans(plan_date DESC, generated_at DESC);
+CREATE INDEX idx_daily_plan_blocks_plan ON daily_plan_blocks(plan_id, display_order, id);
+CREATE INDEX idx_daily_plan_items_plan ON daily_plan_items(plan_id, status, display_order, id);
+CREATE INDEX idx_daily_plan_learning_events_plan ON daily_plan_learning_events(plan_id, event_type, created_at DESC);

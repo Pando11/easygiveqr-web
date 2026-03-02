@@ -66,6 +66,15 @@ Use these schedules and commands in Railway Cron.
   - confidence scoring + review flags below 80%
   - high-stakes task exclusion (never auto-complete)
 
+## Intelligent Daily Plan (pre-briefing)
+- Schedule: `0 7 * * *`
+- Command: `cd maverick && python3 automation/generate_daily_plan.py`
+- Includes:
+  - AI categorization + time-block generation
+  - adaptive delegate suggestions
+  - SMS/email daily plan delivery
+  - Google Calendar block sync
+
 ## Intelligent Morning Briefing
 - Schedule: `30 7 * * *`
 - Command: `cd maverick && python3 automation/morning_briefing.py --mode morning`

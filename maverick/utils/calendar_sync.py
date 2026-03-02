@@ -539,6 +539,8 @@ def _calendar_color(event_type):
         return _safe_text(os.getenv("GOOGLE_CALENDAR_COLOR_CLOSING"), "11")
     if normalized == "appraisal":
         return _safe_text(os.getenv("GOOGLE_CALENDAR_COLOR_APPRAISAL"), "10")
+    if normalized == "daily_plan_block":
+        return _safe_text(os.getenv("GOOGLE_CALENDAR_COLOR_DAILY_PLAN_BLOCK"), "6")
     return _safe_text(os.getenv("GOOGLE_CALENDAR_COLOR_DEFAULT"), "1")
 
 
@@ -569,6 +571,8 @@ def _default_reminders(event_type):
         return [{"method": "sms", "minutes": 1440}, {"method": "sms", "minutes": 60}]
     if normalized == "appraisal":
         return [{"method": "popup", "minutes": 120}, {"method": "popup", "minutes": 30}]
+    if normalized == "daily_plan_block":
+        return [{"method": "popup", "minutes": 15}, {"method": "popup", "minutes": 5}]
     return [{"method": "popup", "minutes": 1440}]
 
 
@@ -662,6 +666,35 @@ def build_calendar_event_payload(event_type, transaction_id, event_data, timezon
                     "event_type": normalized_type,
                     "source_ref": source_ref,
                     "source_id": str(source_id),
+                }
+            },
+        }
+
+    if normalized_type == "daily_plan_block":
+        start_time = _to_google_datetime(event_data.get("start_time"))
+        end_time = _to_google_datetime(event_data.get("end_time"))
+        if not start_time:
+            raise ValueError("start_time is required for daily_plan_block events")
+        if not end_time:
+            start_dt = _normalize_datetime_value(event_data.get("start_time"))
+            end_dt = start_dt + timedelta(minutes=max(10, int(event_data.get("duration_minutes") or 30)))
+            end_time = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
+        title = _safe_text(event_data.get("title")) or f"{summary_prefix}: Focus Block"
+        return {
+            "summary": title,
+            "location": _safe_text(event_data.get("location"), "Maverick TC"),
+            "description": _safe_text(event_data.get("notes") or event_data.get("description")),
+            "start": {"dateTime": start_time, "timeZone": timezone_value},
+            "end": {"dateTime": end_time, "timeZone": timezone_value},
+            "reminders": {"useDefault": False, "overrides": reminders},
+            "colorId": color_id,
+            "extendedProperties": {
+                "private": {
+                    "transaction_id": str(transaction_id or ""),
+                    "event_type": normalized_type,
+                    "source_ref": source_ref,
+                    "source_id": str(source_id),
+                    "block_title": _safe_text(event_data.get("title")),
                 }
             },
         }

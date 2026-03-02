@@ -57,6 +57,18 @@ from automation.morning_briefing import (
     update_morning_briefing_item,
     update_morning_briefing_settings,
 )
+from automation.generate_daily_plan import (
+    ensure_daily_plan_tables,
+    fetch_daily_plan_by_date,
+    fetch_daily_plan_blocks,
+    fetch_daily_plan_items,
+    fetch_daily_plan_learning_metrics,
+    fetch_latest_daily_plan,
+    generate_daily_plan,
+    reorder_daily_plan_items,
+    reorganize_remaining_day,
+    update_daily_plan_item,
+)
 from config import Config
 from utils.bulk_messaging import (
     SMART_TEMPLATE_VARIABLES,
@@ -13655,6 +13667,236 @@ def move_morning_briefing_item_route(item_id):
             notice_type=notice_type,
         )
     )
+
+
+def _daily_plan_notice_type(value):
+    normalized = (value or "success").strip().lower()
+    return normalized if normalized in {"success", "warning", "error"} else "success"
+
+
+def _daily_plan_target_date(raw_value):
+    parsed = parse_optional_date(raw_value)
+    return parsed or date.today()
+
+
+@app.route("/tc/daily-plan", methods=["GET", "POST"])
+@login_required
+def tc_daily_plan():
+    """Interactive daily plan with time blocks, reordering, and adaptive reshuffle."""
+    ensure_daily_plan_tables()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = _daily_plan_notice_type(request.args.get("notice_type"))
+    selected_date = _daily_plan_target_date(request.args.get("date"))
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        selected_date = _daily_plan_target_date(request.form.get("selected_date"))
+        notice = "Daily plan updated."
+        notice_type = "success"
+        if action == "generate_now":
+            result = generate_daily_plan(
+                force=True,
+                send_messages=parse_bool_value(request.form.get("send_messages"), default=False),
+                sync_calendar=parse_bool_value(request.form.get("sync_calendar"), default=True),
+            )
+            if result.get("success"):
+                selected_date = _daily_plan_target_date(result.get("plan_date"))
+                notice = "Daily plan generated."
+            else:
+                notice = f"Daily plan was not generated: {result.get('error') or 'unknown'}"
+                notice_type = "warning"
+        elif action == "reorganize_now":
+            plan = fetch_daily_plan_by_date(selected_date) or fetch_latest_daily_plan(days_back=7)
+            if not plan:
+                notice = "No daily plan available yet."
+                notice_type = "warning"
+            else:
+                result = reorganize_remaining_day(
+                    plan_id=plan["id"],
+                    reason="manual_reorganize",
+                    updated_by=session.get("tc_username", "margaret"),
+                )
+                if result.get("success"):
+                    notice = "Remaining day has been reorganized."
+                else:
+                    notice = f"Could not reorganize plan: {result.get('error') or 'unknown'}"
+                    notice_type = "warning"
+        else:
+            notice = "Unknown daily plan action."
+            notice_type = "warning"
+
+        return redirect(
+            url_for(
+                "tc_daily_plan",
+                date=selected_date.isoformat(),
+                notice=notice,
+                notice_type=notice_type,
+            )
+        )
+
+    plan = fetch_daily_plan_by_date(selected_date)
+    if not plan:
+        plan = fetch_latest_daily_plan(days_back=30)
+    if plan and plan.get("plan_date"):
+        selected_date = plan.get("plan_date")
+    blocks = fetch_daily_plan_blocks(plan["id"]) if plan else []
+    items = fetch_daily_plan_items(plan["id"], include_completed=True) if plan else []
+
+    items_by_block = {}
+    for item in items:
+        item["transaction_url"] = (
+            url_for("tc_transaction", transaction_id=item.get("transaction_id"))
+            if item.get("transaction_id")
+            else ""
+        )
+        tier = (item.get("priority_tier") or "").strip().lower()
+        item["tier_class"] = f"tier-{tier or 'routine'}"
+        item["is_completed"] = item.get("status") == "completed"
+        item["status_label"] = (item.get("status") or "pending").replace("_", " ").title()
+        block_id = int(item.get("block_id") or 0)
+        items_by_block.setdefault(block_id, []).append(item)
+
+    tier_color_map = {
+        "critical": "#ef4444",
+        "high_priority": "#f97316",
+        "batch_able": "#2563eb",
+        "routine": "#6b7280",
+        "buffer": "#7c3aed",
+        "break": "#16a34a",
+    }
+    for block in blocks:
+        block_id = int(block.get("id") or 0)
+        block["tasks"] = items_by_block.get(block_id, [])
+        block["start_label"] = (
+            block.get("start_time").strftime("%I:%M %p").lstrip("0")
+            if isinstance(block.get("start_time"), datetime)
+            else ""
+        )
+        block["end_label"] = (
+            block.get("end_time").strftime("%I:%M %p").lstrip("0")
+            if isinstance(block.get("end_time"), datetime)
+            else ""
+        )
+        block["tier_class"] = f"tier-{(block.get('tier') or 'routine').lower()}"
+        block["accent_color"] = tier_color_map.get((block.get("tier") or "").lower(), "#6b7280")
+
+    item_summary = {
+        "pending_count": len([item for item in items if item.get("status") == "pending"]),
+        "completed_count": len([item for item in items if item.get("status") == "completed"]),
+        "deferred_count": len([item for item in items if item.get("status") == "deferred"]),
+    }
+    learning_metrics = fetch_daily_plan_learning_metrics(days=45)
+    return render_template(
+        "tc_daily_plan.html",
+        notice=notice,
+        notice_type=notice_type,
+        selected_date=selected_date,
+        plan=plan,
+        blocks=blocks,
+        items=items,
+        item_summary=item_summary,
+        learning_metrics=learning_metrics,
+    )
+
+
+@app.route("/tc/daily-plan/item/<int:item_id>/update", methods=["POST"])
+@login_required
+def update_daily_plan_item_route(item_id):
+    """Update one daily-plan task status/notes with live estimated end-time refresh."""
+    payload = request.get_json(silent=True) or request.form or {}
+    status = (payload.get("status") or "").strip().lower() or None
+    notes = (payload.get("notes") or "").strip() if payload.get("notes") is not None else None
+    actual_minutes_raw = payload.get("actual_minutes")
+    actual_minutes = None
+    if actual_minutes_raw not in (None, ""):
+        try:
+            actual_minutes = max(1, int(actual_minutes_raw))
+        except (TypeError, ValueError):
+            actual_minutes = None
+    started_now = parse_bool_value(payload.get("started_now"), default=False)
+    completed_now = parse_bool_value(payload.get("completed_now"), default=False)
+
+    updated = update_daily_plan_item(
+        item_id=item_id,
+        status=status,
+        notes=notes,
+        actual_minutes=actual_minutes,
+        started_now=started_now,
+        completed_now=completed_now,
+        updated_by=session.get("tc_username", "margaret"),
+    )
+    if not updated:
+        return jsonify({"success": False, "error": "item_not_found"}), 404
+
+    remaining_rows = execute_query(
+        """
+        SELECT COALESCE(SUM(estimated_minutes), 0) AS remaining_minutes
+        FROM daily_plan_items
+        WHERE plan_id = %s
+          AND status <> 'completed'
+        """,
+        (int(updated.get("plan_id") or 0),),
+        fetch=True,
+    ) or []
+    remaining_minutes = int((remaining_rows[0] or {}).get("remaining_minutes") or 0) if remaining_rows else 0
+    estimated_end = datetime.now() + timedelta(minutes=remaining_minutes + 30)
+    return jsonify(
+        {
+            "success": True,
+            "item": {
+                "id": updated.get("id"),
+                "status": updated.get("status"),
+                "status_label": (updated.get("status") or "pending").replace("_", " ").title(),
+                "actual_minutes": updated.get("actual_minutes"),
+                "notes": updated.get("notes") or "",
+            },
+            "remaining_minutes": remaining_minutes,
+            "estimated_end_time": estimated_end.strftime("%I:%M %p"),
+        }
+    )
+
+
+@app.route("/tc/daily-plan/reorder", methods=["POST"])
+@login_required
+def reorder_daily_plan_route():
+    """Persist drag-drop ordering updates for daily-plan tasks."""
+    payload = request.get_json(silent=True) or {}
+    plan_id = payload.get("plan_id")
+    ordered_item_ids = payload.get("ordered_item_ids") or []
+    try:
+        plan_id = int(plan_id)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "invalid_plan_id"}), 400
+
+    ok = reorder_daily_plan_items(
+        plan_id=plan_id,
+        ordered_item_ids=ordered_item_ids,
+        updated_by=session.get("tc_username", "margaret"),
+    )
+    if not ok:
+        return jsonify({"success": False, "error": "reorder_failed"}), 400
+    return jsonify({"success": True})
+
+
+@app.route("/tc/daily-plan/reorganize", methods=["POST"])
+@login_required
+def reorganize_daily_plan_route():
+    """Adaptive reshuffle for remaining day when new urgency appears."""
+    payload = request.get_json(silent=True) or {}
+    plan_id = payload.get("plan_id")
+    reason = (payload.get("reason") or "running_behind").strip().lower()
+    try:
+        plan_id = int(plan_id)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "invalid_plan_id"}), 400
+    result = reorganize_remaining_day(
+        plan_id=plan_id,
+        reason=reason,
+        updated_by=session.get("tc_username", "margaret"),
+    )
+    if not result.get("success"):
+        return jsonify({"success": False, "error": result.get("error") or "reorganize_failed"}), 400
+    return jsonify(result)
 
 
 @app.route("/tc/daily-checklist")
