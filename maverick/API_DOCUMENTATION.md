@@ -976,6 +976,20 @@ Accepted payload fields (provider-dependent):
 - JSON:
   - `count` = number of `pending_review` drafts
 
+### Thread summarizer (TC)
+- `POST /tc/email/summarize`
+- JSON body:
+  - `draft_id` (preferred), or
+  - `thread` (array of messages) + optional `transaction_id`
+- Output:
+  - 3-bullet summary object:
+    - `what_they_want`
+    - `current_status`
+    - `next_action_needed`
+  - estimated cost metadata:
+    - `estimated_cost_usd` (`0.02`)
+    - `estimated_monthly_cost_usd` (`1.00` at 50 summaries/month)
+
 ### Send draft (TC)
 - `POST /tc/email-draft/<draft_id>/send`
 - JSON body:

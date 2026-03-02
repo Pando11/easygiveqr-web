@@ -641,6 +641,7 @@ Maverick now auto-generates reply drafts for inbound transaction emails and rout
 Primary review routes:
 - `GET /tc/email-drafts`
 - `GET /tc/email-drafts/count`
+- `POST /tc/email/summarize`
 - `POST /tc/email-draft/<draft_id>/send`
 - `POST /tc/email-draft/<draft_id>/reject`
 - `POST /tc/email-draft/<draft_id>/regenerate`
@@ -653,9 +654,11 @@ Behavior:
 - analyzes inbound email question intent (Claude + fallback heuristics)
 - pulls transaction facts (status, deadlines, document state, recent activity)
 - generates concise, professional draft response with confidence + urgency
+- supports one-click **Summarize Thread** in review UI (3 bullets: what they want, current status, next action)
 - stores drafts as `pending_review`; Margaret can send as-is, edit+send, reject, or regenerate
 - logs feedback in `email_draft_feedback` for iterative learning
 - dashboard polls every 30s and surfaces pending draft notification banner
+- summary cost target: ~$0.02 each (~$1/month at 50 thread summaries)
 
 ## Intelligent Nudge Automation
 

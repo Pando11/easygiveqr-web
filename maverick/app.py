@@ -5351,6 +5351,150 @@ def fetch_email_thread_context(transaction_id, sender_email, limit=5):
     return thread[: max(1, min(int(limit or 5), 12))]
 
 
+def _parse_iso_datetime_value(raw_value):
+    """Parse ISO-like timestamp text into a naive local datetime when possible."""
+    text = (raw_value or "").strip() if isinstance(raw_value, str) else str(raw_value or "").strip()
+    if not text:
+        return None
+    text = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo:
+        return parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _sanitize_email_thread_messages(thread_messages, max_items=20):
+    """Normalize thread payload into compact, model-safe message rows."""
+    cleaned = []
+    for raw in thread_messages or []:
+        direction = "unknown"
+        subject = ""
+        body = ""
+        at_value = ""
+        sender = ""
+        if isinstance(raw, dict):
+            direction = str(raw.get("direction") or raw.get("type") or "").strip().lower()
+            if direction not in {"inbound", "outbound", "internal"}:
+                direction = "unknown"
+            subject = str(raw.get("subject") or raw.get("title") or "").strip()
+            body = str(raw.get("body") or raw.get("message") or raw.get("snippet") or raw.get("text") or "").strip()
+            sender = str(raw.get("sender") or raw.get("from") or "").strip()
+            at_value = str(raw.get("at") or raw.get("created_at") or raw.get("timestamp") or "").strip()
+        elif isinstance(raw, str):
+            body = raw.strip()
+        if not subject and not body:
+            continue
+        cleaned.append(
+            {
+                "direction": direction,
+                "subject": subject[:240] if subject else "(No subject)",
+                "body": inbound_email_excerpt(body, max_chars=1800),
+                "at": at_value[:80],
+                "sender": sender[:200],
+            }
+        )
+        if len(cleaned) >= max(1, min(int(max_items or 20), 40)):
+            break
+    return cleaned
+
+
+def _fallback_email_thread_summary(thread_messages, transaction=None):
+    """Deterministic 3-bullet fallback summary when model is unavailable."""
+    text_blob = " ".join(
+        f"{row.get('subject', '')} {row.get('body', '')}".strip().lower()
+        for row in (thread_messages or [])[:8]
+    )
+    property_address = ((transaction or {}).get("property_address") or "this transaction").strip()
+    transaction_status = ((transaction or {}).get("status") or "active").replace("_", " ").lower()
+
+    if "closing date" in text_blob or ("closing" in text_blob and ("when" in text_blob or "what date" in text_blob)):
+        what_they_want = "They want confirmation of closing date/time details."
+    elif "extension" in text_blob or "extend" in text_blob:
+        what_they_want = "They want guidance on a contract extension request."
+    elif "document" in text_blob or "inspection" in text_blob or "appraisal" in text_blob:
+        what_they_want = "They want a document/status update for the file."
+    else:
+        what_they_want = "They want a clear transaction status update and next steps."
+
+    current_status = (
+        f"Thread is about {property_address}; transaction status is currently {transaction_status}."
+    )
+    next_action_needed = (
+        "Send a concise reply that answers the question directly and confirms the next owner + deadline."
+    )
+    return {
+        "what_they_want": what_they_want,
+        "current_status": current_status,
+        "next_action_needed": next_action_needed,
+        "source": "fallback",
+        "thread_count": len(thread_messages or []),
+    }
+
+
+def summarize_email_thread(thread_messages, transaction=None):
+    """Summarize email thread into: ask, status, and next action."""
+    sanitized = _sanitize_email_thread_messages(thread_messages, max_items=18)
+    fallback = _fallback_email_thread_summary(sanitized, transaction=transaction)
+    if not sanitized:
+        return fallback
+    api_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    if not api_key:
+        return fallback
+
+    prompt = (
+        "You are assisting Margaret, a real estate transaction coordinator.\n"
+        "Summarize this email thread into exactly 3 concise bullets.\n\n"
+        "Required bullets:\n"
+        "1) What they want\n"
+        "2) Current status\n"
+        "3) Next action needed\n\n"
+        "Return JSON only:\n"
+        "{\n"
+        '  "what_they_want": "...",\n'
+        '  "current_status": "...",\n'
+        '  "next_action_needed": "..."\n'
+        "}\n\n"
+        "Constraints:\n"
+        "- Keep each bullet under 180 characters.\n"
+        "- Be concrete and action-oriented.\n\n"
+        f"Transaction context: {json.dumps(transaction or {}, default=str)[:1200]}\n\n"
+        f"Thread messages:\n{json.dumps(sanitized, indent=2, default=str)}"
+    )
+    try:
+        from anthropic import Anthropic
+
+        client = Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=(os.getenv("EMAIL_DRAFT_ANALYSIS_MODEL") or "claude-sonnet-4-20250514"),
+            max_tokens=500,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        payload = _extract_json_from_model_text(_extract_model_text_content(response))
+        if isinstance(payload, dict):
+            what_they_want = (payload.get("what_they_want") or "").strip()
+            current_status = (payload.get("current_status") or "").strip()
+            next_action_needed = (payload.get("next_action_needed") or "").strip()
+            if what_they_want and current_status and next_action_needed:
+                return {
+                    "what_they_want": what_they_want[:220],
+                    "current_status": current_status[:220],
+                    "next_action_needed": next_action_needed[:220],
+                    "source": "claude",
+                    "thread_count": len(sanitized),
+                }
+    except Exception as exc:
+        log_system_error(
+            "email_thread_summary",
+            f"Claude fallback used: {str(exc)[:320]}",
+            transaction_id=(transaction or {}).get("id"),
+        )
+    return fallback
+
+
 def analyze_incoming_email(email_content, sender_email, subject, transaction=None):
     """Use Claude + heuristics to extract question intent from inbound email."""
     body_text = str(email_content or "").strip()
@@ -13861,6 +14005,39 @@ def tc_email_drafts():
         urgency = (analysis.get("urgency") or "low").strip().lower()
         if urgency not in {"low", "medium", "high", "critical"}:
             urgency = "low"
+        thread_context = sources.get("thread_context")
+        if not isinstance(thread_context, list):
+            thread_context = []
+        raw_thread_messages = [
+            {
+                "direction": "inbound",
+                "subject": row.get("subject") or "(No subject)",
+                "body": row.get("original_message") or "",
+                "at": json_date_value(row.get("created_at")),
+                "sender": row.get("from_email") or "",
+            }
+        ] + thread_context
+        cleaned_thread = _sanitize_email_thread_messages(raw_thread_messages, max_items=12)
+        display_thread = []
+        for thread_row in cleaned_thread:
+            direction = (thread_row.get("direction") or "unknown").strip().lower()
+            direction_label = {
+                "inbound": "Inbound",
+                "outbound": "Outbound",
+                "internal": "Internal",
+            }.get(direction, "Thread")
+            at_value = (thread_row.get("at") or "").strip()
+            parsed_at = _parse_iso_datetime_value(at_value)
+            at_label = format_timestamp_label(parsed_at) if parsed_at else at_value
+            display_thread.append(
+                {
+                    "direction": direction,
+                    "direction_label": direction_label,
+                    "subject": thread_row.get("subject") or "(No subject)",
+                    "body": thread_row.get("body") or "",
+                    "at_label": at_label,
+                }
+            )
         drafts.append(
             {
                 "id": row["id"],
@@ -13881,6 +14058,8 @@ def tc_email_drafts():
                 "created_at_label": format_timestamp_label(row.get("created_at")),
                 "created_at_ago": format_time_ago(row.get("created_at")),
                 "urgency": urgency,
+                "thread_messages": display_thread,
+                "thread_count": len(display_thread),
             }
         )
     return render_template(
@@ -13898,6 +14077,83 @@ def tc_email_drafts():
 def tc_email_drafts_count():
     """Return pending draft count for dashboard polling."""
     return jsonify({"success": True, "count": fetch_pending_email_draft_count()})
+
+
+@app.route("/tc/email/summarize", methods=["POST"])
+@login_required
+def summarize_email_thread_route():
+    """Summarize an email thread into 3 bullets: ask, status, next action."""
+    ensure_email_draft_tables()
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    draft_id = parse_optional_int(payload.get("draft_id"))
+    transaction_id = parse_optional_int(payload.get("transaction_id"))
+    thread_messages = []
+
+    if draft_id:
+        draft = fetch_email_draft_or_none(draft_id)
+        if not draft:
+            return jsonify({"success": False, "error": "draft_not_found"}), 404
+        draft_sources = draft.get("draft_data_sources")
+        if not isinstance(draft_sources, dict):
+            draft_sources = {}
+        thread_context = draft_sources.get("thread_context")
+        if isinstance(thread_context, list):
+            thread_messages.extend(thread_context)
+        thread_messages.insert(
+            0,
+            {
+                "direction": "inbound",
+                "subject": draft.get("subject") or "(No subject)",
+                "body": draft.get("original_message") or "",
+                "at": json_date_value(draft.get("created_at")),
+                "sender": draft.get("from_email") or "",
+            },
+        )
+        if not transaction_id:
+            transaction_id = parse_optional_int(draft.get("transaction_id"))
+    else:
+        provided_thread = payload.get("thread")
+        if isinstance(provided_thread, list):
+            thread_messages.extend(provided_thread)
+        original_message = (payload.get("original_message") or "").strip()
+        if original_message:
+            thread_messages.insert(
+                0,
+                {
+                    "direction": "inbound",
+                    "subject": (payload.get("subject") or "(No subject)").strip(),
+                    "body": original_message,
+                    "at": json_date_value(datetime.now()),
+                    "sender": (payload.get("from_email") or "").strip(),
+                },
+            )
+
+    cleaned_thread = _sanitize_email_thread_messages(thread_messages, max_items=18)
+    if not cleaned_thread:
+        return jsonify({"success": False, "error": "thread_required"}), 400
+
+    transaction = fetch_timeline_transaction(transaction_id) if transaction_id else None
+    summary = summarize_email_thread(cleaned_thread, transaction=transaction)
+    per_summary_cost = 0.02
+    monthly_volume = 50
+    return jsonify(
+        {
+            "success": True,
+            "summary": summary,
+            "bullets": [
+                summary.get("what_they_want") or "",
+                summary.get("current_status") or "",
+                summary.get("next_action_needed") or "",
+            ],
+            "thread_count": len(cleaned_thread),
+            "estimated_cost_usd": per_summary_cost,
+            "monthly_volume_assumption": monthly_volume,
+            "estimated_monthly_cost_usd": round(per_summary_cost * monthly_volume, 2),
+        }
+    )
 
 
 @app.route("/tc/email-draft/<int:draft_id>/send", methods=["POST"])
