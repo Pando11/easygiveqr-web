@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+
+{% block title %}Text Templates - Maverick TC{% endblock %}
+{% block subtitle %}Intelligent Text Expansion{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="section-header">
+        <div>
+            <h2>Text Expansion Templates</h2>
+            <p class="hint-text">Type shortcode like <code>/closing</code> in any text area to expand with transaction context.</p>
+        </div>
+        <a href="{{ url_for('tc_dashboard') }}" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<section class="card">
+    <div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+</section>
+{% endif %}
+
+<section class="grid-two">
+    <article class="card">
+        <h3>Create Template</h3>
+        <form method="post" class="stack-form">
+            <input type="hidden" name="action" value="create">
+            <label>Shortcode
+                <input type="text" name="shortcode" placeholder="/new_template" required>
+            </label>
+            <label>Category
+                <input type="text" name="category" placeholder="general" value="general">
+            </label>
+            <label>Template text
+                <textarea name="template_text" rows="5" placeholder="Hi {{AGENT_NAME}}, update for {{PROPERTY_ADDRESS}}..." required></textarea>
+            </label>
+            <button type="submit" class="btn">Create Template</button>
+        </form>
+        <p class="hint-text top-gap">Variables use uppercase format: <code>{{ "{{AGENT_NAME}}" }}</code>, <code>{{ "{{CLOSING_DATE}}" }}</code></p>
+    </article>
+
+    <article class="card">
+        <h3>Smart Suggestions</h3>
+        {% if suggestions %}
+        <ul class="suggestion-list">
+            {% for suggestion in suggestions %}
+            <li class="suggestion-item">
+                <div>
+                    <strong>{{ suggestion.suggested_shortcode }}</strong>
+                    <small class="hint-text">Repeated {{ suggestion.repeat_count }}x</small>
+                    <p>{{ suggestion.sample_text }}</p>
+                </div>
+                <form method="post">
+                    <input type="hidden" name="action" value="create_from_suggestion">
+                    <input type="hidden" name="sample_text" value="{{ suggestion.sample_text }}">
+                    <input type="hidden" name="suggested_shortcode" value="{{ suggestion.suggested_shortcode }}">
+                    <input type="hidden" name="category" value="{{ suggestion.category }}">
+                    <button type="submit" class="btn btn-small">Create</button>
+                </form>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="hint-text">No repeated-message suggestions yet.</p>
+        {% endif %}
+    </article>
+</section>
+
+<section class="card">
+    <h3>All Templates</h3>
+    <form method="get" class="filter-row">
+        <label>Category
+            <select name="category">
+                <option value="">All</option>
+                {% for category in categories %}
+                <option value="{{ category }}" {% if selected_category == category %}selected{% endif %}>{{ category }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>Search
+            <input type="text" name="q" value="{{ search_query }}" placeholder="/closing">
+        </label>
+        <button type="submit" class="btn btn-secondary">Filter</button>
+    </form>
+
+    {% if templates %}
+    <div class="template-grid">
+        {% for template in templates %}
+        <article class="template-card">
+            <form method="post" class="stack-form">
+                <input type="hidden" name="action" value="update">
+                <input type="hidden" name="template_id" value="{{ template.id }}">
+                <label>Shortcode
+                    <input type="text" name="shortcode" value="{{ template.shortcode }}" required>
+                </label>
+                <label>Category
+                    <input type="text" name="category" value="{{ template.category or 'general' }}">
+                </label>
+                <label>Template text
+                    <textarea name="template_text" rows="4" required>{{ template.template_text }}</textarea>
+                </label>
+                <div class="template-meta">
+                    <small>Used {{ template.usage_count }} times</small>
+                    <small>Created {{ template.created_at_label }}</small>
+                </div>
+                <div class="actions-inline">
+                    <button type="submit" class="btn btn-small">Save</button>
+                </div>
+            </form>
+            <form method="post" onsubmit="return confirm('Delete template {{ template.shortcode }}?');">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="template_id" value="{{ template.id }}">
+                <button type="submit" class="btn btn-small btn-secondary">Delete</button>
+            </form>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="hint-text">No templates found for this filter.</p>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.hint-text {
+    color: #475569;
+    font-size: 13px;
+}
+
+.top-gap {
+    margin-top: 10px;
+}
+
+.grid-two {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.filter-row {
+    display: grid;
+    grid-template-columns: 1fr 2fr auto;
+    gap: 10px;
+    margin-bottom: 14px;
+    align-items: end;
+}
+
+.template-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.template-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    display: grid;
+    gap: 8px;
+    background: #f8fbff;
+}
+
+.template-meta {
+    display: flex;
+    justify-content: space-between;
+    color: #64748b;
+    font-size: 12px;
+}
+
+.suggestion-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 10px;
+}
+
+.suggestion-item {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: flex-start;
+    background: #f8fafc;
+}
+
+.suggestion-item p {
+    margin-top: 6px;
+}
+
+.actions-inline {
+    display: flex;
+    gap: 8px;
+}
+
+.btn-small {
+    padding: 8px 12px;
+    font-size: 13px;
+}
+
+@media (max-width: 960px) {
+    .grid-two,
+    .template-grid,
+    .filter-row {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}

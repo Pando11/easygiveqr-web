@@ -365,6 +365,24 @@ Morning briefing behavior:
   - engagement metrics (question reduction, review response rate, referrals)
   - feature adoption + time-saved-by-feature rankings
 
+## Intelligent Text Expansion Templates
+
+Margaret can now use shortcode-triggered text expansion from any standard text input/textarea across TC pages.
+
+- Management route: `GET|POST /tc/templates`
+- API search route: `GET /api/templates/search?q=/clo`
+- API expansion route: `POST /api/templates/expand`
+- Backing table: `message_templates`
+  - columns: `shortcode`, `template_text`, `category`, `usage_count`, `created_at`
+  - seeded with 30 common templates (closing, inspection, payment, docs, etc.)
+
+Highlights:
+- slash autocomplete dropdown appears while typing (desktop + mobile/touch)
+- selecting a template expands variables using live transaction context
+- tracks per-template usage counts
+- supports custom create/edit workflows
+- smart suggestions identify repeated phrases from communication history
+
 ## Timeline Packet + Vendor Outreach Automation
 
 After Margaret approves and activates a transaction, Maverick:

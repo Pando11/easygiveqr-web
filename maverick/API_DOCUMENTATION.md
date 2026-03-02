@@ -423,6 +423,42 @@ Form `action` options:
   - problem detection (hrs/month)
   - bulk messaging (hrs/month)
 
+## Intelligent Text Expansion Templates
+
+### Management route (TC)
+- `GET|POST /tc/templates`
+- Form actions:
+  - `create` (shortcode, category, template_text)
+  - `update` (template_id + editable fields)
+  - `delete` (unused templates only)
+  - `create_from_suggestion` (auto-create from repeated phrase)
+
+### Autocomplete API
+- `GET /api/templates/search?q=/clo`
+- Auth: TC login required
+- Response: array of matching template objects (`id`, `shortcode`, `category`, `preview`, `usage_count`)
+
+### Expansion API
+- `POST /api/templates/expand`
+- Auth: TC login required
+- JSON body:
+  - `template_id` (required)
+  - `transaction_id` (optional; inferred from referrer when possible)
+- Response:
+  - `text`: expanded message with resolved `{{VARIABLES}}`
+  - `unfilled_vars`: variable names that remained blank (`____`)
+  - `template`: selected template metadata
+
+### Data model
+- Table: `message_templates`
+  - `id SERIAL PRIMARY KEY`
+  - `shortcode VARCHAR(50) UNIQUE`
+  - `template_text TEXT`
+  - `category VARCHAR(50)`
+  - `usage_count INT DEFAULT 0`
+  - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
+- Includes seed set of 30 common templates on first-use table initialization.
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values

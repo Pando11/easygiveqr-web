@@ -244,6 +244,156 @@ CRITICAL_COMPLETION_DOCUMENT_TYPES = {
 
 POSITIVE_REVIEW_THRESHOLD = 4
 
+MESSAGE_TEMPLATE_SEEDS = [
+    (
+        "/closing",
+        "Hi {{AGENT_NAME}}, closing for {{PROPERTY_ADDRESS}} is confirmed for {{CLOSING_DATE}} at {{CLOSING_TIME}} at {{TITLE_COMPANY}}. Buyer should bring photo ID and cashier's check for ${{CASH_TO_CLOSE}}. Let me know if you have questions! - Margaret",
+        "closing",
+    ),
+    (
+        "/inspection",
+        "Hi {{AGENT_NAME}}, inspection is scheduled for {{PROPERTY_ADDRESS}} on {{INSPECTION_DATE}} at {{INSPECTION_TIME}}. Inspector is {{INSPECTOR_NAME}} ({{INSPECTOR_PHONE}}). Please ensure property is accessible and utilities are on. - Margaret",
+        "inspection",
+    ),
+    (
+        "/earnest",
+        "Earnest money of ${{EARNEST_AMOUNT}} is due by {{EARNEST_DUE_DATE}}. Please wire to {{TITLE_COMPANY}} with reference {{TRANSACTION_ID}}. - Margaret",
+        "payment",
+    ),
+    (
+        "/option",
+        "Option fee of ${{OPTION_FEE}} is due by {{OPTION_DUE_DATE}}. Please deliver to seller's agent or wire to title. - Margaret",
+        "payment",
+    ),
+    (
+        "/appraisal",
+        "Appraisal is scheduled for {{APPRAISAL_DATE}}. Appraiser is {{APPRAISER_NAME}} ({{APPRAISER_PHONE}}). Property should be accessible and in showing condition. - Margaret",
+        "appraisal",
+    ),
+    ("/survey", "Survey has been ordered for {{PROPERTY_ADDRESS}}. Expected completion by {{SURVEY_DUE_DATE}}. - Margaret", "survey"),
+    (
+        "/title",
+        "Title file {{TRANSACTION_ID}} has been opened at {{TITLE_COMPANY}}. Contact is {{TITLE_CONTACT}} ({{TITLE_PHONE}}). - Margaret",
+        "title",
+    ),
+    (
+        "/hoa",
+        "HOA documents for {{PROPERTY_ADDRESS}} are due by {{HOA_DUE_DATE}}. Please provide: declarations, bylaws, financials, and resale certificate. - Margaret",
+        "hoa",
+    ),
+    (
+        "/walkthrough",
+        "Final walk-through for {{PROPERTY_ADDRESS}} is scheduled for {{WALKTHROUGH_DATE}} at {{WALKTHROUGH_TIME}}. Meet at property. - Margaret",
+        "walkthrough",
+    ),
+    (
+        "/congratulations",
+        "Congratulations on your closing! Possession is at {{POSSESSION_TIME}}. Please ensure all utilities are transferred. Enjoy your new home! - Margaret",
+        "closing",
+    ),
+    (
+        "/repair",
+        "Per the repair addendum, seller has agreed to: {{REPAIR_ITEMS}}. Work should be completed by {{REPAIR_COMPLETION_DATE}}. - Margaret",
+        "repair",
+    ),
+    (
+        "/extension",
+        "Contract extension executed. New closing date is {{NEW_CLOSING_DATE}}. All deadlines adjusted accordingly. - Margaret",
+        "extension",
+    ),
+    (
+        "/termination",
+        "This transaction has been terminated per the contract. Earnest money will be {{EARNEST_DISPOSITION}}. - Margaret",
+        "termination",
+    ),
+    (
+        "/cd",
+        "Closing Disclosure is ready for review. Please review carefully and notify us of any discrepancies within 24 hours. - Margaret",
+        "closing",
+    ),
+    (
+        "/welcome",
+        "Welcome to Maverick TC! I'm Margaret, your transaction coordinator for {{PROPERTY_ADDRESS}}. I'll keep everyone on track from contract to close. Looking forward to a smooth closing on {{CLOSING_DATE}}! - Margaret",
+        "general",
+    ),
+    (
+        "/paymentlink",
+        "Hi {{AGENT_NAME}}, payment link for {{PROPERTY_ADDRESS}}: {{PAYMENT_LINK}}. Amount due: ${{PAYMENT_AMOUNT}} by {{PAYMENT_DUE_DATE}}. - Margaret",
+        "payment",
+    ),
+    (
+        "/wire",
+        "Wire reminder for {{PROPERTY_ADDRESS}}: send funds to {{TITLE_COMPANY}} and include file {{TRANSACTION_ID}}. Confirm once sent so we can track receipt. - Margaret",
+        "payment",
+    ),
+    (
+        "/loanapproval",
+        "Loan approval update for {{PROPERTY_ADDRESS}}: {{LOAN_STATUS}}. Next milestone is {{FINANCING_APPROVAL_DATE}}. Please alert us if underwriting conditions change. - Margaret",
+        "payment",
+    ),
+    (
+        "/clear2close",
+        "Great news! {{PROPERTY_ADDRESS}} is clear to close. Final signing is {{CLOSING_DATE}} at {{CLOSING_TIME}}. Reach out with any final questions. - Margaret",
+        "closing",
+    ),
+    (
+        "/reminderdocs",
+        "Quick doc reminder for {{PROPERTY_ADDRESS}}: {{MISSING_DOCUMENTS}}. Please upload in portal: {{PORTAL_LINK}}. - Margaret",
+        "document",
+    ),
+    (
+        "/statusweekly",
+        "Weekly status for {{PROPERTY_ADDRESS}}: {{STATUS_SUMMARY}}. Next due date: {{NEXT_DEADLINE}}. - Margaret",
+        "general",
+    ),
+    (
+        "/titleupdate",
+        "Title update for {{PROPERTY_ADDRESS}}: {{TITLE_STATUS}}. Contact at {{TITLE_COMPANY}} is {{TITLE_CONTACT}} ({{TITLE_PHONE}}). - Margaret",
+        "title",
+    ),
+    (
+        "/inspectionreport",
+        "Inspection report received for {{PROPERTY_ADDRESS}}. Please review and send repair requests by {{REPAIR_REQUEST_DUE_DATE}}. - Margaret",
+        "inspection",
+    ),
+    (
+        "/appraisalreport",
+        "Appraisal report received for {{PROPERTY_ADDRESS}} at value ${{APPRAISED_VALUE}}. Let me know if you'd like to discuss next steps. - Margaret",
+        "appraisal",
+    ),
+    (
+        "/utility",
+        "Utility transfer reminder for {{PROPERTY_ADDRESS}}: set service start/end for {{CLOSING_DATE}} and keep account numbers for your records. - Margaret",
+        "closing",
+    ),
+    (
+        "/possession",
+        "Possession timing for {{PROPERTY_ADDRESS}} is {{POSSESSION_TIME}} on {{CLOSING_DATE}}. Please confirm key handoff details. - Margaret",
+        "closing",
+    ),
+    (
+        "/delaynotice",
+        "Update for {{PROPERTY_ADDRESS}}: we have a scheduling delay due to {{DELAY_REASON}}. Revised target date is {{NEW_CLOSING_DATE}}. - Margaret",
+        "general",
+    ),
+    (
+        "/escalate",
+        "Escalation needed for {{PROPERTY_ADDRESS}}: {{ESCALATION_SUMMARY}}. Please contact me at {{MARGARET_PHONE}} when available. - Margaret",
+        "general",
+    ),
+    (
+        "/thankyouagent",
+        "Thanks for partnering with Maverick TC on {{PROPERTY_ADDRESS}}. We appreciate your responsiveness and teamwork! - Margaret",
+        "general",
+    ),
+    (
+        "/reviewrequest",
+        "If you have a moment, we'd love your feedback on this transaction experience: {{REVIEW_LINK}}. Thank you! - Margaret",
+        "general",
+    ),
+]
+MESSAGE_TEMPLATE_SEEDS_APPLIED = False
+
 CLIENT_TYPES = {"buyer", "seller"}
 
 CLIENT_UPLOAD_DOCUMENT_TYPES = {
@@ -1196,6 +1346,496 @@ def ensure_document_requests_table():
         ON document_requests(status)
         """
     )
+
+
+def ensure_message_templates_table():
+    """Ensure shortcode template table exists and seed defaults."""
+    global MESSAGE_TEMPLATE_SEEDS_APPLIED
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS message_templates (
+            id SERIAL PRIMARY KEY,
+            shortcode VARCHAR(50) UNIQUE,
+            template_text TEXT,
+            category VARCHAR(50),
+            usage_count INT DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_message_templates_category
+        ON message_templates(category)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_message_templates_usage
+        ON message_templates(usage_count DESC)
+        """
+    )
+    if MESSAGE_TEMPLATE_SEEDS_APPLIED:
+        return
+    seed_ok = True
+    for shortcode, template_text, category in MESSAGE_TEMPLATE_SEEDS:
+        result = execute_query(
+            """
+            INSERT INTO message_templates (
+                shortcode, template_text, category, usage_count, created_at
+            )
+            VALUES (%s, %s, %s, 0, CURRENT_TIMESTAMP)
+            ON CONFLICT (shortcode) DO NOTHING
+            """,
+            (shortcode, template_text, category),
+        )
+        if result is None:
+            seed_ok = False
+    if seed_ok:
+        MESSAGE_TEMPLATE_SEEDS_APPLIED = True
+
+
+def fetch_message_templates(category="", search_query="", limit=200):
+    """List templates with optional category/search filters."""
+    ensure_message_templates_table()
+    filters = ["TRUE"]
+    params = []
+    if category:
+        filters.append("LOWER(category) = %s")
+        params.append((category or "").strip().lower())
+    if search_query:
+        normalized = (search_query or "").strip().lower()
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        filters.append("(LOWER(shortcode) LIKE %s OR LOWER(template_text) LIKE %s)")
+        params.extend([f"{normalized}%", f"%{normalized.lstrip('/')}%"])
+    params.append(max(1, min(int(limit or 200), 500)))
+    rows = execute_query(
+        f"""
+        SELECT id, shortcode, template_text, category, usage_count, created_at
+        FROM message_templates
+        WHERE {' AND '.join(filters)}
+        ORDER BY usage_count DESC, shortcode ASC
+        LIMIT %s
+        """,
+        tuple(params),
+        fetch=True,
+    ) or []
+    for row in rows:
+        text = (row.get("template_text") or "").strip()
+        row["preview"] = (text[:110] + "...") if len(text) > 110 else text
+        row["created_at_label"] = format_timestamp_label(row.get("created_at"))
+    return rows
+
+
+def get_message_template(template_id):
+    """Fetch one message template by ID."""
+    ensure_message_templates_table()
+    rows = execute_query(
+        """
+        SELECT id, shortcode, template_text, category, usage_count, created_at
+        FROM message_templates
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (int(template_id),),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def increment_message_template_usage(template_id):
+    """Increment usage count for one template."""
+    ensure_message_templates_table()
+    execute_query(
+        """
+        UPDATE message_templates
+        SET usage_count = COALESCE(usage_count, 0) + 1
+        WHERE id = %s
+        """,
+        (int(template_id),),
+    )
+
+
+def create_message_template(shortcode, template_text, category):
+    """Create one custom message template."""
+    ensure_message_templates_table()
+    normalized_shortcode = (shortcode or "").strip().lower()
+    if normalized_shortcode and not normalized_shortcode.startswith("/"):
+        normalized_shortcode = f"/{normalized_shortcode}"
+    if not re.match(r"^/[a-z0-9_]{2,49}$", normalized_shortcode):
+        return {"success": False, "error": "Shortcode must look like /closing_update."}
+    if not (template_text or "").strip():
+        return {"success": False, "error": "Template text is required."}
+    normalized_category = (category or "general").strip().lower()[:50] or "general"
+    rows = execute_query(
+        """
+        INSERT INTO message_templates (
+            shortcode, template_text, category, usage_count, created_at
+        )
+        VALUES (%s, %s, %s, 0, CURRENT_TIMESTAMP)
+        ON CONFLICT (shortcode) DO NOTHING
+        RETURNING id
+        """,
+        (normalized_shortcode, (template_text or "").strip(), normalized_category),
+        fetch=True,
+    ) or []
+    if not rows:
+        return {"success": False, "error": "Shortcode already exists."}
+    return {"success": True, "template_id": rows[0]["id"]}
+
+
+def update_message_template(template_id, shortcode, template_text, category):
+    """Update template row."""
+    ensure_message_templates_table()
+    normalized_shortcode = (shortcode or "").strip().lower()
+    if normalized_shortcode and not normalized_shortcode.startswith("/"):
+        normalized_shortcode = f"/{normalized_shortcode}"
+    if not re.match(r"^/[a-z0-9_]{2,49}$", normalized_shortcode):
+        return {"success": False, "error": "Shortcode must look like /closing_update."}
+    if not (template_text or "").strip():
+        return {"success": False, "error": "Template text is required."}
+    normalized_category = (category or "general").strip().lower()[:50] or "general"
+    rows = execute_query(
+        """
+        UPDATE message_templates
+        SET shortcode = %s,
+            template_text = %s,
+            category = %s
+        WHERE id = %s
+        RETURNING id
+        """,
+        (
+            normalized_shortcode,
+            (template_text or "").strip(),
+            normalized_category,
+            int(template_id),
+        ),
+        fetch=True,
+    ) or []
+    if not rows:
+        return {"success": False, "error": "Template not found or shortcode in use."}
+    return {"success": True}
+
+
+def delete_message_template(template_id):
+    """Delete one template row when unused."""
+    ensure_message_templates_table()
+    template_rows = execute_query(
+        """
+        SELECT id, usage_count
+        FROM message_templates
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (int(template_id),),
+        fetch=True,
+    ) or []
+    if not template_rows:
+        return {"success": False, "error": "Template not found."}
+    if int(template_rows[0].get("usage_count") or 0) > 0:
+        return {"success": False, "error": "Only unused templates can be deleted."}
+    rows = execute_query(
+        """
+        DELETE FROM message_templates
+        WHERE id = %s
+        RETURNING id
+        """,
+        (int(template_id),),
+        fetch=True,
+    ) or []
+    if not rows:
+        return {"success": False, "error": "Template not found."}
+    return {"success": True}
+
+
+def suggest_message_templates_from_history(limit=20):
+    """Suggest templates from repeated communication phrasing."""
+    rows = execute_query(
+        """
+        SELECT
+            LOWER(REGEXP_REPLACE(TRIM(summary), '\\s+', ' ', 'g')) AS normalized_summary,
+            MIN(summary) AS sample_text,
+            COUNT(*) AS repeat_count
+        FROM communications
+        WHERE COALESCE(summary, '') <> ''
+          AND LENGTH(COALESCE(summary, '')) >= 40
+        GROUP BY LOWER(REGEXP_REPLACE(TRIM(summary), '\\s+', ' ', 'g'))
+        HAVING COUNT(*) >= 3
+        ORDER BY repeat_count DESC, MIN(created_at) DESC
+        LIMIT %s
+        """,
+        (max(1, min(int(limit or 20), 80)),),
+        fetch=True,
+    ) or []
+    templates = fetch_message_templates(limit=400)
+    existing_phrases = {(row.get("template_text") or "").strip().lower() for row in templates}
+
+    suggestions = []
+    for row in rows:
+        sample = (row.get("sample_text") or "").strip()
+        if not sample or sample.lower() in existing_phrases:
+            continue
+        words = re.findall(r"[a-z0-9]+", sample.lower())
+        words = [word for word in words if len(word) >= 3][:3]
+        shortcode_base = "_".join(words) if words else "message"
+        suggestion_shortcode = f"/auto_{shortcode_base}"[:50]
+        suggestions.append(
+            {
+                "sample_text": sample,
+                "repeat_count": int(row.get("repeat_count") or 0),
+                "suggested_shortcode": suggestion_shortcode,
+                "category": "general",
+            }
+        )
+    return suggestions
+
+
+def _transaction_optional_values(transaction_id, column_names):
+    safe_columns = []
+    for column_name in column_names or []:
+        normalized = (column_name or "").strip().lower()
+        if not normalized:
+            continue
+        if not re.match(r"^[a-z_][a-z0-9_]*$", normalized):
+            continue
+        if _transaction_column_exists(normalized):
+            safe_columns.append(normalized)
+    if not safe_columns:
+        return {}
+    query = f"""
+    SELECT {", ".join(safe_columns)}
+    FROM transactions
+    WHERE id = %s
+    LIMIT 1
+    """
+    rows = execute_query(query, (int(transaction_id),), fetch=True) or []
+    return rows[0] if rows else {}
+
+
+def _format_template_date(value, fallback="____"):
+    if isinstance(value, datetime):
+        return value.strftime("%B %d, %Y")
+    if isinstance(value, date):
+        return value.strftime("%B %d, %Y")
+    return fallback
+
+
+def _format_template_time(value, fallback="____"):
+    if isinstance(value, datetime):
+        return value.strftime("%I:%M %p").lstrip("0")
+    text = (value or "").strip() if isinstance(value, str) else ""
+    if re.match(r"^\d{1,2}:\d{2}$", text):
+        try:
+            parsed = datetime.strptime(text, "%H:%M")
+            return parsed.strftime("%I:%M %p").lstrip("0")
+        except ValueError:
+            pass
+    if text:
+        return text
+    return fallback
+
+
+def _upcoming_vendor_appointment(transaction_id, vendor_type):
+    rows = execute_query(
+        """
+        SELECT vo.appointment_at, vo.vendor_name, vc.phone
+        FROM vendor_outreach vo
+        LEFT JOIN vendor_contacts vc ON vc.id = vo.vendor_id
+        WHERE vo.transaction_id = %s
+          AND LOWER(COALESCE(vo.vendor_type, '')) = %s
+          AND vo.appointment_at IS NOT NULL
+        ORDER BY vo.appointment_at ASC, vo.id ASC
+        LIMIT 1
+        """,
+        (int(transaction_id), (vendor_type or "").strip().lower()),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def calculate_cash_to_close(transaction_row):
+    """Return best-effort cash-to-close estimate for template variables."""
+    optional_values = _transaction_optional_values(
+        transaction_row["id"],
+        ["cash_to_close", "contract_price"],
+    )
+    if optional_values.get("cash_to_close") not in (None, ""):
+        return float(optional_values.get("cash_to_close") or 0)
+    contract_price = optional_values.get("contract_price")
+    if contract_price not in (None, ""):
+        return round(float(contract_price) * 0.03, 2)
+    return 0.0
+
+
+def build_message_template_context(transaction_id):
+    """Build context dictionary for template expansion."""
+    transaction = get_transaction(transaction_id)
+    optional_values = _transaction_optional_values(
+        transaction_id,
+        [
+            "closing_time",
+            "cash_to_close",
+            "earnest_amount",
+            "option_fee",
+            "title_officer_name",
+            "title_officer_phone",
+            "walkthrough_date",
+            "walkthrough_time",
+            "possession_time",
+            "repair_items",
+            "repair_completion_date",
+            "new_closing_date",
+            "earnest_disposition",
+            "appraised_value",
+            "loan_status",
+            "delay_reason",
+            "escalation_summary",
+            "payment_link",
+            "payment_amount",
+            "payment_due_date",
+            "repair_request_due_date",
+        ],
+    )
+    inspection = _upcoming_vendor_appointment(transaction_id, "inspector")
+    appraisal = _upcoming_vendor_appointment(transaction_id, "appraiser")
+    calendar_preferences = fetch_transaction_calendar_preferences(transaction_id) or {}
+    client_portal = ensure_primary_portal_link(transaction_id)
+    review_link_rows = execute_query(
+        """
+        SELECT access_token
+        FROM agent_review_requests
+        WHERE transaction_id = %s
+        ORDER BY requested_at DESC, id DESC
+        LIMIT 1
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    review_link = f"{app_base_url()}/review/{review_link_rows[0]['access_token']}" if review_link_rows else ""
+
+    missing_document_types = []
+    docs_payload = _uploaded_documents_for_completion(transaction_id, transaction_row=transaction)
+    for doc_type in sorted(REQUIRED_DOCUMENT_TYPES):
+        if doc_type not in docs_payload["uploaded_types"]:
+            missing_document_types.append(document_type_label(doc_type))
+
+    closing_breakdown = calculate_payment_breakdown(transaction, "closing")
+    cash_to_close = calculate_cash_to_close(transaction)
+    context = {
+        "AGENT_NAME": transaction.get("agent_name") or "Agent",
+        "BUYER_NAME": transaction.get("buyer_name") or "Buyer",
+        "SELLER_NAME": transaction.get("seller_name") or "Seller",
+        "PROPERTY_ADDRESS": transaction.get("property_address") or "Property",
+        "TRANSACTION_ID": str(transaction["id"]),
+        "CLOSING_DATE": _format_template_date(transaction.get("closing_date")),
+        "CLOSING_TIME": _format_template_time(
+            optional_values.get("closing_time") or calendar_preferences.get("closing_time")
+        ),
+        "TITLE_COMPANY": transaction.get("title_company") or "title company",
+        "TITLE_CONTACT": optional_values.get("title_officer_name") or transaction.get("title_company") or "Title contact",
+        "TITLE_PHONE": optional_values.get("title_officer_phone") or "____",
+        "CASH_TO_CLOSE": f"{cash_to_close:,.2f}" if cash_to_close > 0 else "____",
+        "EARNEST_AMOUNT": (
+            f"{float(optional_values.get('earnest_amount') or 0):,.2f}"
+            if optional_values.get("earnest_amount") not in (None, "")
+            else "____"
+        ),
+        "EARNEST_DUE_DATE": _format_template_date(transaction.get("earnest_due_date")),
+        "OPTION_FEE": (
+            f"{float(optional_values.get('option_fee') or 0):,.2f}"
+            if optional_values.get("option_fee") not in (None, "")
+            else "____"
+        ),
+        "OPTION_DUE_DATE": _format_template_date(transaction.get("option_fee_due_date")),
+        "FINANCING_APPROVAL_DATE": _format_template_date(transaction.get("financing_approval_date")),
+        "HOA_DUE_DATE": _format_template_date(transaction.get("hoa_docs_due_date")),
+        "SURVEY_DUE_DATE": _format_template_date(transaction.get("survey_due_date")),
+        "WALKTHROUGH_DATE": _format_template_date(optional_values.get("walkthrough_date")),
+        "WALKTHROUGH_TIME": _format_template_time(optional_values.get("walkthrough_time")),
+        "POSSESSION_TIME": _format_template_time(optional_values.get("possession_time"), fallback="at funding"),
+        "REPAIR_ITEMS": optional_values.get("repair_items") or "____",
+        "REPAIR_COMPLETION_DATE": _format_template_date(optional_values.get("repair_completion_date")),
+        "REPAIR_REQUEST_DUE_DATE": _format_template_date(optional_values.get("repair_request_due_date")),
+        "NEW_CLOSING_DATE": _format_template_date(optional_values.get("new_closing_date")),
+        "EARNEST_DISPOSITION": optional_values.get("earnest_disposition") or "____",
+        "APPRAISED_VALUE": (
+            f"{float(optional_values.get('appraised_value') or 0):,.2f}"
+            if optional_values.get("appraised_value") not in (None, "")
+            else "____"
+        ),
+        "LOAN_STATUS": optional_values.get("loan_status") or "Pending update",
+        "DELAY_REASON": optional_values.get("delay_reason") or "logistics coordination",
+        "ESCALATION_SUMMARY": optional_values.get("escalation_summary") or "action required",
+        "PAYMENT_LINK": optional_values.get("payment_link") or "____",
+        "PAYMENT_AMOUNT": (
+            f"{float(optional_values.get('payment_amount') or 0):,.2f}"
+            if optional_values.get("payment_amount") not in (None, "")
+            else f"{float(closing_breakdown['amount']):,.2f}"
+        ),
+        "PAYMENT_DUE_DATE": _format_template_date(optional_values.get("payment_due_date")),
+        "STATUS_SUMMARY": f"Status is {(transaction.get('status') or 'ACTIVE').title()}",
+        "NEXT_DEADLINE": "TBD",
+        "MISSING_DOCUMENTS": ", ".join(missing_document_types) if missing_document_types else "None",
+        "PORTAL_LINK": client_portal or "____",
+        "REVIEW_LINK": review_link or "____",
+        "MARGARET_PHONE": normalize_phone(os.getenv("MARGARET_PHONE") or "") or "____",
+    }
+
+    if inspection and inspection.get("appointment_at"):
+        context["INSPECTION_DATE"] = _format_template_date(inspection.get("appointment_at"))
+        context["INSPECTION_TIME"] = _format_template_time(inspection.get("appointment_at"))
+        context["INSPECTOR_NAME"] = inspection.get("vendor_name") or "Inspector"
+        context["INSPECTOR_PHONE"] = inspection.get("phone") or "____"
+    else:
+        context["INSPECTION_DATE"] = "____"
+        context["INSPECTION_TIME"] = "____"
+        context["INSPECTOR_NAME"] = "____"
+        context["INSPECTOR_PHONE"] = "____"
+
+    if appraisal and appraisal.get("appointment_at"):
+        context["APPRAISAL_DATE"] = _format_template_date(appraisal.get("appointment_at"))
+        context["APPRAISAL_TIME"] = _format_template_time(appraisal.get("appointment_at"))
+        context["APPRAISER_NAME"] = appraisal.get("vendor_name") or "Appraiser"
+        context["APPRAISER_PHONE"] = appraisal.get("phone") or "____"
+    else:
+        context["APPRAISAL_DATE"] = "____"
+        context["APPRAISAL_TIME"] = "____"
+        context["APPRAISER_NAME"] = "____"
+        context["APPRAISER_PHONE"] = "____"
+
+    next_deadline_rows = execute_query(
+        """
+        SELECT deadline_type, deadline_date
+        FROM deadlines
+        WHERE transaction_id = %s
+          AND completed = FALSE
+          AND deadline_date >= CURRENT_DATE
+        ORDER BY deadline_date ASC, id ASC
+        LIMIT 1
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    if next_deadline_rows:
+        context["NEXT_DEADLINE"] = (
+            f"{(next_deadline_rows[0]['deadline_type'] or '').replace('_', ' ').title()} "
+            f"({ _format_template_date(next_deadline_rows[0].get('deadline_date')) })"
+        )
+    return context
+
+
+def expand_message_template_text(template_text, context):
+    """Expand {{VARS}} using context and report missing variable names."""
+    template_payload = template_text or ""
+    variable_names = sorted(set(re.findall(r"\{\{([A-Z0-9_]+)\}\}", template_payload)))
+    missing = [name for name in variable_names if (context.get(name) in (None, "", "____"))]
+    expanded = template_payload
+    for name in variable_names:
+        value = context.get(name)
+        expanded = expanded.replace(f"{{{{{name}}}}}", str(value if value not in (None, "") else "____"))
+    expanded = re.sub(r"\{\{[A-Z0-9_]+\}\}", "____", expanded)
+    return expanded, missing
 
 
 def ensure_client_access_table():
@@ -9134,6 +9774,170 @@ def tc_bulk_messages_progress(job_id):
     if not progress:
         return jsonify({"success": False, "error": "Job not found"}), 404
     return jsonify({"success": True, "job": progress})
+
+
+def _suggested_shortcode_from_text(raw_text):
+    words = re.findall(r"[a-z0-9]+", (raw_text or "").lower())
+    words = [word for word in words if len(word) >= 3][:3]
+    base = "_".join(words) if words else "template"
+    return f"/auto_{base}"[:50]
+
+
+@app.route("/api/templates/search")
+@login_required
+def search_templates_api():
+    """Search shortcode templates for text expansion autocomplete."""
+    query = (request.args.get("q") or "").strip()
+    if len(query) > 80:
+        query = query[:80]
+    templates = fetch_message_templates(search_query=query, limit=12)
+    return jsonify(
+        [
+            {
+                "id": row["id"],
+                "shortcode": row["shortcode"],
+                "category": row.get("category") or "general",
+                "preview": row.get("preview") or "",
+                "usage_count": int(row.get("usage_count") or 0),
+            }
+            for row in templates
+        ]
+    )
+
+
+@app.route("/api/templates/expand", methods=["POST"])
+@login_required
+def expand_template():
+    """
+    Expand template with transaction context.
+    """
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    template_id = parse_optional_int(payload.get("template_id"))
+    transaction_id = parse_optional_int(payload.get("transaction_id"))
+    if not template_id:
+        return jsonify({"success": False, "error": "template_id is required"}), 400
+
+    template = get_message_template(template_id)
+    if not template:
+        return jsonify({"success": False, "error": "Template not found"}), 404
+
+    if not transaction_id:
+        route_match = re.search(r"/tc/transaction/(\d+)", request.referrer or "")
+        if route_match:
+            transaction_id = int(route_match.group(1))
+
+    context = {}
+    if transaction_id:
+        try:
+            context = build_message_template_context(transaction_id)
+        except Exception:
+            context = {}
+    expanded_text, unfilled_vars = expand_message_template_text(template.get("template_text"), context)
+    increment_message_template_usage(template_id)
+    return jsonify(
+        {
+            "success": True,
+            "text": expanded_text,
+            "unfilled_vars": unfilled_vars,
+            "template": {
+                "id": template["id"],
+                "shortcode": template.get("shortcode"),
+                "category": template.get("category"),
+            },
+        }
+    )
+
+
+@app.route("/tc/templates", methods=["GET", "POST"])
+@login_required
+def tc_templates():
+    """Manage shortcode text-expansion templates and smart suggestions."""
+    ensure_message_templates_table()
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip().lower()
+        next_notice = "Template action completed."
+        next_type = "success"
+
+        if action == "create":
+            result = create_message_template(
+                shortcode=request.form.get("shortcode"),
+                template_text=request.form.get("template_text"),
+                category=request.form.get("category"),
+            )
+            if result.get("success"):
+                next_notice = "Template created."
+            else:
+                next_notice = result.get("error") or "Could not create template."
+                next_type = "warning"
+        elif action == "update":
+            template_id = parse_optional_int(request.form.get("template_id"))
+            if not template_id:
+                next_notice = "Template ID is required."
+                next_type = "warning"
+            else:
+                result = update_message_template(
+                    template_id=template_id,
+                    shortcode=request.form.get("shortcode"),
+                    template_text=request.form.get("template_text"),
+                    category=request.form.get("category"),
+                )
+                if result.get("success"):
+                    next_notice = "Template updated."
+                else:
+                    next_notice = result.get("error") or "Could not update template."
+                    next_type = "warning"
+        elif action == "delete":
+            template_id = parse_optional_int(request.form.get("template_id"))
+            if not template_id:
+                next_notice = "Template ID is required."
+                next_type = "warning"
+            else:
+                delete_result = delete_message_template(template_id)
+                if delete_result.get("success"):
+                    next_notice = "Template deleted."
+                    next_type = "success"
+                else:
+                    next_notice = delete_result.get("error") or "Template could not be deleted."
+                    next_type = "warning"
+        elif action == "create_from_suggestion":
+            sample_text = (request.form.get("sample_text") or "").strip()
+            shortcode = (request.form.get("suggested_shortcode") or "").strip() or _suggested_shortcode_from_text(sample_text)
+            category = (request.form.get("category") or "general").strip().lower()
+            result = create_message_template(shortcode=shortcode, template_text=sample_text, category=category)
+            if result.get("success"):
+                next_notice = "Template created from suggestion."
+            else:
+                next_notice = result.get("error") or "Could not create template from suggestion."
+                next_type = "warning"
+        else:
+            next_notice = "Unknown template action."
+            next_type = "warning"
+
+        return redirect(url_for("tc_templates", notice=next_notice, notice_type=next_type))
+
+    selected_category = (request.args.get("category") or "").strip().lower()
+    search_query = (request.args.get("q") or "").strip()
+    templates = fetch_message_templates(category=selected_category, search_query=search_query, limit=500)
+    all_templates = fetch_message_templates(limit=500)
+    suggestions = suggest_message_templates_from_history(limit=20)
+    categories = sorted({(row.get("category") or "general").strip().lower() for row in all_templates} | {"general"})
+    return render_template(
+        "tc_templates.html",
+        notice=notice,
+        notice_type=notice_type,
+        templates=templates,
+        suggestions=suggestions,
+        selected_category=selected_category,
+        search_query=search_query,
+        categories=categories,
+    )
 
 
 @app.route("/tc/status-updates", methods=["GET", "POST"])

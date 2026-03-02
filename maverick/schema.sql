@@ -902,6 +902,49 @@ CREATE TABLE bulk_message_templates (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE message_templates (
+    id SERIAL PRIMARY KEY,
+    shortcode VARCHAR(50) UNIQUE,
+    template_text TEXT,
+    category VARCHAR(50),
+    usage_count INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO message_templates (shortcode, template_text, category)
+VALUES
+('/closing', 'Hi {{AGENT_NAME}}, closing for {{PROPERTY_ADDRESS}} is confirmed for {{CLOSING_DATE}} at {{CLOSING_TIME}} at {{TITLE_COMPANY}}. Buyer should bring photo ID and cashier''s check for ${{CASH_TO_CLOSE}}. Let me know if you have questions! - Margaret', 'closing'),
+('/inspection', 'Hi {{AGENT_NAME}}, inspection is scheduled for {{PROPERTY_ADDRESS}} on {{INSPECTION_DATE}} at {{INSPECTION_TIME}}. Inspector is {{INSPECTOR_NAME}} ({{INSPECTOR_PHONE}}). Please ensure property is accessible and utilities are on. - Margaret', 'inspection'),
+('/earnest', 'Earnest money of ${{EARNEST_AMOUNT}} is due by {{EARNEST_DUE_DATE}}. Please wire to {{TITLE_COMPANY}} with reference {{TRANSACTION_ID}}. - Margaret', 'payment'),
+('/option', 'Option fee of ${{OPTION_FEE}} is due by {{OPTION_DUE_DATE}}. Please deliver to seller''s agent or wire to title. - Margaret', 'payment'),
+('/appraisal', 'Appraisal is scheduled for {{APPRAISAL_DATE}}. Appraiser is {{APPRAISER_NAME}} ({{APPRAISER_PHONE}}). Property should be accessible and in showing condition. - Margaret', 'appraisal'),
+('/survey', 'Survey has been ordered for {{PROPERTY_ADDRESS}}. Expected completion by {{SURVEY_DUE_DATE}}. - Margaret', 'survey'),
+('/title', 'Title file {{TRANSACTION_ID}} has been opened at {{TITLE_COMPANY}}. Contact is {{TITLE_CONTACT}} ({{TITLE_PHONE}}). - Margaret', 'title'),
+('/hoa', 'HOA documents for {{PROPERTY_ADDRESS}} are due by {{HOA_DUE_DATE}}. Please provide: declarations, bylaws, financials, and resale certificate. - Margaret', 'hoa'),
+('/walkthrough', 'Final walk-through for {{PROPERTY_ADDRESS}} is scheduled for {{WALKTHROUGH_DATE}} at {{WALKTHROUGH_TIME}}. Meet at property. - Margaret', 'walkthrough'),
+('/congratulations', 'Congratulations on your closing! Possession is at {{POSSESSION_TIME}}. Please ensure all utilities are transferred. Enjoy your new home! - Margaret', 'closing'),
+('/repair', 'Per the repair addendum, seller has agreed to: {{REPAIR_ITEMS}}. Work should be completed by {{REPAIR_COMPLETION_DATE}}. - Margaret', 'repair'),
+('/extension', 'Contract extension executed. New closing date is {{NEW_CLOSING_DATE}}. All deadlines adjusted accordingly. - Margaret', 'extension'),
+('/termination', 'This transaction has been terminated per the contract. Earnest money will be {{EARNEST_DISPOSITION}}. - Margaret', 'termination'),
+('/cd', 'Closing Disclosure is ready for review. Please review carefully and notify us of any discrepancies within 24 hours. - Margaret', 'closing'),
+('/welcome', 'Welcome to Maverick TC! I''m Margaret, your transaction coordinator for {{PROPERTY_ADDRESS}}. I''ll keep everyone on track from contract to close. Looking forward to a smooth closing on {{CLOSING_DATE}}! - Margaret', 'general'),
+('/paymentlink', 'Hi {{AGENT_NAME}}, payment link for {{PROPERTY_ADDRESS}}: {{PAYMENT_LINK}}. Amount due: ${{PAYMENT_AMOUNT}} by {{PAYMENT_DUE_DATE}}. - Margaret', 'payment'),
+('/wire', 'Wire reminder for {{PROPERTY_ADDRESS}}: send funds to {{TITLE_COMPANY}} and include file {{TRANSACTION_ID}}. Confirm once sent so we can track receipt. - Margaret', 'payment'),
+('/loanapproval', 'Loan approval update for {{PROPERTY_ADDRESS}}: {{LOAN_STATUS}}. Next milestone is {{FINANCING_APPROVAL_DATE}}. Please alert us if underwriting conditions change. - Margaret', 'payment'),
+('/clear2close', 'Great news! {{PROPERTY_ADDRESS}} is clear to close. Final signing is {{CLOSING_DATE}} at {{CLOSING_TIME}}. Reach out with any final questions. - Margaret', 'closing'),
+('/reminderdocs', 'Quick doc reminder for {{PROPERTY_ADDRESS}}: {{MISSING_DOCUMENTS}}. Please upload in portal: {{PORTAL_LINK}}. - Margaret', 'document'),
+('/statusweekly', 'Weekly status for {{PROPERTY_ADDRESS}}: {{STATUS_SUMMARY}}. Next due date: {{NEXT_DEADLINE}}. - Margaret', 'general'),
+('/titleupdate', 'Title update for {{PROPERTY_ADDRESS}}: {{TITLE_STATUS}}. Contact at {{TITLE_COMPANY}} is {{TITLE_CONTACT}} ({{TITLE_PHONE}}). - Margaret', 'title'),
+('/inspectionreport', 'Inspection report received for {{PROPERTY_ADDRESS}}. Please review and send repair requests by {{REPAIR_REQUEST_DUE_DATE}}. - Margaret', 'inspection'),
+('/appraisalreport', 'Appraisal report received for {{PROPERTY_ADDRESS}} at value ${{APPRAISED_VALUE}}. Let me know if you''d like to discuss next steps. - Margaret', 'appraisal'),
+('/utility', 'Utility transfer reminder for {{PROPERTY_ADDRESS}}: set service start/end for {{CLOSING_DATE}} and keep account numbers for your records. - Margaret', 'closing'),
+('/possession', 'Possession timing for {{PROPERTY_ADDRESS}} is {{POSSESSION_TIME}} on {{CLOSING_DATE}}. Please confirm key handoff details. - Margaret', 'closing'),
+('/delaynotice', 'Update for {{PROPERTY_ADDRESS}}: we have a scheduling delay due to {{DELAY_REASON}}. Revised target date is {{NEW_CLOSING_DATE}}. - Margaret', 'general'),
+('/escalate', 'Escalation needed for {{PROPERTY_ADDRESS}}: {{ESCALATION_SUMMARY}}. Please contact me at {{MARGARET_PHONE}} when available. - Margaret', 'general'),
+('/thankyouagent', 'Thanks for partnering with Maverick TC on {{PROPERTY_ADDRESS}}. We appreciate your responsiveness and teamwork! - Margaret', 'general'),
+('/reviewrequest', 'If you have a moment, we''d love your feedback on this transaction experience: {{REVIEW_LINK}}. Thank you! - Margaret', 'general')
+ON CONFLICT (shortcode) DO NOTHING;
+
 CREATE TABLE task_completion_rules (
     id SERIAL PRIMARY KEY,
     task_description_pattern VARCHAR(500) NOT NULL,
@@ -1128,6 +1171,8 @@ CREATE INDEX idx_problem_detection_runs_completed ON problem_detection_runs(comp
 CREATE INDEX idx_bulk_messages_log_status ON bulk_messages_log(status, created_at DESC);
 CREATE INDEX idx_bulk_messages_log_sent_at ON bulk_messages_log(sent_at DESC);
 CREATE INDEX idx_bulk_message_recipients_bulk ON bulk_message_recipients(bulk_message_id, status, id);
+CREATE INDEX idx_message_templates_category ON message_templates(category);
+CREATE INDEX idx_message_templates_usage ON message_templates(usage_count DESC, shortcode);
 CREATE UNIQUE INDEX idx_task_completion_rules_unique ON task_completion_rules(task_description_pattern, completion_trigger_type);
 CREATE INDEX idx_task_auto_completion_log_task ON task_auto_completion_log(task_id, created_at DESC);
 CREATE INDEX idx_task_auto_completion_log_action ON task_auto_completion_log(action, created_at DESC);
