@@ -911,6 +911,24 @@ CREATE TABLE message_templates (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE batch_upload_staging (
+    id SERIAL PRIMARY KEY,
+    batch_token VARCHAR(64) NOT NULL,
+    uploaded_by VARCHAR(100) NOT NULL,
+    original_filename VARCHAR(255) NOT NULL,
+    temp_path TEXT NOT NULL,
+    extension VARCHAR(10),
+    file_size INT DEFAULT 0,
+    suggested_transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+    suggested_document_type VARCHAR(100),
+    confidence_score DECIMAL(5,2) DEFAULT 0,
+    analysis_payload JSONB DEFAULT '{}'::jsonb,
+    status VARCHAR(20) DEFAULT 'pending',
+    error_text TEXT,
+    committed_document_id INT REFERENCES documents(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 INSERT INTO message_templates (shortcode, template_text, category)
 VALUES
 ('/closing', 'Hi {{AGENT_NAME}}, closing for {{PROPERTY_ADDRESS}} is confirmed for {{CLOSING_DATE}} at {{CLOSING_TIME}} at {{TITLE_COMPANY}}. Buyer should bring photo ID and cashier''s check for ${{CASH_TO_CLOSE}}. Let me know if you have questions! - Margaret', 'closing'),
@@ -1173,6 +1191,8 @@ CREATE INDEX idx_bulk_messages_log_sent_at ON bulk_messages_log(sent_at DESC);
 CREATE INDEX idx_bulk_message_recipients_bulk ON bulk_message_recipients(bulk_message_id, status, id);
 CREATE INDEX idx_message_templates_category ON message_templates(category);
 CREATE INDEX idx_message_templates_usage ON message_templates(usage_count DESC, shortcode);
+CREATE INDEX idx_batch_upload_staging_user_status ON batch_upload_staging(uploaded_by, status, created_at DESC);
+CREATE INDEX idx_batch_upload_staging_batch ON batch_upload_staging(batch_token, status, created_at DESC);
 CREATE UNIQUE INDEX idx_task_completion_rules_unique ON task_completion_rules(task_description_pattern, completion_trigger_type);
 CREATE INDEX idx_task_auto_completion_log_task ON task_auto_completion_log(task_id, created_at DESC);
 CREATE INDEX idx_task_auto_completion_log_action ON task_auto_completion_log(action, created_at DESC);

@@ -459,6 +459,43 @@ Form `action` options:
   - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - Includes seed set of 30 common templates on first-use table initialization.
 
+## Batch Document Upload
+
+### Workspace route (TC)
+- `GET /tc/batch-upload`
+- Renders drag/drop upload UI and manual review controls for low-confidence assignment rows.
+
+### Analyze route (TC)
+- `POST /tc/batch-upload/analyze`
+- Input:
+  - multipart form files (`file_0`, `file_1`, ...)
+  - max 20 files per batch
+  - allowed: `pdf`, `jpg`, `jpeg`, `png`
+- Output JSON:
+  - `results[]` with `stage_id`, `filename`, inferred `document_type`, optional `transaction_id`, confidence (`high|low`), and review hints
+  - `pending_count`
+- Notes:
+  - stages temp files in `batch_upload_staging`
+  - uses Claude (when configured) + heuristics for doc typing and transaction identifiers
+
+### Commit route (TC)
+- `POST /tc/batch-upload/commit`
+- JSON body:
+  - `uploads`: array of `{stage_id, transaction_id, document_type}`
+- Output JSON:
+  - `successful`, `failed`, `tasks_completed`, `pending_count`
+- Behavior:
+  - uploads each staged file to S3
+  - inserts `documents` records
+  - runs `apply_document_post_upload_actions` and transaction field updates from extracted values
+  - updates matching `document_requests` as received
+  - starts async deep document analysis
+
+### Data model
+- Table: `batch_upload_staging`
+  - staged temp-path records and AI analysis payload before commit
+  - cleaned automatically for stale records
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values

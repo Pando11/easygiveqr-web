@@ -1,0 +1,382 @@
+{% extends "base.html" %}
+
+{% block title %}Batch Upload - Maverick TC{% endblock %}
+{% block subtitle %}Batch Document Upload{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="header-row">
+        <div>
+            <h2>Batch Document Upload</h2>
+            <p class="subtle">Drag/drop up to 20 files, review assignments, then commit all at once.</p>
+        </div>
+        <div class="header-actions">
+            <span class="badge badge-yellow" id="pendingBadge">Pending: {{ pending_count }}</span>
+            <a href="/tc/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+        </div>
+    </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+    <div class="batch-upload-zone" id="dropZone">
+        <h2>Batch Document Upload</h2>
+        <p>Drag and drop multiple documents here</p>
+        <p>Supports: PDF, JPG, PNG (max 20 files at once)</p>
+        <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png" style="display:none">
+        <button class="btn" id="browseBtn">Or Click to Browse</button>
+    </div>
+</section>
+
+<section class="card" id="processingStatus" style="display:none">
+    <h3>Analyzing Documents...</h3>
+    <div class="progress-track">
+        <div id="progressBar"></div>
+    </div>
+    <div id="analysisResults"></div>
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.header-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.subtle {
+    color: #475569;
+    font-size: 14px;
+}
+
+.batch-upload-zone {
+    border: 2px dashed #93c5fd;
+    border-radius: 12px;
+    padding: 26px;
+    text-align: center;
+    background: #f8fbff;
+    transition: all .2s ease;
+}
+
+.batch-upload-zone.drag-over {
+    border-color: #2563eb;
+    background: #eff6ff;
+    transform: translateY(-1px);
+}
+
+.progress-track {
+    height: 14px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    overflow: hidden;
+    margin: 10px 0 16px;
+}
+
+#progressBar {
+    width: 0;
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #3b82f6, #10b981);
+    transition: width .3s ease;
+}
+
+.analysis-result {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px;
+    margin-bottom: 10px;
+    display: grid;
+    gap: 8px;
+}
+
+.analysis-result.high {
+    border-left: 4px solid #10b981;
+    background: #f0fdf4;
+}
+
+.analysis-result.low {
+    border-left: 4px solid #f59e0b;
+    background: #fffbeb;
+}
+
+.result-main {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.status {
+    font-size: 18px;
+}
+
+.result-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+}
+
+.btn-large {
+    margin-top: 14px;
+    width: 100%;
+}
+
+.hint {
+    color: #475569;
+    font-size: 12px;
+}
+
+@media (max-width: 768px) {
+    .result-actions {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("fileInput");
+const browseBtn = document.getElementById("browseBtn");
+const processingStatus = document.getElementById("processingStatus");
+const progressBar = document.getElementById("progressBar");
+const analysisResults = document.getElementById("analysisResults");
+const pendingBadge = document.getElementById("pendingBadge");
+
+const transactionOptions = {{ transaction_options | tojson }};
+const docTypeOptions = {{ doc_type_options | tojson }};
+let currentResults = [];
+
+function setProgress(percent) {
+    progressBar.style.width = `${Math.max(0, Math.min(percent, 100))}%`;
+}
+
+function allowedExtension(filename) {
+    const lower = (filename || "").toLowerCase();
+    return [".pdf", ".jpg", ".jpeg", ".png"].some((ext) => lower.endsWith(ext));
+}
+
+function transactionOptionsHtml(selectedId) {
+    let html = '<option value="">Select Transaction...</option>';
+    transactionOptions.forEach((txn) => {
+        const selected = Number(selectedId) === Number(txn.id) ? "selected" : "";
+        html += `<option value="${txn.id}" ${selected}>${txn.label}</option>`;
+    });
+    return html;
+}
+
+function docTypeOptionsHtml(selectedType) {
+    const selectedNorm = (selectedType || "").toLowerCase();
+    let html = '<option value="">Select Type...</option>';
+    docTypeOptions.forEach((option) => {
+        const selected = selectedNorm === (option.value || "").toLowerCase() ? "selected" : "";
+        html += `<option value="${option.value}" ${selected}>${option.label}</option>`;
+    });
+    return html;
+}
+
+function renderResultRow(result, index) {
+    const wrapper = document.createElement("div");
+    wrapper.className = `analysis-result ${result.confidence === "high" && !result.force_manual ? "high" : "low"}`;
+    const isAuto = result.confidence === "high" && !result.force_manual;
+    const staged = !!result.stage_id;
+    const statusIcon = isAuto ? "✅" : "⚠️";
+    const propertyText = result.property_address ? `(${result.property_address})` : "";
+    let reasonText = result.reason ? `<span class="hint">Reason: ${result.reason}</span>` : "";
+    if (!staged) {
+        reasonText += `<span class="hint">This file is not staged and will be skipped on commit.</span>`;
+    }
+
+    wrapper.innerHTML = `
+        <div class="result-main">
+            <span class="status">${statusIcon}</span>
+            <strong>${result.filename || "Unnamed file"}</strong>
+            ${isAuto ? `<span>→ Transaction #${result.transaction_id || "?"} ${propertyText}</span>` : "<span>→ Needs review</span>"}
+            ${result.document_type ? `<span>→ Type: ${result.document_type.replaceAll("_", " ")}</span>` : ""}
+        </div>
+        ${reasonText}
+    `;
+
+    if (isAuto) {
+        const editBtn = document.createElement("button");
+        editBtn.className = "btn btn-secondary";
+        editBtn.textContent = "Edit";
+        editBtn.addEventListener("click", () => {
+            currentResults[index].force_manual = true;
+            displayResults(currentResults);
+        });
+        wrapper.appendChild(editBtn);
+        return wrapper;
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "result-actions";
+    actions.innerHTML = `
+        <select data-role="txn"></select>
+        <select data-role="doc"></select>
+        <button class="btn btn-secondary" data-role="auto">Use Suggestion</button>
+    `;
+    const txnSelect = actions.querySelector('select[data-role="txn"]');
+    const docSelect = actions.querySelector('select[data-role="doc"]');
+    const autoBtn = actions.querySelector('button[data-role="auto"]');
+    txnSelect.innerHTML = transactionOptionsHtml(result.transaction_id);
+    docSelect.innerHTML = docTypeOptionsHtml(result.document_type || "other");
+    if (!staged) {
+        txnSelect.disabled = true;
+        docSelect.disabled = true;
+        autoBtn.disabled = true;
+    }
+    txnSelect.addEventListener("change", (event) => {
+        currentResults[index].transaction_id = event.target.value ? Number(event.target.value) : null;
+    });
+    docSelect.addEventListener("change", (event) => {
+        currentResults[index].document_type = event.target.value || "";
+    });
+    autoBtn.addEventListener("click", () => {
+        if (Array.isArray(result.suggestions) && result.suggestions.length) {
+            currentResults[index].transaction_id = Number(result.suggestions[0].transaction_id || 0) || null;
+            currentResults[index].force_manual = true;
+            displayResults(currentResults);
+        }
+    });
+    wrapper.appendChild(actions);
+    return wrapper;
+}
+
+function displayResults(results) {
+    analysisResults.innerHTML = "";
+    if (!Array.isArray(results) || results.length === 0) {
+        analysisResults.innerHTML = "<p>No files ready for commit.</p>";
+        return;
+    }
+
+    const title = document.createElement("h3");
+    title.textContent = "Review Auto-Assignments:";
+    analysisResults.appendChild(title);
+
+    results.forEach((result, index) => {
+        analysisResults.appendChild(renderResultRow(result, index));
+    });
+
+    const approveBtn = document.createElement("button");
+    approveBtn.className = "btn btn-large";
+    const commitEligible = results.filter((row) => !!row.stage_id).length;
+    approveBtn.textContent = `Approve and Upload ${commitEligible} Documents`;
+    approveBtn.addEventListener("click", approveAllUploads);
+    analysisResults.appendChild(approveBtn);
+}
+
+async function processFiles(files) {
+    if (!Array.isArray(files) || files.length === 0) {
+        return;
+    }
+    if (files.length > 20) {
+        alert("Maximum 20 files at once");
+        return;
+    }
+    const invalid = files.find((file) => !allowedExtension(file.name || ""));
+    if (invalid) {
+        alert(`Invalid file type: ${invalid.name}`);
+        return;
+    }
+
+    processingStatus.style.display = "block";
+    setProgress(15);
+    const formData = new FormData();
+    files.forEach((file, index) => formData.append(`file_${index}`, file));
+
+    try {
+        const response = await fetch("/tc/batch-upload/analyze", {
+            method: "POST",
+            body: formData,
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.success === false) {
+            throw new Error(payload.error || "Batch analysis failed");
+        }
+        setProgress(100);
+        currentResults = Array.isArray(payload.results) ? payload.results : [];
+        pendingBadge.textContent = `Pending: ${payload.pending_count || currentResults.length}`;
+        displayResults(currentResults);
+    } catch (error) {
+        setProgress(0);
+        analysisResults.innerHTML = `<div class="alert alert-error">${error.message}</div>`;
+    }
+}
+
+async function approveAllUploads() {
+    if (!Array.isArray(currentResults) || currentResults.length === 0) {
+        alert("No analyzed files to commit.");
+        return;
+    }
+    const commitRows = currentResults.filter((row) => !!row.stage_id);
+    if (commitRows.length === 0) {
+        alert("No valid staged files to commit.");
+        return;
+    }
+    const unresolved = commitRows.filter((row) => !row.transaction_id || !row.document_type);
+    if (unresolved.length > 0) {
+        alert("Please assign transaction and document type for all files before committing.");
+        return;
+    }
+
+    try {
+        const response = await fetch("/tc/batch-upload/commit", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                uploads: commitRows.map((row) => ({
+                    stage_id: row.stage_id,
+                    transaction_id: row.transaction_id,
+                    document_type: row.document_type,
+                })),
+            }),
+        });
+        const summary = await response.json();
+        if (!response.ok || summary.success === false) {
+            throw new Error(summary.error || "Batch commit failed");
+        }
+        pendingBadge.textContent = `Pending: ${summary.pending_count || 0}`;
+        alert(
+            `✅ ${summary.successful} documents uploaded successfully\n` +
+            `⚠️ ${summary.failed} failed\n` +
+            `📊 ${summary.tasks_completed} tasks auto-completed`
+        );
+        window.location.reload();
+    } catch (error) {
+        alert(`Commit failed: ${error.message}`);
+    }
+}
+
+browseBtn.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", (event) => {
+    processFiles(Array.from(event.target.files || []));
+});
+
+dropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dropZone.classList.add("drag-over");
+});
+dropZone.addEventListener("dragleave", () => {
+    dropZone.classList.remove("drag-over");
+});
+dropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    dropZone.classList.remove("drag-over");
+    processFiles(Array.from((event.dataTransfer && event.dataTransfer.files) || []));
+});
+</script>
+{% endblock %}

@@ -383,6 +383,21 @@ Highlights:
 - supports custom create/edit workflows
 - smart suggestions identify repeated phrases from communication history
 
+## Batch Document Upload + Auto Assignment
+
+Margaret can now upload many docs in one pass for AI-assisted assignment:
+
+- Workspace route: `GET /tc/batch-upload`
+- Analyze route: `POST /tc/batch-upload/analyze`
+- Commit route: `POST /tc/batch-upload/commit`
+
+Behavior:
+- drag/drop up to 20 files (`pdf`, `jpg`, `jpeg`, `png`)
+- each file is analyzed for likely document type + transaction match
+- high-confidence matches are prefilled, low-confidence rows require manual review
+- one-click commit uploads all approved docs, runs post-upload task automation, and launches async document analysis
+- dashboard shows pending staged count and supports shortcut `Ctrl+U`
+
 ## Timeline Packet + Vendor Outreach Automation
 
 After Margaret approves and activates a transaction, Maverick:

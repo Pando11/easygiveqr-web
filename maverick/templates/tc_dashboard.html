@@ -20,6 +20,7 @@
         <a href="/tc/status-updates" class="btn btn-secondary">Status Updates</a>
         <a href="/tc/common-qa" class="btn btn-secondary">Smart Q&A</a>
         <a href="/tc/templates" class="btn btn-secondary">Text Templates</a>
+        <a href="/tc/batch-upload" class="btn btn-secondary" title="Shortcut: Ctrl+U">📁 Batch Upload ({{ pending_batch_upload_count }})</a>
         <a href="/tc/calendar-sync" class="btn btn-secondary">Calendar Sync</a>
         <a href="/tc/morning-briefing" class="btn btn-secondary">Morning Briefing</a>
         <a href="/tc/closing-checklists" class="btn btn-secondary">Closing Checklists</a>
@@ -545,4 +546,24 @@
     }
 }
 </style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener("keydown", function(event) {
+    const isModifier = event.ctrlKey || event.metaKey;
+    const inEditable =
+        event.target &&
+        (event.target.tagName === "INPUT" ||
+         event.target.tagName === "TEXTAREA" ||
+         event.target.isContentEditable);
+    if (!isModifier || inEditable) {
+        return;
+    }
+    if ((event.key || "").toLowerCase() === "u") {
+        event.preventDefault();
+        window.location.href = "/tc/batch-upload";
+    }
+});
+</script>
 {% endblock %}

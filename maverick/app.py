@@ -5,6 +5,7 @@ import io
 import json
 import hashlib
 import tempfile
+from difflib import SequenceMatcher
 from datetime import date, datetime, time, timedelta
 from functools import wraps
 from threading import Thread
@@ -147,7 +148,9 @@ from utils.agent_status_updates import (
 )
 from utils.automation_analytics import build_automation_analytics_snapshot
 from utils.document_processing import (
+    build_smart_filename,
     ensure_document_classification_corrections_table,
+    extract_text_from_first_page,
     extract_earnest_amount,
     normalize_document_type,
     process_uploaded_document,
@@ -168,7 +171,7 @@ from utils.inbound_email import (
     parse_transaction_alias,
     split_recipient_addresses,
 )
-from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_local_file
+from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document, upload_local_file
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 from utils.timeline_generator import (
     generate_transaction_timeline_pdf,
@@ -220,6 +223,7 @@ app.permanent_session_lifetime = timedelta(days=14)
 ALLOWED_EXTENSIONS = set(app.config.get("ALLOWED_EXTENSIONS", {"pdf"}))
 MAX_FILE_SIZE = app.config["MAX_CONTENT_LENGTH"]
 ALLOWED_DOCUMENT_EXTENSIONS = {"pdf", "jpg", "jpeg", "png"}
+BATCH_UPLOAD_MAX_FILES = 20
 
 REQUIRED_DOCUMENT_TYPES = {
     "contract",
@@ -7091,6 +7095,637 @@ def file_extension(filename):
     return filename.rsplit(".", 1)[1].lower()
 
 
+def ensure_batch_upload_staging_table():
+    """Track temporary batch upload files before final commit."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS batch_upload_staging (
+            id SERIAL PRIMARY KEY,
+            batch_token VARCHAR(64) NOT NULL,
+            uploaded_by VARCHAR(100) NOT NULL,
+            original_filename VARCHAR(255) NOT NULL,
+            temp_path TEXT NOT NULL,
+            extension VARCHAR(10),
+            file_size INT DEFAULT 0,
+            suggested_transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+            suggested_document_type VARCHAR(100),
+            confidence_score DECIMAL(5,2) DEFAULT 0,
+            analysis_payload JSONB DEFAULT '{}'::jsonb,
+            status VARCHAR(20) DEFAULT 'pending',
+            error_text TEXT,
+            committed_document_id INT REFERENCES documents(id) ON DELETE SET NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_batch_upload_staging_user_status
+        ON batch_upload_staging(uploaded_by, status, created_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_batch_upload_staging_batch
+        ON batch_upload_staging(batch_token, status, created_at DESC)
+        """
+    )
+
+
+def _cleanup_temp_file(path_value):
+    temp_path = (path_value or "").strip()
+    if not temp_path:
+        return
+    try:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    except OSError:
+        pass
+
+
+def fetch_batch_upload_pending_count(uploaded_by):
+    """Return pending staged uploads for one TC user."""
+    ensure_batch_upload_staging_table()
+    username = (uploaded_by or "").strip().lower()
+    if not username:
+        return 0
+    rows = execute_query(
+        """
+        SELECT COUNT(*) AS pending_count
+        FROM batch_upload_staging
+        WHERE uploaded_by = %s
+          AND status = 'pending'
+        """,
+        (username,),
+        fetch=True,
+    ) or []
+    return int((rows[0] or {}).get("pending_count") or 0) if rows else 0
+
+
+def cleanup_stale_batch_upload_staging(max_age_hours=16):
+    """Remove stale staged files + rows to avoid temp buildup."""
+    ensure_batch_upload_staging_table()
+    cutoff = datetime.now() - timedelta(hours=max(1, int(max_age_hours or 16)))
+    rows = execute_query(
+        """
+        SELECT id, temp_path
+        FROM batch_upload_staging
+        WHERE created_at < %s
+        ORDER BY id ASC
+        LIMIT 500
+        """,
+        (cutoff,),
+        fetch=True,
+    ) or []
+    for row in rows:
+        _cleanup_temp_file(row.get("temp_path"))
+        execute_query("DELETE FROM batch_upload_staging WHERE id = %s", (row["id"],))
+
+
+def clear_pending_batch_upload_staging(uploaded_by):
+    """Clear pending staged files for one user before creating a new batch."""
+    ensure_batch_upload_staging_table()
+    username = (uploaded_by or "").strip().lower()
+    if not username:
+        return
+    rows = execute_query(
+        """
+        SELECT id, temp_path
+        FROM batch_upload_staging
+        WHERE uploaded_by = %s
+          AND status = 'pending'
+        """,
+        (username,),
+        fetch=True,
+    ) or []
+    for row in rows:
+        _cleanup_temp_file(row.get("temp_path"))
+        execute_query("DELETE FROM batch_upload_staging WHERE id = %s", (row["id"],))
+
+
+def _batch_text_similarity(first, second):
+    one = re.sub(r"\s+", " ", (first or "").strip().lower())
+    two = re.sub(r"\s+", " ", (second or "").strip().lower())
+    if not one or not two:
+        return 0.0
+    return float(SequenceMatcher(None, one, two).ratio())
+
+
+def _batch_name_strength(extracted_name, transaction_name):
+    extracted = re.sub(r"\s+", " ", (extracted_name or "").strip().lower())
+    candidate = re.sub(r"\s+", " ", (transaction_name or "").strip().lower())
+    if not extracted or not candidate:
+        return 0.0
+    if extracted in candidate or candidate in extracted:
+        return 0.95
+    extracted_tokens = {token for token in re.findall(r"[a-z0-9]+", extracted) if len(token) >= 3}
+    candidate_tokens = {token for token in re.findall(r"[a-z0-9]+", candidate) if len(token) >= 3}
+    if not extracted_tokens or not candidate_tokens:
+        return _batch_text_similarity(extracted, candidate)
+    overlap = len(extracted_tokens & candidate_tokens) / max(1, len(extracted_tokens | candidate_tokens))
+    return max(overlap, _batch_text_similarity(extracted, candidate))
+
+
+def fetch_batch_upload_candidate_transactions(limit=400):
+    """Load candidate transactions for auto-assignment + manual override options."""
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            property_address,
+            buyer_name,
+            seller_name,
+            status,
+            closing_date
+        FROM transactions
+        WHERE COALESCE(status, '') <> 'CANCELLED'
+        ORDER BY
+            CASE
+                WHEN status = 'ACTIVE' THEN 1
+                WHEN status = 'NEEDS_MARGARET_REVIEW' THEN 2
+                WHEN status = 'COMPLETED' THEN 3
+                ELSE 4
+            END,
+            COALESCE(closing_date, CURRENT_DATE + INTERVAL '365 days') ASC,
+            id DESC
+        LIMIT %s
+        """,
+        (max(10, min(int(limit or 400), 1000)),),
+        fetch=True,
+    ) or []
+    return rows
+
+
+def _extract_json_from_model_text(raw_text):
+    text = (raw_text or "").strip()
+    if not text:
+        return None
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    candidate = text[start : end + 1]
+    try:
+        return json.loads(candidate)
+    except Exception:
+        try:
+            normalized = re.sub(r"'", '"', candidate)
+            return json.loads(normalized)
+        except Exception:
+            return None
+
+
+def _extract_model_text_content(response):
+    fragments = []
+    for item in getattr(response, "content", []) or []:
+        if getattr(item, "type", "") == "text":
+            fragments.append(getattr(item, "text", ""))
+    return "\n".join(fragment for fragment in fragments if fragment).strip()
+
+
+def _extract_currency_value(raw_text, label_patterns):
+    text = re.sub(r"\s+", " ", (raw_text or ""))
+    for pattern in label_patterns or []:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        value = re.sub(r"[^0-9.\-]", "", match.group(1) or "")
+        try:
+            amount = float(value)
+            if amount > 0:
+                return round(amount, 2)
+        except ValueError:
+            continue
+    return None
+
+
+def _batch_doc_type_from_heuristics(first_page_text, filename):
+    text = (first_page_text or "").lower()
+    filename_text = (filename or "").lower()
+    combined = f"{filename_text} {text}"
+    if "inspection report" in combined or ("inspector" in combined and "defect" in combined):
+        return "inspection_report", 88
+    if "earnest" in combined and ("receipt" in combined or "deposit" in combined):
+        return "earnest_receipt", 90
+    if "option fee" in combined and ("receipt" in combined or "payment" in combined):
+        return "option_receipt", 84
+    if "appraisal" in combined or "appraised value" in combined:
+        return "appraisal", 86
+    if "survey" in combined and ("metes" in combined or "bounds" in combined or "boundary" in combined):
+        return "survey", 82
+    if "title commitment" in combined or ("schedule b" in combined and "title" in combined):
+        return "title_commitment", 84
+    if "hoa" in combined or "homeowners association" in combined:
+        return "hoa_docs", 80
+    if "insurance binder" in combined or "certificate of insurance" in combined:
+        return "insurance_binder", 79
+    if "loan approval" in combined or "commitment letter" in combined:
+        return "loan_approval", 79
+    if "closing disclosure" in combined or "settlement statement" in combined or "hud-1" in combined:
+        return "settlement_statement", 80
+    return "other", 58
+
+
+def _extract_batch_identifiers(first_page_text):
+    text = first_page_text or ""
+    property_address = extract_pattern_value(text, PROPERTY_ADDRESS_PATTERNS, cleanup_func=cleanup_address_candidate) or ""
+    buyer_name = extract_pattern_value(text, BUYER_PATTERNS, cleanup_func=cleanup_name_candidate) or ""
+    seller_name = extract_pattern_value(text, SELLER_PATTERNS, cleanup_func=cleanup_name_candidate) or ""
+    file_match = re.search(
+        r"(?:file|escrow|order|title)\s*(?:number|no\.?|#)\s*[:#-]?\s*([A-Za-z0-9-]{4,40})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    file_number = (file_match.group(1) or "").strip() if file_match else ""
+    return {
+        "property_address": property_address,
+        "buyer_name": buyer_name,
+        "seller_name": seller_name,
+        "file_number": file_number,
+    }
+
+
+def analyze_document_with_claude(first_page_text, filename):
+    """
+    Identify document type and transaction identifiers.
+    Uses Claude when configured, with heuristic fallback.
+    """
+    fallback_type, fallback_conf = _batch_doc_type_from_heuristics(first_page_text, filename)
+    fallback_ids = _extract_batch_identifiers(first_page_text)
+    extracted_data = {}
+
+    if fallback_type == "earnest_receipt":
+        earnest_amount = extract_earnest_amount(first_page_text, key_info_extracted={})
+        if earnest_amount is not None:
+            extracted_data["earnest_amount"] = earnest_amount
+    if fallback_type == "appraisal":
+        appraised_value = _extract_currency_value(
+            first_page_text,
+            [
+                r"appraised\s+value[^$0-9]{0,40}\$?\s*([0-9,]+(?:\.[0-9]{1,2})?)",
+                r"market\s+value[^$0-9]{0,40}\$?\s*([0-9,]+(?:\.[0-9]{1,2})?)",
+            ],
+        )
+        if appraised_value is not None:
+            extracted_data["appraisal_value"] = appraised_value
+
+    analysis = {
+        "document_type": normalize_document_type(fallback_type, fallback="other"),
+        "property_address": fallback_ids.get("property_address") or "",
+        "transaction_identifiers": fallback_ids,
+        "extracted_data": extracted_data,
+        "confidence": fallback_conf,
+        "source": "heuristic",
+    }
+
+    api_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    if api_key and (first_page_text or "").strip():
+        try:
+            from anthropic import Anthropic
+
+            prompt = (
+                "Analyze this transaction document and return JSON only.\n\n"
+                f"Filename: {filename or 'unknown'}\n\n"
+                "First page text:\n"
+                f"{(first_page_text or '')[:3000]}\n\n"
+                "Return JSON with keys:\n"
+                "{\n"
+                '  "document_type": "inspection_report|earnest_receipt|appraisal|survey|title_commitment|hoa_docs|loan_approval|insurance_binder|settlement_statement|option_receipt|seller_disclosure|other|unknown",\n'
+                '  "property_address": "string",\n'
+                '  "transaction_identifiers": {\n'
+                '    "property_address": "string",\n'
+                '    "buyer_name": "string",\n'
+                '    "seller_name": "string",\n'
+                '    "file_number": "string"\n'
+                "  },\n"
+                '  "extracted_data": {"earnest_amount": 0, "appraisal_value": 0},\n'
+                '  "confidence": 0\n'
+                "}"
+            )
+            client = Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model=(os.getenv("BATCH_UPLOAD_ANALYSIS_MODEL") or "claude-sonnet-4-20250514"),
+                max_tokens=1200,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            payload = _extract_json_from_model_text(_extract_model_text_content(response))
+            if isinstance(payload, dict):
+                model_ids = payload.get("transaction_identifiers")
+                if not isinstance(model_ids, dict):
+                    model_ids = {}
+                merged_ids = dict(fallback_ids)
+                for key in ("property_address", "buyer_name", "seller_name", "file_number"):
+                    value = (model_ids.get(key) or payload.get(key) or "").strip()
+                    if value:
+                        merged_ids[key] = value
+                model_doc_type = normalize_document_type(
+                    payload.get("document_type") or payload.get("type"),
+                    fallback=analysis["document_type"],
+                )
+                confidence_value = analysis["confidence"]
+                try:
+                    confidence_value = max(0, min(int(payload.get("confidence")), 100))
+                except (TypeError, ValueError):
+                    pass
+                model_extracted = payload.get("extracted_data")
+                if not isinstance(model_extracted, dict):
+                    model_extracted = {}
+                merged_extracted = dict(analysis.get("extracted_data") or {})
+                merged_extracted.update(model_extracted)
+                analysis = {
+                    "document_type": model_doc_type,
+                    "property_address": merged_ids.get("property_address") or "",
+                    "transaction_identifiers": merged_ids,
+                    "extracted_data": merged_extracted,
+                    "confidence": confidence_value,
+                    "source": "claude",
+                }
+        except Exception as exc:
+            log_system_error("batch_upload_analysis", f"Claude fallback used: {str(exc)[:300]}")
+
+    return analysis
+
+
+def _find_transaction_by_file_number(file_number):
+    candidate = (file_number or "").strip().lower()
+    if not candidate:
+        return None
+    for column_name in ("title_file_number", "file_number"):
+        if not _transaction_column_exists(column_name):
+            continue
+        rows = execute_query(
+            f"""
+            SELECT id, property_address
+            FROM transactions
+            WHERE COALESCE(status, '') <> 'CANCELLED'
+              AND LOWER(COALESCE({column_name}, '')) = %s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (candidate,),
+            fetch=True,
+        ) or []
+        if rows:
+            return rows[0]
+    return None
+
+
+def find_similar_transactions(identifiers, candidates, limit=5):
+    """Return top likely transactions for manual review dropdown hints."""
+    address_value = (identifiers.get("property_address") or "").strip()
+    buyer_value = (identifiers.get("buyer_name") or "").strip()
+    seller_value = (identifiers.get("seller_name") or "").strip()
+    scored = []
+    for row in candidates or []:
+        score = 0.0
+        if address_value:
+            score += _batch_text_similarity(normalize_address(address_value), normalize_address(row.get("property_address"))) * 0.6
+        if buyer_value:
+            score += _batch_name_strength(buyer_value, row.get("buyer_name")) * 0.2
+        if seller_value:
+            score += _batch_name_strength(seller_value, row.get("seller_name")) * 0.2
+        if score <= 0:
+            continue
+        scored.append(
+            {
+                "transaction_id": row["id"],
+                "property_address": row.get("property_address") or "",
+                "score": round(float(score), 3),
+                "status": row.get("status") or "",
+            }
+        )
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return scored[: max(1, min(int(limit or 5), 10))]
+
+
+def find_matching_transaction(analysis, candidates=None):
+    """Match one analyzed document to the best transaction."""
+    identifiers = analysis.get("transaction_identifiers")
+    if not isinstance(identifiers, dict):
+        identifiers = {}
+    candidate_rows = candidates or fetch_batch_upload_candidate_transactions(limit=500)
+    property_address = (identifiers.get("property_address") or analysis.get("property_address") or "").strip()
+    buyer_name = (identifiers.get("buyer_name") or "").strip()
+    seller_name = (identifiers.get("seller_name") or "").strip()
+    file_number = (identifiers.get("file_number") or "").strip()
+
+    if property_address:
+        matched = []
+        for row in candidate_rows:
+            match = addresses_match(property_address, row.get("property_address"))
+            if match:
+                similarity = _batch_text_similarity(normalize_address(property_address), normalize_address(row.get("property_address")))
+                matched.append((similarity, row))
+        if matched:
+            matched.sort(key=lambda item: item[0], reverse=True)
+            winner = matched[0][1]
+            return {
+                "transaction_id": winner["id"],
+                "property_address": winner.get("property_address") or "",
+                "confidence": 0.95,
+                "method": "property_address_match",
+            }
+
+    if file_number:
+        file_match = _find_transaction_by_file_number(file_number)
+        if file_match:
+            return {
+                "transaction_id": file_match["id"],
+                "property_address": file_match.get("property_address") or "",
+                "confidence": 0.9,
+                "method": "file_number_match",
+            }
+
+    if buyer_name or seller_name:
+        best = None
+        best_score = 0.0
+        for row in candidate_rows:
+            buyer_score = _batch_name_strength(buyer_name, row.get("buyer_name")) if buyer_name else 0.0
+            seller_score = _batch_name_strength(seller_name, row.get("seller_name")) if seller_name else 0.0
+            if buyer_name and seller_name:
+                score = (buyer_score * 0.5) + (seller_score * 0.5)
+            elif buyer_name:
+                score = buyer_score * 0.92
+            else:
+                score = seller_score * 0.9
+            if score > best_score:
+                best = row
+                best_score = score
+        if best and best_score >= 0.82:
+            return {
+                "transaction_id": best["id"],
+                "property_address": best.get("property_address") or "",
+                "confidence": round(max(0.85, min(best_score, 0.93)), 3),
+                "method": "party_name_match",
+            }
+
+    return {
+        "confidence": 0.3,
+        "reason": "Could not match to active transaction",
+        "possible_matches": find_similar_transactions(identifiers, candidate_rows),
+    }
+
+
+def _parse_batch_money(value):
+    if value in (None, ""):
+        return None
+    cleaned = re.sub(r"[^0-9.\-]", "", str(value))
+    if cleaned in {"", "-", ".", "-."}:
+        return None
+    try:
+        amount = float(cleaned)
+        if amount <= 0:
+            return None
+        return round(amount, 2)
+    except ValueError:
+        return None
+
+
+def update_transaction_from_batch_extracted_data(transaction_id, document_type, extracted_data):
+    """Apply extracted numeric values from batch upload documents."""
+    payload = extracted_data if isinstance(extracted_data, dict) else {}
+    normalized_type = normalize_document_type(document_type, fallback="other")
+    applied_updates = []
+
+    earnest_amount = _parse_batch_money(
+        payload.get("earnest_amount")
+        or payload.get("deposit_amount")
+        or payload.get("amount")
+    )
+    appraisal_value = _parse_batch_money(
+        payload.get("appraisal_value")
+        or payload.get("appraised_value")
+        or payload.get("market_value")
+    )
+
+    if earnest_amount is not None and _transaction_column_exists("earnest_amount"):
+        execute_query(
+            """
+            UPDATE transactions
+            SET earnest_amount = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (earnest_amount, int(transaction_id)),
+        )
+        applied_updates.append("earnest_amount")
+
+    if normalized_type == "appraisal" and appraisal_value is not None and _transaction_column_exists("appraised_value"):
+        execute_query(
+            """
+            UPDATE transactions
+            SET appraised_value = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (appraisal_value, int(transaction_id)),
+        )
+        applied_updates.append("appraised_value")
+    return applied_updates
+
+
+def stage_batch_upload_record(
+    batch_token,
+    uploaded_by,
+    original_filename,
+    temp_path,
+    extension,
+    file_size,
+    suggested_transaction_id,
+    suggested_document_type,
+    confidence_score,
+    analysis_payload,
+):
+    """Persist one staged batch upload row."""
+    ensure_batch_upload_staging_table()
+    return execute_insert(
+        """
+        INSERT INTO batch_upload_staging (
+            batch_token,
+            uploaded_by,
+            original_filename,
+            temp_path,
+            extension,
+            file_size,
+            suggested_transaction_id,
+            suggested_document_type,
+            confidence_score,
+            analysis_payload,
+            status,
+            created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 'pending', CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            (batch_token or "").strip(),
+            (uploaded_by or "").strip().lower()[:100],
+            (original_filename or "")[:255],
+            temp_path,
+            (extension or "")[:10],
+            int(file_size or 0),
+            int(suggested_transaction_id) if suggested_transaction_id else None,
+            (suggested_document_type or "other")[:100],
+            float(confidence_score or 0),
+            json.dumps(analysis_payload or {}, default=str),
+        ),
+    )
+
+
+def fetch_staged_batch_upload_row(stage_id, uploaded_by):
+    """Fetch one pending staged row for current user."""
+    ensure_batch_upload_staging_table()
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            batch_token,
+            uploaded_by,
+            original_filename,
+            temp_path,
+            extension,
+            file_size,
+            suggested_transaction_id,
+            suggested_document_type,
+            confidence_score,
+            analysis_payload,
+            status
+        FROM batch_upload_staging
+        WHERE id = %s
+          AND uploaded_by = %s
+          AND status = 'pending'
+        LIMIT 1
+        """,
+        (int(stage_id), (uploaded_by or "").strip().lower()),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def mark_batch_upload_stage_result(stage_id, status, error_text="", committed_document_id=None):
+    """Mark staged record as completed/failed."""
+    ensure_batch_upload_staging_table()
+    execute_query(
+        """
+        UPDATE batch_upload_staging
+        SET status = %s,
+            error_text = %s,
+            committed_document_id = %s
+        WHERE id = %s
+        """,
+        (
+            (status or "failed")[:20],
+            (error_text or "")[:1000] or None,
+            int(committed_document_id) if committed_document_id else None,
+            int(stage_id),
+        ),
+    )
+
+
 def document_due_status(target_date, is_complete):
     """Return status class for tasks/deadlines."""
     if is_complete:
@@ -9216,6 +9851,11 @@ def mobile_log_communication(transaction_id):
 @login_required
 def tc_dashboard():
     """Render Margaret's main dashboard with status-grouped transactions."""
+    cleanup_stale_batch_upload_staging()
+    uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
+    pending_batch_upload_count = fetch_batch_upload_pending_count(uploaded_by)
+    session["batch_upload_pending_count"] = pending_batch_upload_count
+
     notice = (request.args.get("notice") or "").strip()
     notice_type = (request.args.get("notice_type") or "success").strip().lower()
     if notice_type not in {"success", "warning", "error"}:
@@ -9342,6 +9982,7 @@ def tc_dashboard():
         heads_up_summary=heads_up_report["summary"],
         heads_up_watch=heads_up_report["open_watch"][:3],
         heads_up_urgent=heads_up_report["open_urgent"][:3],
+        pending_batch_upload_count=pending_batch_upload_count,
     )
 
 
@@ -9937,6 +10578,388 @@ def tc_templates():
         selected_category=selected_category,
         search_query=search_query,
         categories=categories,
+    )
+
+
+@app.route("/tc/batch-upload", methods=["GET"])
+@login_required
+def tc_batch_upload():
+    """Render drag/drop batch document upload workspace."""
+    cleanup_stale_batch_upload_staging()
+    uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
+    pending_count = fetch_batch_upload_pending_count(uploaded_by)
+    session["batch_upload_pending_count"] = pending_count
+
+    notice = (request.args.get("notice") or "").strip()
+    notice_type = (request.args.get("notice_type") or "success").strip().lower()
+    if notice_type not in {"success", "warning", "error"}:
+        notice_type = "success"
+
+    transaction_rows = fetch_batch_upload_candidate_transactions(limit=500)
+    transaction_options = []
+    for row in transaction_rows:
+        status_value = (row.get("status") or "").strip()
+        transaction_options.append(
+            {
+                "id": row["id"],
+                "property_address": row.get("property_address") or "",
+                "status": status_value,
+                "label": f"#{row['id']} - {row.get('property_address') or 'Unknown address'} ({status_value or 'UNKNOWN'})",
+            }
+        )
+
+    doc_type_values = [doc for doc in DOCUMENT_CLASSIFICATION_OVERRIDE_TYPES if doc != "unknown"]
+    doc_type_options = [{"value": doc, "label": document_type_label(doc)} for doc in doc_type_values]
+    return render_template(
+        "tc_batch_upload.html",
+        notice=notice,
+        notice_type=notice_type,
+        pending_count=pending_count,
+        transaction_options=transaction_options,
+        doc_type_options=doc_type_options,
+    )
+
+
+@app.route("/tc/batch-upload/analyze", methods=["POST"])
+@login_required
+def analyze_batch_upload():
+    """
+    Analyze multiple uploaded documents and stage assignment suggestions.
+    """
+    cleanup_stale_batch_upload_staging()
+    uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
+    files = [request.files[key] for key in sorted(request.files.keys()) if request.files.get(key)]
+    if not files:
+        return jsonify({"success": False, "error": "No files uploaded."}), 400
+    if len(files) > BATCH_UPLOAD_MAX_FILES:
+        return jsonify({"success": False, "error": f"Maximum {BATCH_UPLOAD_MAX_FILES} files per batch."}), 400
+
+    clear_pending_batch_upload_staging(uploaded_by)
+    batch_token = str(uuid4())
+    candidate_transactions = fetch_batch_upload_candidate_transactions(limit=600)
+    results = []
+
+    for file in files:
+        safe_filename = secure_filename(file.filename or "")
+        if not safe_filename:
+            results.append(
+                {
+                    "filename": "unnamed_file",
+                    "confidence": "low",
+                    "reason": "Missing filename",
+                }
+            )
+            continue
+
+        extension = file_extension(safe_filename)
+        if extension not in ALLOWED_DOCUMENT_EXTENSIONS:
+            results.append(
+                {
+                    "filename": safe_filename,
+                    "confidence": "low",
+                    "reason": "Invalid file type (allowed: PDF/JPG/PNG)",
+                }
+            )
+            continue
+
+        file_bytes = file.read() or b""
+        file_size = len(file_bytes)
+        if file_size <= 0:
+            results.append(
+                {
+                    "filename": safe_filename,
+                    "confidence": "low",
+                    "reason": "File is empty",
+                }
+            )
+            continue
+        if file_size > MAX_FILE_SIZE:
+            results.append(
+                {
+                    "filename": safe_filename,
+                    "confidence": "low",
+                    "reason": "File exceeds 16MB upload limit",
+                }
+            )
+            continue
+
+        temp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=f".{extension}", delete=False) as tmp:
+                tmp.write(file_bytes)
+                temp_path = tmp.name
+
+            first_page_text = extract_text_from_first_page(file_bytes, extension)
+            analysis = analyze_document_with_claude(first_page_text, safe_filename)
+            transaction_match = find_matching_transaction(analysis, candidates=candidate_transactions)
+            suggested_transaction_id = parse_optional_int(transaction_match.get("transaction_id"))
+            suggested_document_type = normalize_document_type(analysis.get("document_type"), fallback="other")
+            match_confidence = float(transaction_match.get("confidence") or 0)
+            confidence_label = "high" if suggested_transaction_id and match_confidence >= 0.85 else "low"
+            analysis_payload = {
+                "analysis": analysis,
+                "matching": transaction_match,
+                "first_page_text": (first_page_text or "")[:12000],
+            }
+            stage_id = stage_batch_upload_record(
+                batch_token=batch_token,
+                uploaded_by=uploaded_by,
+                original_filename=safe_filename,
+                temp_path=temp_path,
+                extension=extension,
+                file_size=file_size,
+                suggested_transaction_id=suggested_transaction_id,
+                suggested_document_type=suggested_document_type,
+                confidence_score=match_confidence,
+                analysis_payload=analysis_payload,
+            )
+            if not stage_id:
+                _cleanup_temp_file(temp_path)
+                results.append(
+                    {
+                        "filename": safe_filename,
+                        "confidence": "low",
+                        "reason": "Failed to stage file for upload",
+                    }
+                )
+                continue
+
+            if confidence_label == "high":
+                results.append(
+                    {
+                        "stage_id": stage_id,
+                        "filename": safe_filename,
+                        "transaction_id": suggested_transaction_id,
+                        "property_address": transaction_match.get("property_address") or "",
+                        "document_type": suggested_document_type,
+                        "confidence": "high",
+                        "method": transaction_match.get("method") or "auto_match",
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "stage_id": stage_id,
+                        "filename": safe_filename,
+                        "transaction_id": suggested_transaction_id,
+                        "document_type": suggested_document_type,
+                        "confidence": "low",
+                        "reason": transaction_match.get("reason") or "Needs review",
+                        "suggestions": transaction_match.get("possible_matches") or [],
+                    }
+                )
+        except Exception as exc:
+            _cleanup_temp_file(temp_path)
+            log_system_error("batch_upload_analyze", str(exc))
+            results.append(
+                {
+                    "filename": safe_filename,
+                    "confidence": "low",
+                    "reason": "Analysis failed - please assign manually",
+                }
+            )
+
+    pending_count = fetch_batch_upload_pending_count(uploaded_by)
+    session["batch_upload_pending_count"] = pending_count
+    session["batch_upload_batch_token"] = batch_token
+    return jsonify(
+        {
+            "success": True,
+            "results": results,
+            "batch_token": batch_token,
+            "pending_count": pending_count,
+        }
+    )
+
+
+@app.route("/tc/batch-upload/commit", methods=["POST"])
+@login_required
+def commit_batch_upload():
+    """
+    Commit approved batch uploads: S3 upload + DB records + task automation.
+    """
+    ensure_batch_upload_staging_table()
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    uploads = payload.get("uploads")
+    if not isinstance(uploads, list) or not uploads:
+        return jsonify({"success": False, "error": "No uploads provided."}), 400
+
+    uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
+    successful = 0
+    failed = 0
+    tasks_completed = 0
+    touched_stage_ids = set()
+
+    for upload in uploads[: BATCH_UPLOAD_MAX_FILES * 3]:
+        if not isinstance(upload, dict):
+            failed += 1
+            continue
+
+        stage_id = parse_optional_int(upload.get("stage_id"))
+        if not stage_id or stage_id in touched_stage_ids:
+            failed += 1
+            continue
+        touched_stage_ids.add(stage_id)
+
+        stage_row = fetch_staged_batch_upload_row(stage_id, uploaded_by)
+        if not stage_row:
+            failed += 1
+            continue
+
+        transaction_id = parse_optional_int(upload.get("transaction_id")) or parse_optional_int(stage_row.get("suggested_transaction_id"))
+        document_type = normalize_document_type(
+            upload.get("document_type") or stage_row.get("suggested_document_type"),
+            fallback="other",
+        )
+
+        transaction = get_transaction_or_none(transaction_id) if transaction_id else None
+        if not transaction:
+            mark_batch_upload_stage_result(stage_id, "failed", error_text="Transaction not found")
+            failed += 1
+            continue
+
+        temp_path = (stage_row.get("temp_path") or "").strip()
+        if not temp_path or not os.path.exists(temp_path):
+            mark_batch_upload_stage_result(stage_id, "failed", error_text="Staged file missing")
+            failed += 1
+            continue
+
+        try:
+            with open(temp_path, "rb") as staged_file:
+                file_bytes = staged_file.read()
+            extension = (stage_row.get("extension") or file_extension(stage_row.get("original_filename") or "") or "pdf").lower()
+            generated_filename = build_smart_filename(
+                document_type=document_type,
+                property_address=transaction.get("property_address") or "",
+                extension=extension,
+            )
+            s3_key = upload_document(
+                file=io.BytesIO(file_bytes),
+                transaction_id=transaction_id,
+                document_type=document_type,
+                filename=generated_filename,
+            )
+            if not s3_key:
+                raise ValueError("S3 upload failed")
+
+            file_size = len(file_bytes or b"")
+            document_id = execute_insert(
+                """
+                INSERT INTO documents (
+                    transaction_id, document_type, filename, s3_key, file_size, uploaded_by, uploaded_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                (
+                    transaction_id,
+                    document_type,
+                    generated_filename,
+                    s3_key,
+                    file_size,
+                    uploaded_by,
+                ),
+            )
+            if not document_id:
+                raise ValueError("Document record save failed")
+
+            analysis_payload = stage_row.get("analysis_payload")
+            if isinstance(analysis_payload, str):
+                try:
+                    analysis_payload = json.loads(analysis_payload)
+                except Exception:
+                    analysis_payload = {}
+            if not isinstance(analysis_payload, dict):
+                analysis_payload = {}
+
+            analysis = analysis_payload.get("analysis")
+            if not isinstance(analysis, dict):
+                analysis = {}
+            extracted_data = analysis.get("extracted_data")
+            if not isinstance(extracted_data, dict):
+                extracted_data = {}
+            first_page_text = (analysis_payload.get("first_page_text") or "")[:12000]
+
+            post_actions = apply_document_post_upload_actions(
+                transaction_id=transaction_id,
+                document_type=document_type,
+                first_page_text=first_page_text,
+                key_info_extracted=extracted_data,
+                uploaded_by=uploaded_by,
+            )
+            tasks_completed += len(post_actions.get("completed_task_ids") or [])
+            update_transaction_from_batch_extracted_data(transaction_id, document_type, extracted_data)
+
+            ensure_document_requests_table()
+            execute_query(
+                """
+                UPDATE document_requests
+                SET received_date = COALESCE(received_date, CURRENT_TIMESTAMP),
+                    status = 'received',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE transaction_id = %s
+                  AND document_type = %s
+                  AND status <> 'received'
+                """,
+                (transaction_id, document_type),
+            )
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'note', 'system', 'batch_upload', %s, %s)
+                """,
+                (
+                    transaction_id,
+                    "Batch upload committed",
+                    (
+                        f"stage_id={stage_id} doc_id={document_id} "
+                        f"type={document_type} actions={post_actions.get('summary') or 'none'}"
+                    )[:1800],
+                ),
+            )
+
+            log_document_access(
+                document_id=document_id,
+                user_name=uploaded_by,
+                user_type="tc",
+                action="upload",
+                ip_address=request.remote_addr or "",
+            )
+            run_document_analysis_async(
+                document_id=document_id,
+                transaction_id=transaction_id,
+                document_type=document_type,
+                s3_key=s3_key,
+                extension=extension,
+            )
+
+            mark_batch_upload_stage_result(stage_id, "completed", committed_document_id=document_id)
+            _cleanup_temp_file(temp_path)
+            successful += 1
+        except Exception as exc:
+            mark_batch_upload_stage_result(stage_id, "failed", error_text=str(exc))
+            log_system_error("batch_upload_commit", str(exc), transaction_id=transaction_id)
+            failed += 1
+
+    execute_query(
+        """
+        DELETE FROM batch_upload_staging
+        WHERE uploaded_by = %s
+          AND status IN ('completed', 'failed')
+        """,
+        (uploaded_by,),
+    )
+    pending_count = fetch_batch_upload_pending_count(uploaded_by)
+    session["batch_upload_pending_count"] = pending_count
+    return jsonify(
+        {
+            "success": True,
+            "successful": successful,
+            "failed": failed,
+            "tasks_completed": tasks_completed,
+            "pending_count": pending_count,
+        }
     )
 
 
