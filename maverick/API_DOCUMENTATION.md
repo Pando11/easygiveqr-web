@@ -496,6 +496,45 @@ Form `action` options:
   - staged temp-path records and AI analysis payload before commit
   - cleaned automatically for stale records
 
+## Automatic Cascade Date Updates
+
+### Apply/preview route (TC)
+- `POST /tc/transaction/<transaction_id>/update-date`
+- JSON body:
+  - `field`: one of `closing_date|effective_date|earnest_due_date|option_period_end_date|financing_approval_date`
+  - `old_date`: `YYYY-MM-DD`
+  - `new_date`: `YYYY-MM-DD`
+  - `preview_only`: `true|false`
+  - `force`: `true|false` (required when conflicts/warnings are present)
+  - `cascade_options`:
+    - `update_deadlines`
+    - `reschedule_appointments`
+    - `update_tasks`
+    - `sync_calendar`
+    - `notify_parties`
+- Behavior:
+  - preview mode returns estimated counts + conflicts without applying
+  - apply mode updates selected transaction date, cascades dependent rows, syncs calendar, regenerates timeline, and optionally notifies parties
+  - writes snapshot/results to `transaction_date_cascade_log` for undo
+
+### Undo route (TC)
+- `POST /tc/transaction/<transaction_id>/update-date/undo`
+- JSON body:
+  - `cascade_log_id` (optional; latest undoable cascade is used when omitted)
+- Behavior:
+  - allowed for 24 hours from cascade creation
+  - restores transaction/deadline/task/appointment values from snapshot
+  - re-syncs calendar and sends disregard notifications
+
+### Conflict detection
+- New closing date before appraisal appointment
+- New closing date before financing approval date
+- Weekend/holiday date warning with suggested next business day
+
+### Data model
+- Table: `transaction_date_cascade_log`
+  - stores date field deltas, options, before snapshots, results, expiration, and undo summary
+
 ## TC Extraction Verification Routes
 
 ### Save verified extraction values

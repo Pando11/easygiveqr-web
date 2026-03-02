@@ -225,6 +225,42 @@ MAX_FILE_SIZE = app.config["MAX_CONTENT_LENGTH"]
 ALLOWED_DOCUMENT_EXTENSIONS = {"pdf", "jpg", "jpeg", "png"}
 BATCH_UPLOAD_MAX_FILES = 20
 
+DATE_CASCADE_SUPPORTED_FIELDS = {
+    "closing_date",
+    "effective_date",
+    "earnest_due_date",
+    "option_period_end_date",
+    "financing_approval_date",
+}
+
+DATE_CASCADE_TRANSACTION_COLUMNS = (
+    "effective_date",
+    "option_fee_due_date",
+    "earnest_due_date",
+    "seller_disclosure_due_date",
+    "survey_due_date",
+    "option_period_end_date",
+    "hoa_docs_due_date",
+    "buyer_hoa_review_end_date",
+    "title_commitment_due_date",
+    "financing_approval_date",
+    "buyer_title_objection_end_date",
+    "closing_date",
+)
+
+EFFECTIVE_DATE_CASCADE_COLUMNS = (
+    "option_fee_due_date",
+    "earnest_due_date",
+    "seller_disclosure_due_date",
+    "survey_due_date",
+    "option_period_end_date",
+    "hoa_docs_due_date",
+    "buyer_hoa_review_end_date",
+    "title_commitment_due_date",
+    "financing_approval_date",
+    "buyer_title_objection_end_date",
+)
+
 REQUIRED_DOCUMENT_TYPES = {
     "contract",
     "earnest_receipt",
@@ -7726,6 +7762,957 @@ def mark_batch_upload_stage_result(stage_id, status, error_text="", committed_do
     )
 
 
+def ensure_date_cascade_tables():
+    """Store date-cascade snapshots for preview/undo workflows."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS transaction_date_cascade_log (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            date_field VARCHAR(80) NOT NULL,
+            old_date DATE,
+            new_date DATE,
+            delta_days INT DEFAULT 0,
+            cascade_options JSONB DEFAULT '{}'::jsonb,
+            snapshot JSONB DEFAULT '{}'::jsonb,
+            results JSONB DEFAULT '{}'::jsonb,
+            initiated_by VARCHAR(100),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP,
+            undone_at TIMESTAMP,
+            undo_summary JSONB DEFAULT '{}'::jsonb
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transaction_date_cascade_txn
+        ON transaction_date_cascade_log(transaction_id, created_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transaction_date_cascade_open
+        ON transaction_date_cascade_log(transaction_id, undone_at, expires_at DESC)
+        """
+    )
+
+
+def _to_iso_date(value):
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        parsed = _parse_iso_date(value)
+        return parsed.isoformat() if parsed else ""
+    return ""
+
+
+def _to_iso_datetime(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return datetime.combine(value, time(0, 0)).isoformat()
+    return ""
+
+
+def _parse_iso_date(raw_value):
+    value = (raw_value or "").strip() if isinstance(raw_value, str) else ""
+    if not value:
+        return None
+    token = value[:10]
+    try:
+        return datetime.strptime(token, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _parse_iso_datetime(raw_value):
+    if isinstance(raw_value, datetime):
+        return raw_value
+    if isinstance(raw_value, date):
+        return datetime.combine(raw_value, time(0, 0))
+    value = (raw_value or "").strip() if isinstance(raw_value, str) else ""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        parsed_date = _parse_iso_date(value)
+        if parsed_date:
+            return datetime.combine(parsed_date, time(0, 0))
+        return None
+
+
+def _shift_date_value(value, delta_days):
+    if isinstance(value, datetime):
+        return (value + timedelta(days=delta_days)).date()
+    if isinstance(value, date):
+        return value + timedelta(days=delta_days)
+    return None
+
+
+def _shift_datetime_value(value, delta_days):
+    if isinstance(value, datetime):
+        return value + timedelta(days=delta_days)
+    if isinstance(value, date):
+        return datetime.combine(value, time(0, 0)) + timedelta(days=delta_days)
+    return None
+
+
+def normalize_date_cascade_options(raw_options):
+    defaults = {
+        "update_deadlines": True,
+        "reschedule_appointments": True,
+        "update_tasks": True,
+        "sync_calendar": True,
+        "notify_parties": True,
+    }
+    if not isinstance(raw_options, dict):
+        return defaults
+    normalized = {}
+    for key, default_value in defaults.items():
+        normalized[key] = parse_bool_value(raw_options.get(key), default=default_value)
+    return normalized
+
+
+def _nth_weekday_of_month(year, month, weekday, occurrence):
+    candidate = date(year, month, 1)
+    while candidate.weekday() != weekday:
+        candidate += timedelta(days=1)
+    return candidate + timedelta(days=7 * (occurrence - 1))
+
+
+def _last_weekday_of_month(year, month, weekday):
+    if month == 12:
+        candidate = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        candidate = date(year, month + 1, 1) - timedelta(days=1)
+    while candidate.weekday() != weekday:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _observed_holiday(day):
+    if day.weekday() == 5:
+        return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def _us_holiday_set(year):
+    fixed = {
+        date(year, 1, 1),   # New Year
+        date(year, 6, 19),  # Juneteenth
+        date(year, 7, 4),   # Independence Day
+        date(year, 11, 11), # Veterans Day
+        date(year, 12, 25), # Christmas
+    }
+    observed = {_observed_holiday(day) for day in fixed}
+    floating = {
+        _nth_weekday_of_month(year, 1, 0, 3),   # MLK Day
+        _nth_weekday_of_month(year, 2, 0, 3),   # Presidents Day
+        _last_weekday_of_month(year, 5, 0),     # Memorial Day
+        _nth_weekday_of_month(year, 9, 0, 1),   # Labor Day
+        _nth_weekday_of_month(year, 10, 0, 2),  # Columbus Day
+        _nth_weekday_of_month(year, 11, 3, 4),  # Thanksgiving
+    }
+    return observed | floating
+
+
+def _is_weekend_or_holiday(target_date):
+    if not isinstance(target_date, date):
+        return False
+    return target_date.weekday() >= 5 or target_date in _us_holiday_set(target_date.year)
+
+
+def _next_business_day(target_date):
+    if not isinstance(target_date, date):
+        return None
+    candidate = target_date
+    for _ in range(10):
+        if not _is_weekend_or_holiday(candidate):
+            return candidate
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _task_blueprint_description_set(anchor_value):
+    descriptions = set()
+    for item in TASK_BLUEPRINTS:
+        if len(item) < 3:
+            continue
+        if item[2] != anchor_value:
+            continue
+        descriptions.add((item[0] or "").strip().lower())
+    return descriptions
+
+
+def _deadline_types_for_date_field(date_field):
+    normalized = (date_field or "").strip().lower()
+    if normalized == "closing_date":
+        return {row[0] for row in DEADLINE_BLUEPRINTS if row[0] != "effective_date"}
+    if normalized == "effective_date":
+        return {row[0] for row in DEADLINE_BLUEPRINTS if row[0] != "closing"}
+    if normalized == "earnest_due_date":
+        return {"earnest_money"}
+    if normalized == "option_period_end_date":
+        return {"option_period_end", "buyer_hoa_review"}
+    if normalized == "financing_approval_date":
+        return {"financing_approval", "buyer_title_objection"}
+    return set()
+
+
+def _candidate_deadlines_for_cascade(transaction_id, date_field):
+    deadline_types = sorted(_deadline_types_for_date_field(date_field))
+    if not deadline_types:
+        return []
+    placeholders = ", ".join(["%s"] * len(deadline_types))
+    rows = execute_query(
+        f"""
+        SELECT id, deadline_type, deadline_date
+        FROM deadlines
+        WHERE transaction_id = %s
+          AND completed = FALSE
+          AND deadline_date IS NOT NULL
+          AND deadline_type IN ({placeholders})
+        ORDER BY deadline_date ASC, id ASC
+        """,
+        tuple([int(transaction_id), *deadline_types]),
+        fetch=True,
+    ) or []
+    return rows
+
+
+def _candidate_tasks_for_cascade(transaction_id, date_field, old_date):
+    rows = execute_query(
+        """
+        SELECT id, task_description, due_date
+        FROM tasks
+        WHERE transaction_id = %s
+          AND due_date IS NOT NULL
+          AND completed = FALSE
+          AND COALESCE(status, 'pending') <> 'completed'
+        ORDER BY due_date ASC, id ASC
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    if not rows:
+        return []
+
+    normalized = (date_field or "").strip().lower()
+    selected = []
+    if normalized == "effective_date":
+        effective_descriptions = _task_blueprint_description_set("effective")
+        for row in rows:
+            desc = (row.get("task_description") or "").strip().lower()
+            if desc in effective_descriptions:
+                selected.append(row)
+    elif normalized == "closing_date":
+        closing_descriptions = _task_blueprint_description_set("closing")
+        for row in rows:
+            due_date = row.get("due_date")
+            desc = (row.get("task_description") or "").strip().lower()
+            if desc in closing_descriptions:
+                selected.append(row)
+                continue
+            if isinstance(due_date, date) and isinstance(old_date, date):
+                if due_date >= (old_date - timedelta(days=10)):
+                    selected.append(row)
+    else:
+        for row in rows:
+            due_date = row.get("due_date")
+            if isinstance(due_date, date) and isinstance(old_date, date):
+                if due_date >= old_date:
+                    selected.append(row)
+    return selected
+
+
+def _candidate_vendor_appointments_for_cascade(transaction_id, date_field, old_date):
+    rows = execute_query(
+        """
+        SELECT id, vendor_type, appointment_at
+        FROM vendor_outreach
+        WHERE transaction_id = %s
+          AND appointment_at IS NOT NULL
+        ORDER BY appointment_at ASC, id ASC
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    normalized = (date_field or "").strip().lower()
+    if normalized != "closing_date":
+        return []
+    selected = []
+    for row in rows:
+        appointment_at = row.get("appointment_at")
+        if not isinstance(appointment_at, datetime):
+            continue
+        if isinstance(old_date, date):
+            if appointment_at.date() < (old_date - timedelta(days=7)):
+                continue
+        selected.append(row)
+    return selected
+
+
+def estimate_date_cascade_changes(transaction_id, date_field, delta_days, cascade_options, old_date, new_date):
+    """Preview impacted rows and conflict warnings before apply."""
+    options = normalize_date_cascade_options(cascade_options)
+    transaction = get_transaction_or_none(transaction_id) or {}
+    conflicts = detect_date_change_conflicts(transaction, date_field, old_date, new_date)
+    deadline_rows = _candidate_deadlines_for_cascade(transaction_id, date_field) if options["update_deadlines"] else []
+    task_rows = _candidate_tasks_for_cascade(transaction_id, date_field, old_date) if options["update_tasks"] else []
+    appointment_rows = (
+        _candidate_vendor_appointments_for_cascade(transaction_id, date_field, old_date)
+        if options["reschedule_appointments"]
+        else []
+    )
+    mapped_rows = fetch_calendar_mappings(transaction_id=transaction_id, limit=300) if options["sync_calendar"] else []
+    calendar_count = 0
+    if mapped_rows:
+        for row in mapped_rows:
+            if (row.get("status") or "").lower() == "active":
+                calendar_count += 1
+    return {
+        "delta_days": int(delta_days),
+        "deadlines_updated": len(deadline_rows),
+        "tasks_updated": len(task_rows),
+        "appointments_updated": len(appointment_rows),
+        "calendar_events_updated": calendar_count,
+        "notifications_sent": 0,
+        "conflicts": conflicts,
+        "requires_confirmation": bool(conflicts),
+    }
+
+
+def detect_date_change_conflicts(transaction, date_field, old_date, new_date):
+    """Return warning/suggestion list before applying cascades."""
+    conflicts = []
+    normalized = (date_field or "").strip().lower()
+    if not isinstance(new_date, date):
+        return conflicts
+
+    if normalized == "closing_date":
+        appraisal_rows = execute_query(
+            """
+            SELECT appointment_at
+            FROM vendor_outreach
+            WHERE transaction_id = %s
+              AND LOWER(COALESCE(vendor_type, '')) IN ('appraiser', 'appraisal')
+              AND appointment_at IS NOT NULL
+            ORDER BY appointment_at ASC
+            LIMIT 1
+            """,
+            (transaction.get("id"),),
+            fetch=True,
+        ) or []
+        if appraisal_rows:
+            appraisal_dt = appraisal_rows[0].get("appointment_at")
+            if isinstance(appraisal_dt, datetime) and new_date < appraisal_dt.date():
+                conflicts.append(
+                    {
+                        "severity": "warning",
+                        "message": (
+                            f"New closing date ({new_date.strftime('%b %d')}) is before appraisal "
+                            f"({appraisal_dt.strftime('%b %d')})."
+                        ),
+                    }
+                )
+
+        financing_date = transaction.get("financing_approval_date")
+        if isinstance(financing_date, date) and new_date < financing_date:
+            conflicts.append(
+                {
+                    "severity": "warning",
+                    "message": (
+                        f"New closing date ({new_date.strftime('%b %d')}) is before financing approval "
+                        f"deadline ({financing_date.strftime('%b %d')})."
+                    ),
+                }
+            )
+
+    if new_date < date.today():
+        conflicts.append(
+            {
+                "severity": "warning",
+                "message": "Selected date is in the past.",
+            }
+        )
+
+    if _is_weekend_or_holiday(new_date):
+        alternative = _next_business_day(new_date)
+        alt_text = alternative.strftime("%b %d, %Y") if isinstance(alternative, date) else "next business day"
+        conflicts.append(
+            {
+                "severity": "suggestion",
+                "message": f"Selected date falls on a weekend/holiday. Consider {alt_text}.",
+            }
+        )
+    return conflicts
+
+
+def _apply_transaction_date_updates(transaction_id, field_values):
+    safe_updates = {}
+    for key, value in (field_values or {}).items():
+        if key not in DATE_CASCADE_TRANSACTION_COLUMNS:
+            continue
+        if isinstance(value, date):
+            safe_updates[key] = value
+    if not safe_updates:
+        return
+    set_parts = []
+    params = []
+    for key, value in safe_updates.items():
+        set_parts.append(f"{key} = %s")
+        params.append(value)
+    params.append(int(transaction_id))
+    execute_query(
+        f"""
+        UPDATE transactions
+        SET {", ".join(set_parts)},
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        tuple(params),
+    )
+
+
+def _transaction_date_snapshot_map(transaction_row):
+    snapshot = {}
+    for column in DATE_CASCADE_TRANSACTION_COLUMNS:
+        snapshot[column] = _to_iso_date(transaction_row.get(column))
+    return snapshot
+
+
+def cascade_date_change(
+    transaction_id,
+    date_field,
+    delta_days,
+    old_date,
+    new_date,
+    cascade_options,
+    initiated_by="margaret",
+):
+    """
+    Automatically adjust dependent data after a transaction date change.
+    """
+    options = normalize_date_cascade_options(cascade_options)
+    transaction_before = get_transaction_or_none(transaction_id) or {}
+    changes = {
+        "deadlines_updated": 0,
+        "tasks_updated": 0,
+        "appointments_updated": 0,
+        "calendar_events_updated": 0,
+        "notifications_sent": 0,
+    }
+    snapshot = {
+        "transaction_dates": _transaction_date_snapshot_map(transaction_before),
+        "deadlines": [],
+        "tasks": [],
+        "appointments": [],
+    }
+
+    normalized_field = (date_field or "").strip().lower()
+    if normalized_field == "effective_date" and options["update_deadlines"]:
+        dependent_values = {}
+        for column in EFFECTIVE_DATE_CASCADE_COLUMNS:
+            old_value = transaction_before.get(column)
+            shifted = _shift_date_value(old_value, delta_days)
+            if shifted:
+                dependent_values[column] = shifted
+        if dependent_values:
+            _apply_transaction_date_updates(transaction_id, dependent_values)
+    elif normalized_field == "option_period_end_date" and options["update_deadlines"]:
+        old_value = transaction_before.get("buyer_hoa_review_end_date")
+        shifted = _shift_date_value(old_value, delta_days)
+        if shifted:
+            _apply_transaction_date_updates(transaction_id, {"buyer_hoa_review_end_date": shifted})
+    elif normalized_field == "financing_approval_date" and options["update_deadlines"]:
+        old_value = transaction_before.get("buyer_title_objection_end_date")
+        shifted = _shift_date_value(old_value, delta_days)
+        if shifted:
+            _apply_transaction_date_updates(transaction_id, {"buyer_title_objection_end_date": shifted})
+
+    if options["update_deadlines"]:
+        deadline_rows = _candidate_deadlines_for_cascade(transaction_id, normalized_field)
+        for row in deadline_rows:
+            old_deadline = row.get("deadline_date")
+            if not isinstance(old_deadline, date):
+                continue
+            new_deadline = old_deadline + timedelta(days=delta_days)
+            execute_query(
+                """
+                UPDATE deadlines
+                SET deadline_date = %s
+                WHERE id = %s
+                  AND transaction_id = %s
+                """,
+                (new_deadline, row["id"], int(transaction_id)),
+            )
+            snapshot["deadlines"].append(
+                {
+                    "id": row["id"],
+                    "old_date": _to_iso_date(old_deadline),
+                }
+            )
+            changes["deadlines_updated"] += 1
+
+    if options["update_tasks"]:
+        task_rows = _candidate_tasks_for_cascade(transaction_id, normalized_field, old_date)
+        for row in task_rows:
+            old_due = row.get("due_date")
+            if not isinstance(old_due, date):
+                continue
+            new_due = old_due + timedelta(days=delta_days)
+            execute_query(
+                """
+                UPDATE tasks
+                SET due_date = %s
+                WHERE id = %s
+                  AND transaction_id = %s
+                """,
+                (new_due, row["id"], int(transaction_id)),
+            )
+            snapshot["tasks"].append(
+                {
+                    "id": row["id"],
+                    "old_date": _to_iso_date(old_due),
+                }
+            )
+            changes["tasks_updated"] += 1
+
+    if options["reschedule_appointments"]:
+        appointment_rows = _candidate_vendor_appointments_for_cascade(transaction_id, normalized_field, old_date)
+        for row in appointment_rows:
+            old_appt = row.get("appointment_at")
+            if not isinstance(old_appt, datetime):
+                continue
+            new_appt = old_appt + timedelta(days=delta_days)
+            execute_query(
+                """
+                UPDATE vendor_outreach
+                SET appointment_at = %s
+                WHERE id = %s
+                  AND transaction_id = %s
+                """,
+                (new_appt, row["id"], int(transaction_id)),
+            )
+            snapshot["appointments"].append(
+                {
+                    "id": row["id"],
+                    "old_at": _to_iso_datetime(old_appt),
+                }
+            )
+            changes["appointments_updated"] += 1
+
+    if options["sync_calendar"]:
+        calendar_summary = sync_transaction_calendar_bundle(
+            transaction_id=transaction_id,
+            actor=(initiated_by or "margaret"),
+            force_update=True,
+            include_deadlines=options["update_deadlines"],
+            include_closing=True,
+            include_vendor_events=options["reschedule_appointments"],
+        )
+        changes["calendar_events_updated"] = (
+            int(calendar_summary.get("deadline_synced") or 0)
+            + int(calendar_summary.get("vendor_synced") or 0)
+            + (1 if calendar_summary.get("closing_synced") else 0)
+        )
+        changes["calendar_summary"] = calendar_summary
+    return {"changes": changes, "snapshot": snapshot}
+
+
+def _fetch_transaction_client_emails(transaction_id):
+    emails = {"buyer": "", "seller": ""}
+    rows = fetch_client_access_rows(transaction_id)
+    for row in rows:
+        role = (row.get("client_type") or "").strip().lower()
+        if role not in emails:
+            continue
+        email_value = normalize_email(row.get("email"))
+        if email_value:
+            emails[role] = email_value
+    return emails
+
+
+def _unique_nonempty(values):
+    seen = set()
+    ordered = []
+    for value in values:
+        token = (value or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def notify_date_change(
+    transaction_id,
+    date_field,
+    old_date,
+    new_date,
+    cascade_results,
+    send_notifications=True,
+    is_undo=False,
+):
+    """
+    Notify transaction parties after a cascaded date change.
+    """
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return {"notifications_sent": 0, "timeline_url": ""}
+
+    timeline_result = regenerate_and_resend_timeline(
+        transaction_id=transaction_id,
+        reason="date_change_undo" if is_undo else "date_change_cascade",
+        force=True,
+        send_vendor_notifications=False,
+    )
+    timeline_url = timeline_result.get("timeline_url") if isinstance(timeline_result, dict) else ""
+    if not send_notifications:
+        return {"notifications_sent": 0, "timeline_url": timeline_url}
+
+    date_label = (date_field or "").replace("_", " ").title()
+    old_label = old_date.strftime("%b %d, %Y") if isinstance(old_date, date) else "Unknown"
+    new_label = new_date.strftime("%b %d, %Y") if isinstance(new_date, date) else "Unknown"
+    property_address = transaction.get("property_address") or "the transaction"
+
+    sms_message = (
+        f"Disregard previous date-change notice for {property_address}. "
+        f"{date_label} is restored to {new_label}."
+        if is_undo
+        else (
+            f"{date_label} for {property_address} moved from {old_label} to {new_label}. "
+            "Updated timeline sent by email."
+        )
+    )
+    sms_recipients = _unique_nonempty(
+        [
+            normalize_phone(transaction.get("agent_phone")),
+            normalize_phone(transaction.get("buyer_phone")),
+            normalize_phone(transaction.get("seller_phone")),
+        ]
+    )
+    notifications_sent = 0
+    for recipient in sms_recipients:
+        sid = send_sms(recipient, sms_message)
+        if sid:
+            notifications_sent += 1
+
+    client_emails = _fetch_transaction_client_emails(transaction_id)
+    email_targets = _unique_nonempty(
+        [
+            normalize_email(transaction.get("agent_email")),
+            normalize_email(client_emails.get("buyer")),
+            normalize_email(client_emails.get("seller")),
+            normalize_email(transaction.get("lender_email")),
+            normalize_email(transaction.get("title_officer_email")),
+        ]
+    )
+    attachments = []
+    if timeline_url and not is_undo:
+        attachments.append(
+            {
+                "filename": f"timeline_transaction_{transaction_id}.pdf",
+                "content_type": "application/pdf",
+                "url": timeline_url,
+            }
+        )
+
+    for target in email_targets:
+        message_id = send_email(
+            to=target,
+            template="emails/date_change_notification.html",
+            data={
+                "subject": (
+                    f"Maverick TC - Disregard prior date update - {property_address}"
+                    if is_undo
+                    else f"Maverick TC - Date update for {property_address}"
+                ),
+                "transaction": transaction,
+                "field_changed": date_field,
+                "field_label": date_label,
+                "old_date": old_date,
+                "new_date": new_date,
+                "old_date_label": old_label,
+                "new_date_label": new_label,
+                "changes": cascade_results,
+                "timeline_url": timeline_url,
+                "is_undo": is_undo,
+            },
+            attachments=attachments if attachments else None,
+        )
+        if message_id:
+            notifications_sent += 1
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'date_cascade', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Date cascade notifications sent" if not is_undo else "Date cascade undo notifications sent",
+            (
+                f"field={date_field} old={old_label} new={new_label} "
+                f"deadlines={int(cascade_results.get('deadlines_updated') or 0)} "
+                f"tasks={int(cascade_results.get('tasks_updated') or 0)} "
+                f"calendar={int(cascade_results.get('calendar_events_updated') or 0)} "
+                f"notifications={notifications_sent} "
+                f"undo={is_undo}"
+            ),
+        ),
+    )
+    return {"notifications_sent": notifications_sent, "timeline_url": timeline_url}
+
+
+def record_date_cascade_log(
+    transaction_id,
+    date_field,
+    old_date,
+    new_date,
+    delta_days,
+    cascade_options,
+    snapshot,
+    results,
+    initiated_by,
+):
+    ensure_date_cascade_tables()
+    return execute_insert(
+        """
+        INSERT INTO transaction_date_cascade_log (
+            transaction_id,
+            date_field,
+            old_date,
+            new_date,
+            delta_days,
+            cascade_options,
+            snapshot,
+            results,
+            initiated_by,
+            created_at,
+            expires_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '24 hours')
+        RETURNING id
+        """,
+        (
+            int(transaction_id),
+            (date_field or "").strip().lower(),
+            old_date if isinstance(old_date, date) else None,
+            new_date if isinstance(new_date, date) else None,
+            int(delta_days or 0),
+            json.dumps(cascade_options or {}, default=str),
+            json.dumps(snapshot or {}, default=str),
+            json.dumps(results or {}, default=str),
+            (initiated_by or "margaret")[:100],
+        ),
+    )
+
+
+def fetch_recent_date_cascade_logs(transaction_id, limit=12):
+    ensure_date_cascade_tables()
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            transaction_id,
+            date_field,
+            old_date,
+            new_date,
+            delta_days,
+            cascade_options,
+            results,
+            initiated_by,
+            created_at,
+            expires_at,
+            undone_at
+        FROM transaction_date_cascade_log
+        WHERE transaction_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT %s
+        """,
+        (int(transaction_id), max(1, min(int(limit or 12), 40))),
+        fetch=True,
+    ) or []
+    for row in rows:
+        row["cascade_options"] = parse_json_field(row.get("cascade_options"), {})
+        row["results"] = parse_json_field(row.get("results"), {})
+        row["created_at_label"] = format_timestamp_label(row.get("created_at"))
+        row["expires_at_label"] = format_timestamp_label(row.get("expires_at"))
+        row["undo_available"] = bool(
+            row.get("undone_at") is None
+            and isinstance(row.get("expires_at"), datetime)
+            and row["expires_at"] >= datetime.now()
+        )
+        row["field_label"] = (row.get("date_field") or "").replace("_", " ").title()
+        row["old_date_label"] = format_date_label(row.get("old_date"))
+        row["new_date_label"] = format_date_label(row.get("new_date"))
+    return rows
+
+
+def fetch_date_cascade_log_for_undo(transaction_id, cascade_log_id):
+    ensure_date_cascade_tables()
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            transaction_id,
+            date_field,
+            old_date,
+            new_date,
+            delta_days,
+            cascade_options,
+            snapshot,
+            results,
+            created_at,
+            expires_at,
+            undone_at
+        FROM transaction_date_cascade_log
+        WHERE id = %s
+          AND transaction_id = %s
+        LIMIT 1
+        """,
+        (int(cascade_log_id), int(transaction_id)),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    row["cascade_options"] = parse_json_field(row.get("cascade_options"), {})
+    row["snapshot"] = parse_json_field(row.get("snapshot"), {})
+    row["results"] = parse_json_field(row.get("results"), {})
+    return row
+
+
+def undo_date_cascade_change(transaction_id, cascade_log_id):
+    """Revert cascaded changes from a log entry within 24 hours."""
+    log_row = fetch_date_cascade_log_for_undo(transaction_id, cascade_log_id)
+    if not log_row:
+        return {"success": False, "error": "cascade_log_not_found"}
+    if log_row.get("undone_at"):
+        return {"success": False, "error": "already_undone"}
+    expires_at = log_row.get("expires_at")
+    if isinstance(expires_at, datetime) and expires_at < datetime.now():
+        return {"success": False, "error": "undo_window_expired"}
+
+    snapshot = log_row.get("snapshot") if isinstance(log_row.get("snapshot"), dict) else {}
+    transaction_dates = snapshot.get("transaction_dates") if isinstance(snapshot.get("transaction_dates"), dict) else {}
+    tx_updates = {}
+    for column, raw_value in transaction_dates.items():
+        if column not in DATE_CASCADE_TRANSACTION_COLUMNS:
+            continue
+        parsed = _parse_iso_date(raw_value)
+        if parsed:
+            tx_updates[column] = parsed
+        else:
+            # allow explicit clearing
+            tx_updates[column] = None
+
+    if tx_updates:
+        set_parts = []
+        params = []
+        for key, value in tx_updates.items():
+            set_parts.append(f"{key} = %s")
+            params.append(value)
+        params.append(int(transaction_id))
+        execute_query(
+            f"""
+            UPDATE transactions
+            SET {", ".join(set_parts)},
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            tuple(params),
+        )
+
+    for item in snapshot.get("deadlines") or []:
+        row_id = parse_optional_int((item or {}).get("id"))
+        parsed = _parse_iso_date((item or {}).get("old_date"))
+        if not row_id:
+            continue
+        execute_query(
+            """
+            UPDATE deadlines
+            SET deadline_date = %s
+            WHERE id = %s
+              AND transaction_id = %s
+            """,
+            (parsed, row_id, int(transaction_id)),
+        )
+
+    for item in snapshot.get("tasks") or []:
+        row_id = parse_optional_int((item or {}).get("id"))
+        parsed = _parse_iso_date((item or {}).get("old_date"))
+        if not row_id:
+            continue
+        execute_query(
+            """
+            UPDATE tasks
+            SET due_date = %s
+            WHERE id = %s
+              AND transaction_id = %s
+            """,
+            (parsed, row_id, int(transaction_id)),
+        )
+
+    for item in snapshot.get("appointments") or []:
+        row_id = parse_optional_int((item or {}).get("id"))
+        parsed = _parse_iso_datetime((item or {}).get("old_at"))
+        if not row_id:
+            continue
+        execute_query(
+            """
+            UPDATE vendor_outreach
+            SET appointment_at = %s
+            WHERE id = %s
+              AND transaction_id = %s
+            """,
+            (parsed, row_id, int(transaction_id)),
+        )
+
+    options = normalize_date_cascade_options(log_row.get("cascade_options"))
+    calendar_summary = sync_transaction_calendar_bundle(
+        transaction_id=transaction_id,
+        actor=session.get("tc_username", "margaret"),
+        force_update=True,
+        include_deadlines=options.get("update_deadlines", True),
+        include_closing=True,
+        include_vendor_events=options.get("reschedule_appointments", True),
+    )
+    notification_result = notify_date_change(
+        transaction_id=transaction_id,
+        date_field=log_row.get("date_field"),
+        old_date=log_row.get("new_date"),
+        new_date=log_row.get("old_date"),
+        cascade_results=parse_json_field(log_row.get("results"), {}),
+        send_notifications=True,
+        is_undo=True,
+    )
+    undo_summary = {
+        "calendar_summary": calendar_summary,
+        "notifications_sent": int(notification_result.get("notifications_sent") or 0),
+        "undone_by": session.get("tc_username", "margaret"),
+        "undone_at": datetime.now().isoformat(),
+    }
+    execute_query(
+        """
+        UPDATE transaction_date_cascade_log
+        SET undone_at = CURRENT_TIMESTAMP,
+            undo_summary = %s::jsonb
+        WHERE id = %s
+          AND transaction_id = %s
+        """,
+        (json.dumps(undo_summary, default=str), int(cascade_log_id), int(transaction_id)),
+    )
+    return {"success": True, "undo_summary": undo_summary}
+
+
 def document_due_status(target_date, is_complete):
     """Return status class for tasks/deadlines."""
     if is_complete:
@@ -13114,6 +14101,19 @@ def tc_transaction(transaction_id):
         or ""
     )
 
+    ensure_date_cascade_tables()
+    date_cascade_history = fetch_recent_date_cascade_logs(transaction_id, limit=12)
+    date_cascade_fields = []
+    for field_name in sorted(DATE_CASCADE_SUPPORTED_FIELDS):
+        field_value = transaction.get(field_name)
+        date_cascade_fields.append(
+            {
+                "field": field_name,
+                "label": field_name.replace("_", " ").title(),
+                "value": field_value.isoformat() if isinstance(field_value, date) else "",
+            }
+        )
+
     task_preview = []
     task_total = 0
     if status == "ACTIVE":
@@ -13230,8 +14230,239 @@ def tc_transaction(transaction_id):
             "pending_review_count": analysis_pending_review_count,
             "action_item_count": analysis_action_item_count,
         },
+        date_cascade_fields=date_cascade_fields,
+        date_cascade_history=date_cascade_history,
         document_classification_types=DOCUMENT_CLASSIFICATION_OVERRIDE_TYPES,
         common_qa_categories=COMMON_QA_CATEGORY_OPTIONS,
+    )
+
+
+@app.route("/tc/transaction/<int:transaction_id>/update-date", methods=["POST"])
+@login_required
+def update_transaction_date(transaction_id):
+    """
+    Update a key transaction date and cascade dependent changes.
+    Supports preview mode when payload includes preview_only=true.
+    """
+    ensure_date_cascade_tables()
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return jsonify({"success": False, "error": "Transaction not found"}), 404
+    if (transaction.get("status") or "").upper() in {"COMPLETED", "CANCELLED"}:
+        return jsonify({"success": False, "error": "Transaction cannot be modified"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    date_field = (payload.get("field") or "").strip().lower()
+    if date_field not in DATE_CASCADE_SUPPORTED_FIELDS:
+        return jsonify({"success": False, "error": "Unsupported date field"}), 400
+
+    provided_old_date = _parse_iso_date(payload.get("old_date"))
+    current_old_date = transaction.get(date_field)
+    old_date = provided_old_date or current_old_date
+    if not isinstance(old_date, date):
+        return jsonify({"success": False, "error": "Old date is required"}), 400
+
+    new_date = _parse_iso_date(payload.get("new_date"))
+    if not isinstance(new_date, date):
+        return jsonify({"success": False, "error": "New date is required (YYYY-MM-DD)"}), 400
+
+    delta_days = (new_date - old_date).days
+    cascade_options = normalize_date_cascade_options(payload.get("cascade_options"))
+    preview_only = parse_bool_value(payload.get("preview_only"), default=False)
+    force_apply = parse_bool_value(payload.get("force"), default=False)
+
+    stale_warning = None
+    if isinstance(current_old_date, date) and current_old_date != old_date:
+        stale_warning = (
+            f"Current {date_field} is {current_old_date.isoformat()}, "
+            f"but request expected {old_date.isoformat()}."
+        )
+
+    estimate = estimate_date_cascade_changes(
+        transaction_id=transaction_id,
+        date_field=date_field,
+        delta_days=delta_days,
+        cascade_options=cascade_options,
+        old_date=old_date,
+        new_date=new_date,
+    )
+    if stale_warning:
+        estimate_conflicts = estimate.get("conflicts") if isinstance(estimate.get("conflicts"), list) else []
+        estimate_conflicts.insert(0, {"severity": "warning", "message": stale_warning})
+        estimate["conflicts"] = estimate_conflicts
+        estimate["requires_confirmation"] = True
+
+    if preview_only:
+        return jsonify({"success": True, "preview": estimate})
+
+    if delta_days == 0 and isinstance(current_old_date, date) and current_old_date == new_date:
+        return jsonify(
+            {
+                "success": True,
+                "changes": {
+                    "deadlines_updated": 0,
+                    "tasks_updated": 0,
+                    "appointments_updated": 0,
+                    "calendar_events_updated": 0,
+                    "notifications_sent": 0,
+                },
+                "notifications_sent": 0,
+                "delta_days": 0,
+                "cascade_log_id": None,
+            }
+        )
+
+    if estimate.get("requires_confirmation") and not force_apply:
+        return jsonify(
+            {
+                "success": False,
+                "error": "confirmation_required",
+                "message": "Date change requires confirmation due to detected conflicts.",
+                "preview": estimate,
+                "requires_confirmation": True,
+            }
+        ), 409
+
+    execute_query(
+        f"""
+        UPDATE transactions
+        SET {date_field} = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (new_date, int(transaction_id)),
+    )
+
+    cascade_result = cascade_date_change(
+        transaction_id=transaction_id,
+        date_field=date_field,
+        delta_days=delta_days,
+        old_date=old_date,
+        new_date=new_date,
+        cascade_options=cascade_options,
+        initiated_by=session.get("tc_username", "margaret"),
+    )
+    changes = cascade_result.get("changes") if isinstance(cascade_result.get("changes"), dict) else {}
+    if not changes:
+        changes = {
+            "deadlines_updated": 0,
+            "tasks_updated": 0,
+            "appointments_updated": 0,
+            "calendar_events_updated": 0,
+            "notifications_sent": 0,
+        }
+
+    notification_result = notify_date_change(
+        transaction_id=transaction_id,
+        date_field=date_field,
+        old_date=old_date,
+        new_date=new_date,
+        cascade_results=changes,
+        send_notifications=cascade_options.get("notify_parties", True),
+        is_undo=False,
+    )
+    changes["notifications_sent"] = int(notification_result.get("notifications_sent") or 0)
+    if notification_result.get("timeline_url"):
+        changes["timeline_url"] = notification_result.get("timeline_url")
+
+    cascade_log_id = record_date_cascade_log(
+        transaction_id=transaction_id,
+        date_field=date_field,
+        old_date=old_date,
+        new_date=new_date,
+        delta_days=delta_days,
+        cascade_options=cascade_options,
+        snapshot=cascade_result.get("snapshot"),
+        results=changes,
+        initiated_by=session.get("tc_username", "margaret"),
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'date_cascade', %s, %s)
+        """,
+        (
+            int(transaction_id),
+            "Transaction date cascade applied",
+            (
+                f"field={date_field} old={old_date.isoformat()} new={new_date.isoformat()} delta={delta_days} "
+                f"deadlines={int(changes.get('deadlines_updated') or 0)} "
+                f"tasks={int(changes.get('tasks_updated') or 0)} "
+                f"calendar={int(changes.get('calendar_events_updated') or 0)} "
+                f"notifications={int(changes.get('notifications_sent') or 0)}"
+            ),
+        ),
+    )
+    return jsonify(
+        {
+            "success": True,
+            "changes": changes,
+            "notifications_sent": int(changes.get("notifications_sent") or 0),
+            "delta_days": delta_days,
+            "cascade_log_id": cascade_log_id,
+        }
+    )
+
+
+@app.route("/tc/transaction/<int:transaction_id>/update-date/undo", methods=["POST"])
+@login_required
+def undo_transaction_date_change(transaction_id):
+    """Undo a cascaded date change within the 24-hour window."""
+    ensure_date_cascade_tables()
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return jsonify({"success": False, "error": "Transaction not found"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    cascade_log_id = parse_optional_int(payload.get("cascade_log_id"))
+    if not cascade_log_id:
+        rows = execute_query(
+            """
+            SELECT id
+            FROM transaction_date_cascade_log
+            WHERE transaction_id = %s
+              AND undone_at IS NULL
+              AND expires_at >= CURRENT_TIMESTAMP
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (int(transaction_id),),
+            fetch=True,
+        ) or []
+        if rows:
+            cascade_log_id = rows[0]["id"]
+
+    if not cascade_log_id:
+        return jsonify({"success": False, "error": "No undoable date change found"}), 404
+
+    result = undo_date_cascade_change(transaction_id=transaction_id, cascade_log_id=cascade_log_id)
+    if not result.get("success"):
+        error = result.get("error") or "undo_failed"
+        status_code = 409 if error in {"already_undone", "undo_window_expired"} else 400
+        return jsonify({"success": False, "error": error}), status_code
+
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'date_cascade', %s, %s)
+        """,
+        (
+            int(transaction_id),
+            "Date cascade undo applied",
+            f"cascade_log_id={cascade_log_id}",
+        ),
+    )
+    return jsonify(
+        {
+            "success": True,
+            "cascade_log_id": cascade_log_id,
+            "undo_summary": result.get("undo_summary") or {},
+        }
     )
 
 

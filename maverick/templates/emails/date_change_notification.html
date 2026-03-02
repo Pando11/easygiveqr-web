@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ subject or "Maverick TC Date Update" }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.5; color: #1f2937; }
+        .container { max-width: 640px; margin: 0 auto; padding: 18px; }
+        .card { border: 1px solid #dbe3ee; border-radius: 10px; padding: 16px; background: #ffffff; }
+        .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+        .badge-warning { background: #fffbeb; color: #92400e; }
+        .badge-info { background: #eff6ff; color: #1e40af; }
+        .muted { color: #64748b; font-size: 13px; }
+        ul { padding-left: 20px; }
+        a { color: #1d4ed8; text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="card">
+        {% if is_undo %}
+        <span class="badge badge-warning">Disregard Previous Notice</span>
+        <h2>Date update reversed for {{ transaction.property_address }}</h2>
+        <p>
+            Please disregard the prior date-change notice.
+            <strong>{{ field_label or field_changed|replace('_', ' ')|title }}</strong> is restored to
+            <strong>{{ new_date_label }}</strong>.
+        </p>
+        {% else %}
+        <span class="badge badge-info">Date Change Notification</span>
+        <h2>{{ field_label or field_changed|replace('_', ' ')|title }} updated for {{ transaction.property_address }}</h2>
+        <p>
+            <strong>Previous:</strong> {{ old_date_label }}<br>
+            <strong>New:</strong> {{ new_date_label }}
+        </p>
+        {% endif %}
+
+        {% if changes %}
+        <h3>Automatic updates applied</h3>
+        <ul>
+            <li>Deadlines updated: {{ changes.deadlines_updated or 0 }}</li>
+            <li>Tasks updated: {{ changes.tasks_updated or 0 }}</li>
+            <li>Appointments rescheduled: {{ changes.appointments_updated or 0 }}</li>
+            <li>Calendar events updated: {{ changes.calendar_events_updated or 0 }}</li>
+        </ul>
+        {% endif %}
+
+        {% if timeline_url and not is_undo %}
+        <p>
+            Updated timeline: <a href="{{ timeline_url }}" target="_blank" rel="noopener">{{ timeline_url }}</a>
+        </p>
+        {% endif %}
+
+        <p class="muted">This update was sent by Maverick TC automation.</p>
+    </div>
+</div>
+</body>
+</html>

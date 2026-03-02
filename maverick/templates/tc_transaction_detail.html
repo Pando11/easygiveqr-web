@@ -736,6 +736,68 @@
             {% endif %}
         </article>
 
+        <article class="card" id="date-cascade">
+            <h3>Automatic Cascade Date Update</h3>
+            <p class="hint-text">
+                Change a key date once and Maverick can update dependent deadlines/tasks/calendar + notify parties.
+            </p>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label for="cascadeField">Date Field</label>
+                    <select id="cascadeField">
+                        {% for item in date_cascade_fields %}
+                        <option value="{{ item.field }}" {% if item.field == 'closing_date' %}selected{% endif %}>
+                            {{ item.label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="cascadeNewDate">New Date</label>
+                    <input type="date" id="cascadeNewDate">
+                </div>
+            </div>
+            <p class="hint-text" id="cascadeCurrentDateLabel">Current date: --</p>
+
+            <div class="cascade-option-grid">
+                <label class="checkbox-row"><input type="checkbox" id="optDeadlines" checked> Update deadlines</label>
+                <label class="checkbox-row"><input type="checkbox" id="optAppointments" checked> Reschedule appointments</label>
+                <label class="checkbox-row"><input type="checkbox" id="optTasks" checked> Update tasks</label>
+                <label class="checkbox-row"><input type="checkbox" id="optCalendar" checked> Sync Google Calendar</label>
+                <label class="checkbox-row"><input type="checkbox" id="optNotify" checked> Notify parties</label>
+            </div>
+            <button type="button" class="btn btn-secondary action-btn" id="previewCascadeBtn">Preview Cascade Changes</button>
+
+            {% if date_cascade_history %}
+            <details style="margin-top:12px;">
+                <summary class="summary-btn">Recent date cascades ({{ date_cascade_history|length }})</summary>
+                <ul class="simple-list compact-list">
+                    {% for entry in date_cascade_history %}
+                    <li class="list-row">
+                        <div>
+                            <strong>{{ entry.field_label }}</strong>:
+                            {{ entry.old_date_label }} → {{ entry.new_date_label }}
+                            <p class="small-muted">Applied {{ entry.created_at_label }}</p>
+                            {% if entry.undo_available %}
+                            <small class="pill-status">Undo available until {{ entry.expires_at_label }}</small>
+                            {% else %}
+                            <small class="small-muted">Undo unavailable</small>
+                            {% endif %}
+                        </div>
+                        {% if entry.undo_available %}
+                        <button type="button"
+                                class="btn btn-small btn-secondary undo-cascade-btn"
+                                data-cascade-log-id="{{ entry.id }}">
+                            Undo
+                        </button>
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% endif %}
+        </article>
+
         <article class="card" id="timeline-pdf">
             <h3>Transaction Timeline PDF</h3>
             {% if timeline_pdf_url %}
@@ -930,6 +992,22 @@
         </article>
     </div>
 </section>
+
+<div class="cascade-modal-backdrop" id="cascadeModalBackdrop">
+    <div class="cascade-modal" role="dialog" aria-modal="true" aria-labelledby="cascadeModalTitle">
+        <h3 id="cascadeModalTitle">Confirm Cascade Update</h3>
+        <p id="cascadeModalIntro" class="hint-text"></p>
+        <ul class="simple-list compact-list" id="cascadeModalSummary"></ul>
+        <div class="warning-box" id="cascadeConflictBox" style="display:none;">
+            <strong>Conflicts detected:</strong>
+            <ul id="cascadeConflictList"></ul>
+        </div>
+        <div class="actions-inline">
+            <button type="button" class="btn btn-secondary" id="cancelCascadeBtn">Cancel</button>
+            <button type="button" class="btn" id="confirmCascadeBtn">Confirm Changes</button>
+        </div>
+    </div>
+</div>
 {% else %}
 <section class="card summary-card">
     <h3>{{ "Completed Transaction Summary" if status == "COMPLETED" else "Transaction Summary" }}</h3>
@@ -1674,6 +1752,45 @@
     text-align: center;
 }
 
+.cascade-option-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin: 8px 0 10px;
+}
+
+.cascade-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 4000;
+}
+
+.cascade-modal-backdrop.open {
+    display: flex;
+}
+
+.cascade-modal {
+    width: min(680px, 100%);
+    background: #ffffff;
+    border-radius: 12px;
+    border: 1px solid #cbd5e1;
+    box-shadow: 0 18px 45px rgba(15, 23, 42, 0.28);
+    padding: 18px;
+}
+
+.cascade-modal h3 {
+    margin-bottom: 8px;
+}
+
+#cascadeModalSummary li {
+    align-items: flex-start;
+}
+
 .portal-links-box {
     border: 1px solid #dbeafe;
     background: #f8fbff;
@@ -1727,7 +1844,8 @@
     .grid-2,
     .upload-row,
     .email-status-grid,
-    .doc-correction-row {
+    .doc-correction-row,
+    .cascade-option-grid {
         grid-template-columns: 1fr;
     }
 }
@@ -1796,6 +1914,239 @@ if (acceptHighConfidenceBtn) {
             if (inputEl.dataset.suggested) {
                 inputEl.value = inputEl.dataset.suggested;
             }
+        });
+    });
+}
+
+const cascadeFieldOptions = {{ date_cascade_fields | tojson }};
+const cascadeFieldSelect = document.getElementById("cascadeField");
+const cascadeNewDateInput = document.getElementById("cascadeNewDate");
+const cascadeCurrentDateLabel = document.getElementById("cascadeCurrentDateLabel");
+const previewCascadeBtn = document.getElementById("previewCascadeBtn");
+const cascadeModalBackdrop = document.getElementById("cascadeModalBackdrop");
+const cascadeModalIntro = document.getElementById("cascadeModalIntro");
+const cascadeModalSummary = document.getElementById("cascadeModalSummary");
+const cascadeConflictBox = document.getElementById("cascadeConflictBox");
+const cascadeConflictList = document.getElementById("cascadeConflictList");
+const cancelCascadeBtn = document.getElementById("cancelCascadeBtn");
+const confirmCascadeBtn = document.getElementById("confirmCascadeBtn");
+let pendingCascadePayload = null;
+
+function getCascadeOptionValues() {
+    return {
+        update_deadlines: document.getElementById("optDeadlines")?.checked ?? true,
+        reschedule_appointments: document.getElementById("optAppointments")?.checked ?? true,
+        update_tasks: document.getElementById("optTasks")?.checked ?? true,
+        sync_calendar: document.getElementById("optCalendar")?.checked ?? true,
+        notify_parties: document.getElementById("optNotify")?.checked ?? true,
+    };
+}
+
+function selectedCascadeFieldMeta() {
+    if (!cascadeFieldSelect) {
+        return null;
+    }
+    const field = cascadeFieldSelect.value;
+    return cascadeFieldOptions.find((item) => item.field === field) || null;
+}
+
+function humanDate(isoDate) {
+    if (!isoDate) return "Not set";
+    const parsed = new Date(`${isoDate}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return isoDate;
+    return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function updateCascadeCurrentDateDisplay() {
+    if (!cascadeFieldSelect || !cascadeCurrentDateLabel || !cascadeNewDateInput) {
+        return;
+    }
+    const meta = selectedCascadeFieldMeta();
+    const currentValue = (meta && meta.value) || "";
+    cascadeCurrentDateLabel.textContent = `Current date: ${humanDate(currentValue)}`;
+    if (!cascadeNewDateInput.value && currentValue) {
+        cascadeNewDateInput.value = currentValue;
+    }
+}
+
+function openCascadeModal() {
+    if (!cascadeModalBackdrop) return;
+    cascadeModalBackdrop.classList.add("open");
+}
+
+function closeCascadeModal() {
+    if (!cascadeModalBackdrop) return;
+    cascadeModalBackdrop.classList.remove("open");
+}
+
+function renderCascadePreview(preview, fieldLabel, oldDate, newDate) {
+    if (!cascadeModalSummary || !cascadeModalIntro) return;
+    const delta = Number(preview.delta_days || 0);
+    const deltaLabel = delta > 0 ? `+${delta}` : `${delta}`;
+    cascadeModalIntro.textContent = `${fieldLabel} changed to ${humanDate(newDate)} (${deltaLabel} days)`;
+    cascadeModalSummary.innerHTML = "";
+    const options = getCascadeOptionValues();
+    const summaryRows = [];
+    if (options.update_deadlines) {
+        summaryRows.push(`Update ${preview.deadlines_updated || 0} deadlines`);
+    }
+    if (options.reschedule_appointments) {
+        summaryRows.push(`Reschedule ${preview.appointments_updated || 0} appointments`);
+    }
+    if (options.update_tasks) {
+        summaryRows.push(`Adjust ${preview.tasks_updated || 0} tasks`);
+    }
+    if (options.sync_calendar) {
+        summaryRows.push(`Update Google Calendar (${preview.calendar_events_updated || 0} events)`);
+    }
+    if (options.notify_parties) {
+        summaryRows.push("Notify buyer, seller, agent, lender, title");
+    }
+    summaryRows.push("Regenerate timeline PDF");
+    summaryRows.forEach((line) => {
+        const li = document.createElement("li");
+        li.className = "list-row";
+        li.innerHTML = `<span>✓ ${line}</span>`;
+        cascadeModalSummary.appendChild(li);
+    });
+
+    const conflicts = Array.isArray(preview.conflicts) ? preview.conflicts : [];
+    if (conflicts.length > 0) {
+        cascadeConflictList.innerHTML = "";
+        conflicts.forEach((item) => {
+            const li = document.createElement("li");
+            li.textContent = item.message || "Potential conflict detected";
+            cascadeConflictList.appendChild(li);
+        });
+        cascadeConflictBox.style.display = "block";
+    } else {
+        cascadeConflictBox.style.display = "none";
+        cascadeConflictList.innerHTML = "";
+    }
+}
+
+async function requestCascadePreview() {
+    const fieldMeta = selectedCascadeFieldMeta();
+    if (!fieldMeta) {
+        alert("Select a date field.");
+        return;
+    }
+    const oldDate = fieldMeta.value;
+    const newDate = cascadeNewDateInput?.value || "";
+    if (!oldDate) {
+        alert("Current value is not set for this field.");
+        return;
+    }
+    if (!newDate) {
+        alert("Select a new date.");
+        return;
+    }
+    const payload = {
+        field: fieldMeta.field,
+        old_date: oldDate,
+        new_date: newDate,
+        cascade_options: getCascadeOptionValues(),
+        preview_only: true,
+    };
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/update-date`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+            throw new Error(data.error || data.message || "Preview failed");
+        }
+        const preview = data.preview || {};
+        pendingCascadePayload = {
+            field: fieldMeta.field,
+            old_date: oldDate,
+            new_date: newDate,
+            cascade_options: getCascadeOptionValues(),
+            preview_only: false,
+            force: true,
+        };
+        renderCascadePreview(preview, fieldMeta.label, oldDate, newDate);
+        openCascadeModal();
+    } catch (error) {
+        alert(`Preview failed: ${error.message}`);
+    }
+}
+
+async function applyCascadeDateChange() {
+    if (!pendingCascadePayload) {
+        closeCascadeModal();
+        return;
+    }
+    confirmCascadeBtn.disabled = true;
+    const originalText = confirmCascadeBtn.textContent;
+    confirmCascadeBtn.textContent = "Applying...";
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/update-date`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(pendingCascadePayload),
+        });
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+            throw new Error(data.message || data.error || "Date cascade failed");
+        }
+        const changes = data.changes || {};
+        alert(
+            `✅ Date change applied\n` +
+            `Deadlines updated: ${changes.deadlines_updated || 0}\n` +
+            `Tasks updated: ${changes.tasks_updated || 0}\n` +
+            `Calendar events updated: ${changes.calendar_events_updated || 0}\n` +
+            `Notifications sent: ${data.notifications_sent || 0}`
+        );
+        window.location.reload();
+    } catch (error) {
+        alert(`Date change failed: ${error.message}`);
+    } finally {
+        confirmCascadeBtn.disabled = false;
+        confirmCascadeBtn.textContent = originalText;
+    }
+}
+
+async function undoCascadeChange(cascadeLogId) {
+    if (!cascadeLogId) {
+        return;
+    }
+    if (!window.confirm("Undo this date cascade and notify parties to disregard prior message?")) {
+        return;
+    }
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/update-date/undo`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cascade_log_id: Number(cascadeLogId) }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+            throw new Error(data.error || "Undo failed");
+        }
+        alert("Date cascade undone successfully.");
+        window.location.reload();
+    } catch (error) {
+        alert(`Undo failed: ${error.message}`);
+    }
+}
+
+if (cascadeFieldSelect && previewCascadeBtn) {
+    updateCascadeCurrentDateDisplay();
+    cascadeFieldSelect.addEventListener("change", updateCascadeCurrentDateDisplay);
+    previewCascadeBtn.addEventListener("click", requestCascadePreview);
+    cancelCascadeBtn?.addEventListener("click", closeCascadeModal);
+    confirmCascadeBtn?.addEventListener("click", applyCascadeDateChange);
+    cascadeModalBackdrop?.addEventListener("click", (event) => {
+        if (event.target === cascadeModalBackdrop) {
+            closeCascadeModal();
+        }
+    });
+    document.querySelectorAll(".undo-cascade-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+            undoCascadeChange(button.dataset.cascadeLogId);
         });
     });
 }

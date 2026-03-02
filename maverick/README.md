@@ -398,6 +398,29 @@ Behavior:
 - one-click commit uploads all approved docs, runs post-upload task automation, and launches async document analysis
 - dashboard shows pending staged count and supports shortcut `Ctrl+U`
 
+## Automatic Cascade Date Updates + Undo
+
+Margaret can now update key transaction dates with a confirmation preview and controlled cascade behavior.
+
+- API route: `POST /tc/transaction/<transaction_id>/update-date`
+  - preview mode: `preview_only=true` to estimate updates/conflicts before apply
+- Undo route: `POST /tc/transaction/<transaction_id>/update-date/undo`
+- UI location: transaction detail page (`#date-cascade`)
+
+Capabilities:
+- conflict detection before apply:
+  - closing date before appraisal appointment
+  - closing date before financing approval date
+  - weekend/holiday warnings with next-business-day suggestion
+- partial cascades via checkboxes:
+  - update deadlines
+  - reschedule appointments
+  - update tasks
+  - sync Google Calendar
+  - notify parties
+- automatic timeline regeneration on date update
+- 24-hour undo window with reverse notifications ("disregard previous message")
+
 ## Timeline Packet + Vendor Outreach Automation
 
 After Margaret approves and activates a transaction, Maverick:
