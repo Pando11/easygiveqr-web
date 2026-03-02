@@ -4848,6 +4848,62 @@ def fetch_pending_email_draft_count():
     return int((rows[0] or {}).get("pending_count") or 0) if rows else 0
 
 
+def _email_draft_confidence_bucket(confidence_value):
+    confidence = float(confidence_value or 0.0)
+    if confidence > 1:
+        confidence = confidence / 100.0
+    confidence = max(0.0, min(confidence, 1.0))
+    if confidence >= 0.85:
+        return "high", confidence
+    if confidence >= 0.60:
+        return "medium", confidence
+    return "low", confidence
+
+
+def fetch_email_draft_triage(limit_each=1):
+    """Return dashboard triage cards grouped by confidence bucket."""
+    ensure_email_draft_tables()
+    rows = execute_query(
+        """
+        SELECT
+            id,
+            transaction_id,
+            from_email,
+            question_detected,
+            confidence,
+            created_at
+        FROM email_drafts
+        WHERE COALESCE(status, 'pending_review') = 'pending_review'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 300
+        """,
+        fetch=True,
+    ) or []
+    bucket_limit = max(1, min(int(limit_each or 1), 5))
+    grouped = {"high": [], "medium": [], "low": []}
+    for row in rows:
+        bucket, normalized_confidence = _email_draft_confidence_bucket(row.get("confidence"))
+        if len(grouped[bucket]) >= bucket_limit:
+            continue
+        grouped[bucket].append(
+            {
+                "id": int(row.get("id") or 0),
+                "transaction_id": parse_optional_int(row.get("transaction_id")),
+                "from_email": normalize_email(row.get("from_email") or ""),
+                "question_detected": (row.get("question_detected") or "General question").strip(),
+                "confidence": normalized_confidence,
+                "confidence_pct": int(round(normalized_confidence * 100)),
+                "created_at_ago": format_time_ago(row.get("created_at")),
+            }
+        )
+    return {
+        "pending_count": len(rows),
+        "high": grouped["high"],
+        "medium": grouped["medium"],
+        "low": grouped["low"],
+    }
+
+
 def infer_sender_display_name(sender_email):
     """Convert sender email local-part into display name."""
     local_part = (normalize_email(sender_email).split("@")[0] if sender_email else "").strip()
@@ -13482,6 +13538,7 @@ def tc_dashboard():
     uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
     pending_batch_upload_count = fetch_batch_upload_pending_count(uploaded_by)
     pending_email_draft_count = fetch_pending_email_draft_count()
+    email_draft_triage = fetch_email_draft_triage(limit_each=1)
     session["batch_upload_pending_count"] = pending_batch_upload_count
 
     notice = (request.args.get("notice") or "").strip()
@@ -13612,6 +13669,7 @@ def tc_dashboard():
         heads_up_urgent=heads_up_report["open_urgent"][:3],
         pending_batch_upload_count=pending_batch_upload_count,
         pending_email_draft_count=pending_email_draft_count,
+        email_draft_triage=email_draft_triage,
     )
 
 

@@ -48,6 +48,64 @@
     </div>
 </div>
 
+<section class="status-section section-indigo email-triage-section">
+    <div class="section-title-row">
+        <h3>📧 EMAIL DRAFTS ({{ email_draft_triage.pending_count }} pending)</h3>
+        <a href="/tc/email-drafts" class="btn btn-small btn-secondary">Open Draft Queue</a>
+    </div>
+    {% if email_draft_triage.pending_count > 0 %}
+    <div class="email-triage-grid">
+        <article class="triage-card triage-high">
+            <h4>🔴 HIGH CONFIDENCE - SEND QUICKLY</h4>
+            {% if email_draft_triage.high %}
+                {% set draft = email_draft_triage.high[0] %}
+                <p class="triage-question">"{{ draft.question_detected }}" ({{ draft.confidence_pct }}% confidence)</p>
+                <div class="triage-actions">
+                    <button class="btn btn-small" type="button" onclick="quickSendEmailDraft({{ draft.id }})">Send</button>
+                    <a class="btn btn-small btn-secondary" href="/tc/email-drafts#draft-card-{{ draft.id }}">View</a>
+                </div>
+            {% else %}
+                <p class="subtle">No high-confidence drafts right now.</p>
+            {% endif %}
+        </article>
+
+        <article class="triage-card triage-medium">
+            <h4>🟡 MEDIUM CONFIDENCE - REVIEW CAREFULLY</h4>
+            {% if email_draft_triage.medium %}
+                {% set draft = email_draft_triage.medium[0] %}
+                <p class="triage-question">"{{ draft.question_detected }}" ({{ draft.confidence_pct }}% confidence)</p>
+                <div class="triage-actions">
+                    <a class="btn btn-small btn-secondary" href="/tc/email-drafts#draft-card-{{ draft.id }}">Review &amp; Edit</a>
+                </div>
+            {% else %}
+                <p class="subtle">No medium-confidence drafts right now.</p>
+            {% endif %}
+        </article>
+
+        <article class="triage-card triage-low">
+            <h4>⚠️ LOW CONFIDENCE - NEEDS ATTENTION</h4>
+            {% if email_draft_triage.low %}
+                {% set draft = email_draft_triage.low[0] %}
+                <p class="triage-question">"{{ draft.question_detected }}" ({{ draft.confidence_pct }}% confidence)</p>
+                <div class="triage-actions">
+                    <button
+                        class="btn btn-small btn-secondary"
+                        type="button"
+                        onclick="handleLowConfidenceDraft({{ draft.id }}, {{ draft.transaction_id if draft.transaction_id else 'null' }})"
+                    >
+                        Handle Manually
+                    </button>
+                </div>
+            {% else %}
+                <p class="subtle">No low-confidence drafts right now.</p>
+            {% endif %}
+        </article>
+    </div>
+    {% else %}
+    <div class="empty-state">No pending email drafts.</div>
+    {% endif %}
+</section>
+
 <section class="status-section section-blue">
     <div class="section-title-row">
         <h3>📊 Transaction Health Summary</h3>
@@ -269,6 +327,11 @@
 .section-blue {
     border-left: 6px solid #2563eb;
     background: linear-gradient(180deg, #fff, #f8fbff);
+}
+
+.section-indigo {
+    border-left: 6px solid #4f46e5;
+    background: linear-gradient(180deg, #fff, #f5f3ff);
 }
 
 .section-title-row {
@@ -564,11 +627,54 @@
     font-size: 14px;
 }
 
+.email-triage-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.triage-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    background: #fff;
+    display: grid;
+    gap: 8px;
+}
+
+.triage-card h4 {
+    font-size: 14px;
+}
+
+.triage-high {
+    border-left: 4px solid #dc2626;
+}
+
+.triage-medium {
+    border-left: 4px solid #d97706;
+}
+
+.triage-low {
+    border-left: 4px solid #f59e0b;
+}
+
+.triage-question {
+    color: #0f172a;
+    margin: 0;
+}
+
+.triage-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 @media (max-width: 1024px) {
     .cards-grid,
     .cards-grid-compact,
     .health-summary-grid,
-    .heads-up-items-grid {
+    .heads-up-items-grid,
+    .email-triage-grid {
         grid-template-columns: 1fr;
     }
 }
@@ -636,6 +742,52 @@ async function refreshDraftCount() {
         }
     } catch (_error) {
         // Silent polling failure.
+    }
+}
+
+async function quickSendEmailDraft(draftId) {
+    if (!draftId) {
+        return;
+    }
+    if (!window.confirm("Send this high-confidence draft now?")) {
+        return;
+    }
+    try {
+        const response = await fetch(`/tc/email-draft/${draftId}/send`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({action: "send_as_is"}),
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.success === false) {
+            throw new Error(payload.error || "Unable to send draft");
+        }
+        window.location.reload();
+    } catch (error) {
+        alert(`Send failed: ${error.message}`);
+    }
+}
+
+async function handleLowConfidenceDraft(draftId, transactionId) {
+    if (!draftId) {
+        return;
+    }
+    if (!window.confirm("Mark this low-confidence draft for manual handling?")) {
+        return;
+    }
+    try {
+        const response = await fetch(`/tc/email-draft/${draftId}/reject`, {method: "POST"});
+        const payload = await response.json();
+        if (!response.ok || payload.success === false) {
+            throw new Error(payload.error || "Unable to mark draft for manual handling");
+        }
+        if (transactionId) {
+            window.location.href = `/tc/transaction/${transactionId}#communications`;
+            return;
+        }
+        window.location.href = `/tc/email-drafts`;
+    } catch (error) {
+        alert(`Action failed: ${error.message}`);
     }
 }
 
