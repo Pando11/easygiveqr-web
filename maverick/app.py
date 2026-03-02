@@ -4904,6 +4904,137 @@ def fetch_email_draft_triage(limit_each=1):
     }
 
 
+def _format_duration_compact(seconds_value):
+    """Return compact human label for duration in seconds."""
+    if seconds_value in (None, ""):
+        return "0 seconds"
+    try:
+        total_seconds = max(int(round(float(seconds_value))), 0)
+    except (TypeError, ValueError):
+        return "0 seconds"
+    if total_seconds < 60:
+        return f"{total_seconds} seconds"
+    total_minutes, remaining_seconds = divmod(total_seconds, 60)
+    if total_minutes < 60:
+        if remaining_seconds:
+            return f"{total_minutes}m {remaining_seconds}s"
+        return f"{total_minutes} minutes"
+    hours, remaining_minutes = divmod(total_minutes, 60)
+    if remaining_minutes:
+        return f"{hours}h {remaining_minutes}m"
+    return f"{hours} hours"
+
+
+def _format_hours_minutes(minutes_total):
+    """Return 'X hours Y minutes' label for integer minutes."""
+    try:
+        total_minutes = max(int(round(float(minutes_total))), 0)
+    except (TypeError, ValueError):
+        total_minutes = 0
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"{hours} hours {minutes} minutes"
+    if hours:
+        return f"{hours} hours"
+    return f"{minutes} minutes"
+
+
+def fetch_email_draft_performance_snapshot(week_days=7, month_days=30):
+    """Build email-draft performance metrics for dashboard reporting."""
+    ensure_email_draft_tables()
+    weekly_cutoff = datetime.now() - timedelta(days=max(1, int(week_days or 7)))
+    monthly_cutoff = datetime.now() - timedelta(days=max(1, int(month_days or 30)))
+
+    weekly_rows = execute_query(
+        """
+        SELECT
+            COUNT(*) AS drafts_generated,
+            COUNT(*) FILTER (WHERE COALESCE(status, '') = 'sent') AS sent_total,
+            COUNT(*) FILTER (WHERE COALESCE(status, '') = 'rejected') AS rejected_total,
+            AVG(EXTRACT(EPOCH FROM (reviewed_at - created_at))) FILTER (WHERE reviewed_at IS NOT NULL) AS avg_review_seconds
+        FROM email_drafts
+        WHERE created_at >= %s
+        """,
+        (weekly_cutoff,),
+        fetch=True,
+    ) or []
+    weekly = weekly_rows[0] if weekly_rows else {}
+    drafts_generated = int(weekly.get("drafts_generated") or 0)
+    avg_review_seconds = float(weekly.get("avg_review_seconds") or 0.0)
+
+    feedback_rows = execute_query(
+        """
+        WITH weekly_drafts AS (
+            SELECT id
+            FROM email_drafts
+            WHERE created_at >= %s
+        ),
+        latest_feedback AS (
+            SELECT DISTINCT ON (f.draft_id)
+                f.draft_id,
+                f.feedback_type
+            FROM email_draft_feedback f
+            JOIN weekly_drafts wd ON wd.id = f.draft_id
+            ORDER BY f.draft_id, f.created_at DESC, f.id DESC
+        )
+        SELECT
+            COUNT(*) FILTER (WHERE feedback_type = 'sent_as_is') AS sent_as_is,
+            COUNT(*) FILTER (WHERE feedback_type = 'edited_before_send') AS edited_before_send,
+            COUNT(*) FILTER (WHERE feedback_type = 'rejected') AS rejected_feedback
+        FROM latest_feedback
+        """,
+        (weekly_cutoff,),
+        fetch=True,
+    ) or []
+    feedback = feedback_rows[0] if feedback_rows else {}
+    sent_as_is = int(feedback.get("sent_as_is") or 0)
+    edited_before_send = int(feedback.get("edited_before_send") or 0)
+    rejected = int(feedback.get("rejected_feedback") or 0)
+
+    # Fallbacks if feedback rows are absent for older historical records.
+    if drafts_generated > 0 and (sent_as_is + edited_before_send + rejected) == 0:
+        sent_total = int(weekly.get("sent_total") or 0)
+        rejected = int(weekly.get("rejected_total") or 0)
+        sent_as_is = sent_total
+        edited_before_send = 0
+
+    def pct(value):
+        if drafts_generated <= 0:
+            return 0
+        return round((float(value) / float(drafts_generated)) * 100.0)
+
+    monthly_sent_rows = execute_query(
+        """
+        SELECT COUNT(*) AS sent_count
+        FROM email_drafts
+        WHERE COALESCE(status, '') = 'sent'
+          AND sent_at >= %s
+        """,
+        (monthly_cutoff,),
+        fetch=True,
+    ) or []
+    monthly_sent = int((monthly_sent_rows[0] or {}).get("sent_count") or 0) if monthly_sent_rows else 0
+    minutes_saved_per_sent = max(1, parse_optional_int(os.getenv("EMAIL_DRAFT_MINUTES_SAVED")) or 14)
+    time_saved_minutes_month = monthly_sent * minutes_saved_per_sent
+    accepted_total = sent_as_is + edited_before_send
+    accuracy_rate = round((accepted_total / drafts_generated) * 100.0, 1) if drafts_generated > 0 else 0.0
+
+    return {
+        "drafts_generated_week": drafts_generated,
+        "sent_as_is": sent_as_is,
+        "sent_as_is_pct": pct(sent_as_is),
+        "edited_before_send": edited_before_send,
+        "edited_before_send_pct": pct(edited_before_send),
+        "rejected": rejected,
+        "rejected_pct": pct(rejected),
+        "avg_review_seconds": int(round(avg_review_seconds)) if avg_review_seconds > 0 else 0,
+        "avg_review_time_label": _format_duration_compact(avg_review_seconds),
+        "time_saved_hours_month": round(time_saved_minutes_month / 60.0, 1),
+        "time_saved_label": f"{_format_hours_minutes(time_saved_minutes_month)}/month",
+        "accuracy_rate": accuracy_rate,
+    }
+
+
 def infer_sender_display_name(sender_email):
     """Convert sender email local-part into display name."""
     local_part = (normalize_email(sender_email).split("@")[0] if sender_email else "").strip()
@@ -13539,6 +13670,7 @@ def tc_dashboard():
     pending_batch_upload_count = fetch_batch_upload_pending_count(uploaded_by)
     pending_email_draft_count = fetch_pending_email_draft_count()
     email_draft_triage = fetch_email_draft_triage(limit_each=1)
+    email_draft_performance = fetch_email_draft_performance_snapshot(week_days=7, month_days=30)
     session["batch_upload_pending_count"] = pending_batch_upload_count
 
     notice = (request.args.get("notice") or "").strip()
@@ -13670,6 +13802,7 @@ def tc_dashboard():
         pending_batch_upload_count=pending_batch_upload_count,
         pending_email_draft_count=pending_email_draft_count,
         email_draft_triage=email_draft_triage,
+        email_draft_performance=email_draft_performance,
     )
 
 
@@ -13678,6 +13811,7 @@ def tc_dashboard():
 def tc_email_drafts():
     """Review AI-generated outbound email drafts before sending."""
     ensure_email_draft_tables()
+    performance = fetch_email_draft_performance_snapshot(week_days=7, month_days=30)
     notice = (request.args.get("notice") or "").strip()
     notice_type = (request.args.get("notice_type") or "success").strip().lower()
     if notice_type not in {"success", "warning", "error"}:
@@ -13754,6 +13888,7 @@ def tc_email_drafts():
         notice_type=notice_type,
         drafts=drafts,
         pending_count=len(drafts),
+        performance=performance,
     )
 
 

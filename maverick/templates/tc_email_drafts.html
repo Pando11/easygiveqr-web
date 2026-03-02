@@ -21,6 +21,19 @@
 <div class="alert alert-{{ notice_type }}">{{ notice }}</div>
 {% endif %}
 
+<section class="card">
+    <h3>Email Draft Performance</h3>
+    <ul class="performance-list">
+        <li>Drafts generated: <strong>{{ performance.drafts_generated_week }}/week</strong></li>
+        <li>Sent as-is: <strong>{{ performance.sent_as_is }}</strong> ({{ performance.sent_as_is_pct }}%)</li>
+        <li>Edited before send: <strong>{{ performance.edited_before_send }}</strong> ({{ performance.edited_before_send_pct }}%)</li>
+        <li>Rejected (manual response): <strong>{{ performance.rejected }}</strong> ({{ performance.rejected_pct }}%)</li>
+        <li>Average review time: <strong>{{ performance.avg_review_time_label }}</strong></li>
+        <li>Time saved: <strong>{{ performance.time_saved_label }}</strong></li>
+        <li>Accuracy rate: <strong>{{ performance.accuracy_rate }}%</strong></li>
+    </ul>
+</section>
+
 {% if drafts %}
     {% for draft in drafts %}
     <section class="card email-draft-card" id="draft-card-{{ draft.id }}">
@@ -100,6 +113,13 @@
 
 .subtle {
     color: #64748b;
+}
+
+.performance-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 6px;
 }
 
 .email-draft-card {

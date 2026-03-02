@@ -106,6 +106,22 @@
     {% endif %}
 </section>
 
+<section class="status-section section-indigo">
+    <div class="section-title-row">
+        <h3>Email Draft Performance</h3>
+        <a href="/tc/email-drafts" class="btn btn-small btn-secondary">Details</a>
+    </div>
+    <ul class="performance-list">
+        <li>Drafts generated: <strong>{{ email_draft_performance.drafts_generated_week }}/week</strong></li>
+        <li>Sent as-is: <strong>{{ email_draft_performance.sent_as_is }}</strong> ({{ email_draft_performance.sent_as_is_pct }}%)</li>
+        <li>Edited before send: <strong>{{ email_draft_performance.edited_before_send }}</strong> ({{ email_draft_performance.edited_before_send_pct }}%)</li>
+        <li>Rejected (manual response): <strong>{{ email_draft_performance.rejected }}</strong> ({{ email_draft_performance.rejected_pct }}%)</li>
+        <li>Average review time: <strong>{{ email_draft_performance.avg_review_time_label }}</strong></li>
+        <li>Time saved: <strong>{{ email_draft_performance.time_saved_label }}</strong></li>
+        <li>Accuracy rate: <strong>{{ email_draft_performance.accuracy_rate }}%</strong></li>
+    </ul>
+</section>
+
 <section class="status-section section-blue">
     <div class="section-title-row">
         <h3>📊 Transaction Health Summary</h3>
@@ -667,6 +683,14 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+}
+
+.performance-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 6px;
+    color: #1e293b;
 }
 
 @media (max-width: 1024px) {
