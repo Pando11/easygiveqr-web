@@ -296,6 +296,49 @@ You will now see system-created entries for:
 - Vendor secure-link response received
 - Auto follow-up task creation after 24h no response
 - Inbound mailbox routing decisions (urgency/category/forwarding/SMS alerts)
+- Post-close review follow-up scheduled (default: 7 days after completion)
+- Agent review submitted (includes rating)
+- Negative review alert sent to Margaret
+- Referral offer link clicked
+- Referral conversion tracked
+
+### Post-Close Review + Referral Workflow (New)
+
+Maverick now runs a post-close follow-up automatically:
+
+1. When a transaction is marked `COMPLETED`, Maverick schedules a review follow-up.
+2. At **7 days after close** (default), Maverick sends the agent:
+   - "How did we do?" request
+   - direct Google review link
+   - referral offer: "Refer another agent, they get $50 off, you get $50 credit"
+3. Referral link clicks are tracked automatically.
+4. New referred uploads are tracked as referral conversions.
+
+Tracking fields are stored in `review_requests`, including:
+- `sent_at`
+- `review_received`
+- `star_rating`
+- `referral_sent`
+- `referral_clicks`
+- `referrals_converted`
+
+### Low-Rating Escalation Rule (New)
+
+If an agent submits a review with **3 stars or less**, Maverick immediately notifies Margaret so a response can be made quickly.
+
+Notification channels:
+- SMS to `MARGARET_PHONE` (if configured)
+- Email to `MARGARET_EMAIL` (if configured)
+
+### Bad Review Response SOP
+
+When a <=3-star alert arrives:
+
+1. Open the transaction communication timeline immediately.
+2. Review feedback text and recent communication history.
+3. Respond to the agent the same day (call first, then email/text recap).
+4. Log the outreach and outcome in Communication Log.
+5. If resolved, add a final note summarizing root cause + fix.
 
 ### Inbound Mailbox Workflow (New)
 
@@ -536,6 +579,13 @@ If overloaded:
 3. Make required calls
 4. Log communications
 5. Confirm tomorrow's risk items
+
+### Review Alert Quick Actions
+1. If rating alert is <=3 stars: respond same day.
+2. Confirm communication log includes:
+   - "Agent review submitted"
+   - "Negative review alert sent to Margaret"
+3. Add follow-up note with resolution status.
 
 ### Emergency Protocol
 
