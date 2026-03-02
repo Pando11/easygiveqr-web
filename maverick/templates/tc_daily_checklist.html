@@ -1,0 +1,510 @@
+{% extends "base.html" %}
+
+{% block title %}Today's Checklist - Maverick TC{% endblock %}
+{% block subtitle %}Daily Operations Checklist{% endblock %}
+
+{% block content %}
+<section class="card checklist-header">
+    <div>
+        <h2>📋 Today's Checklist</h2>
+        <p class="subtle">{{ current_date_label }}</p>
+    </div>
+    <div class="header-actions no-print">
+        <a href="/tc/tasks" class="btn btn-secondary">All Tasks</a>
+        <a href="/tc/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+        <button class="btn" onclick="window.print()">Print</button>
+    </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">
+    {{ notice }}
+</div>
+{% endif %}
+
+<section class="card summary-card">
+    <div class="metric">
+        <span class="metric-label">Total Items</span>
+        <strong>{{ summary.total_items }}</strong>
+    </div>
+    <div class="metric metric-red">
+        <span class="metric-label">Overdue</span>
+        <strong>{{ summary.overdue_count }}</strong>
+    </div>
+    <div class="metric metric-yellow">
+        <span class="metric-label">Due Today</span>
+        <strong>{{ summary.due_today_count }}</strong>
+    </div>
+    <div class="metric metric-blue">
+        <span class="metric-label">Calls to Make</span>
+        <strong>{{ summary.calls_count }}</strong>
+    </div>
+    <div class="metric metric-purple">
+        <span class="metric-label">Vendor Responses Needed</span>
+        <strong>{{ summary.vendor_response_count }}</strong>
+    </div>
+</section>
+
+<section class="card checklist-section">
+    <div class="section-title">
+        <h3>📞 Calls to Make Today</h3>
+        <span class="count">{{ calls_to_make|length }}</span>
+    </div>
+    {% if calls_to_make %}
+    <div class="checklist-grid">
+        {% for item in calls_to_make %}
+        <article class="check-item">
+            <label class="checkbox-row">
+                <input
+                    type="checkbox"
+                    class="call-toggle"
+                    data-deadline-id="{{ item.id }}"
+                    {% if item.margaret_called_agent %}checked{% endif %}
+                >
+                <span><strong>{{ item.deadline_label }}</strong> - {{ item.property_address }}</span>
+            </label>
+            <p class="subtle">{{ item.days_label }}</p>
+            <p>
+                {% if item.contact_phone %}
+                <a href="tel:{{ item.contact_phone }}">{{ item.contact_phone }}</a>
+                {% else %}
+                No contact phone available
+                {% endif %}
+            </p>
+            <div class="script-box">
+                <strong>{{ item.contact_type|title }} script:</strong>
+                <p>{{ item.call_script }}</p>
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No critical calls scheduled for today.</div>
+    {% endif %}
+</section>
+
+<section class="card checklist-section overdue-section">
+    <div class="section-title">
+        <h3>🚨 Overdue Items</h3>
+        <span class="count">{{ overdue_tasks|length }}</span>
+    </div>
+    {% if overdue_tasks %}
+    <div class="checklist-grid">
+        {% for task in overdue_tasks %}
+        <article class="check-item overdue-bg" data-task-id="{{ task.id }}">
+            <label class="checkbox-row">
+                <input type="checkbox" class="task-toggle" data-task-id="{{ task.id }}">
+                <span>{{ task.task_description }}</span>
+            </label>
+            <p>
+                <a href="/tc/transaction/{{ task.transaction_id }}">{{ task.property_address }}</a>
+            </p>
+            <p class="danger-text">{{ task.days_overdue }} day{{ "" if task.days_overdue == 1 else "s" }} overdue</p>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No overdue items.</div>
+    {% endif %}
+</section>
+
+<section class="card checklist-section due-section">
+    <div class="section-title">
+        <h3>⚠️ Due Today</h3>
+        <span class="count">{{ due_today_tasks|length }}</span>
+    </div>
+    {% if due_today_tasks %}
+    <div class="checklist-grid">
+        {% for task in due_today_tasks %}
+        <article class="check-item due-bg" data-task-id="{{ task.id }}">
+            <label class="checkbox-row">
+                <input type="checkbox" class="task-toggle" data-task-id="{{ task.id }}">
+                <span>{{ task.task_description }}</span>
+            </label>
+            <p>
+                <a href="/tc/transaction/{{ task.transaction_id }}">{{ task.property_address }}</a>
+            </p>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No tasks due today.</div>
+    {% endif %}
+</section>
+
+<section class="card checklist-section">
+    <div class="section-title">
+        <h3>📤 Reminders to Send</h3>
+        <span class="count">{{ reminders_to_send|length }}</span>
+    </div>
+    {% if reminders_to_send %}
+    <div class="checklist-grid">
+        {% for deadline in reminders_to_send %}
+        <article class="check-item" id="reminder-{{ deadline.id }}">
+            <p><strong>{{ deadline.deadline_label }}</strong> - {{ deadline.property_address }}</p>
+            <p class="subtle">
+                Due in {{ deadline.days_until }} day{{ "" if deadline.days_until == 1 else "s" }}
+            </p>
+            <button class="btn send-reminder-btn no-print" data-deadline-id="{{ deadline.id }}">Send Now</button>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No reminders queued for today.</div>
+    {% endif %}
+</section>
+
+<section class="card checklist-section" id="vendor-responses">
+    <div class="section-title">
+        <h3>📧 Vendor Responses Needed</h3>
+        <span class="count">{{ pending_vendor_responses|length }}</span>
+    </div>
+    {% if pending_vendor_responses %}
+    <div class="checklist-grid">
+        {% for outreach in pending_vendor_responses %}
+        <article class="check-item vendor-pending">
+            <p>
+                <strong>{{ outreach.vendor_type_label }}</strong> for
+                <a href="/tc/transaction/{{ outreach.transaction_id }}">{{ outreach.property_address }}</a>
+            </p>
+            <p class="subtle">
+                Sent {{ outreach.days_ago }} day{{ "" if outreach.days_ago == 1 else "s" }} ago - No response yet
+            </p>
+            <p class="subtle">
+                {{ outreach.contact_name or outreach.company_name or "Vendor" }}
+                {% if outreach.email %}
+                · {{ outreach.email }}
+                {% endif %}
+            </p>
+            <div class="vendor-actions no-print">
+                <form method="POST" action="/tc/vendor-outreach/{{ outreach.id }}/follow-up">
+                    <button type="submit" class="btn btn-secondary">Follow Up</button>
+                </form>
+                <form method="POST" action="/tc/vendor-outreach/{{ outreach.id }}/mark-scheduled" class="mark-scheduled-form">
+                    <input type="date" name="scheduled_date" aria-label="Scheduled date">
+                    <button type="submit" class="btn">Mark Scheduled</button>
+                </form>
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No pending vendor responses right now.</div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.checklist-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-end;
+}
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.summary-card {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
+    border: 1px solid #bfdbfe;
+    background: linear-gradient(125deg, #dbeafe, #e0f2fe, #ecfeff);
+}
+
+.metric {
+    background: rgba(255, 255, 255, 0.9);
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.metric strong {
+    display: block;
+    font-size: 24px;
+    color: #0f172a;
+}
+
+.metric-label {
+    font-size: 13px;
+    color: #334155;
+}
+
+.metric-red strong {
+    color: #b91c1c;
+}
+
+.metric-yellow strong {
+    color: #92400e;
+}
+
+.metric-blue strong {
+    color: #1d4ed8;
+}
+
+.metric-purple strong {
+    color: #6d28d9;
+}
+
+.checklist-section {
+    margin-bottom: 16px;
+}
+
+.section-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.count {
+    background: #e2e8f0;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-weight: 700;
+    font-size: 13px;
+}
+
+.checklist-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.check-item {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 12px;
+    background: #f8fafc;
+}
+
+.check-item a {
+    color: #1d4ed8;
+    text-decoration: none;
+}
+
+.check-item a:hover {
+    text-decoration: underline;
+}
+
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    color: #0f172a;
+    margin-bottom: 8px;
+}
+
+.checkbox-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+}
+
+.script-box {
+    margin-top: 8px;
+    border: 1px solid #bae6fd;
+    border-radius: 6px;
+    padding: 8px;
+    background: #f0f9ff;
+    font-size: 14px;
+}
+
+.overdue-bg {
+    background: #fff1f2;
+    border-color: #fecdd3;
+}
+
+.due-bg {
+    background: #fffbeb;
+    border-color: #fde68a;
+}
+
+.danger-text {
+    color: #b91c1c;
+    font-weight: 700;
+}
+
+.vendor-pending {
+    border-color: #e9d5ff;
+    background: #faf5ff;
+}
+
+.vendor-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.mark-scheduled-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.mark-scheduled-form input[type="date"] {
+    width: auto;
+    min-width: 145px;
+    padding: 10px;
+}
+
+.empty-state {
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    padding: 12px;
+    color: #64748b;
+    background: #f8fafc;
+}
+
+@media (max-width: 1024px) {
+    .summary-card {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .checklist-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    .checklist-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .header-actions {
+        width: 100%;
+    }
+
+    .header-actions .btn {
+        width: 100%;
+    }
+
+    .summary-card {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media print {
+    .no-print,
+    .header-actions,
+    .btn {
+        display: none !important;
+    }
+
+    body {
+        background: #fff !important;
+    }
+
+    .card,
+    .check-item {
+        box-shadow: none !important;
+        border-color: #cbd5e1 !important;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function toggleTask(taskId, completed, checkboxElement) {
+    try {
+        const response = await fetch(`/tc/task/${taskId}/toggle`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ completed })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || "Unable to update task.");
+        }
+        if (window.showSuccess) {
+            window.showSuccess(completed ? "Task completed." : "Task marked pending.");
+        }
+        const card = document.querySelector(`[data-task-id="${taskId}"]`);
+        if (card && completed) {
+            card.style.opacity = "0.4";
+        } else if (card) {
+            card.style.opacity = "1";
+        }
+    } catch (error) {
+        checkboxElement.checked = !completed;
+        if (window.showError) {
+            window.showError(error.message || "Failed to toggle task.");
+        }
+    }
+}
+
+async function sendReminder(deadlineId) {
+    try {
+        const response = await fetch(`/tc/reminder/${deadlineId}/send`, { method: "POST" });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || "Reminder send failed.");
+        }
+        if (window.showSuccess) {
+            window.showSuccess("Reminder sent.");
+        }
+        const card = document.getElementById(`reminder-${deadlineId}`);
+        if (card) {
+            card.style.opacity = "0.5";
+        }
+    } catch (error) {
+        if (window.showError) {
+            window.showError(error.message || "Failed to send reminder.");
+        }
+    }
+}
+
+document.querySelectorAll(".task-toggle").forEach((checkbox) => {
+    checkbox.addEventListener("change", (event) => {
+        toggleTask(event.target.dataset.taskId, event.target.checked, event.target);
+    });
+});
+
+document.querySelectorAll(".call-toggle").forEach((checkbox) => {
+    checkbox.addEventListener("change", async (event) => {
+        const deadlineId = event.target.dataset.deadlineId;
+        const made = event.target.checked;
+        const container = event.target.closest(".check-item");
+        try {
+            const response = await fetch(`/tc/call/${deadlineId}/toggle`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ made })
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || "Unable to update call status.");
+            }
+            if (container) {
+                container.style.opacity = made ? "0.55" : "1";
+            }
+            if (window.showSuccess) {
+                window.showSuccess(made ? "Call marked made." : "Call unchecked.");
+            }
+        } catch (error) {
+            event.target.checked = !made;
+            if (window.showError) {
+                window.showError(error.message || "Failed to update call status.");
+            }
+        }
+    });
+});
+
+document.querySelectorAll(".send-reminder-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+        sendReminder(button.dataset.deadlineId);
+    });
+});
+</script>
+{% endblock %}

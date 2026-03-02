@@ -1,0 +1,368 @@
+{% extends "base.html" %}
+
+{% block title %}Smart Q&A - Maverick TC{% endblock %}
+{% block subtitle %}Reusable Answer Library + Auto-Answer Controls{% endblock %}
+
+{% block content %}
+<section class="card top-card">
+    <div>
+        <h2>Smart Q&A Management</h2>
+        <p class="hint-text">
+            Auto-answer when confidence is above {{ auto_threshold_pct }}% and auto-answer is enabled.
+            Suggestion threshold is {{ suggest_threshold_pct }}%.
+        </p>
+    </div>
+    <div class="header-actions">
+        <a href="/tc/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">
+    {{ notice }}
+</div>
+{% endif %}
+
+<section class="summary-grid">
+    <article class="card metric-card">
+        <h3>Hours Saved (Month)</h3>
+        <p class="metric-value">{{ analytics.hours_saved_this_month }}</p>
+        <small>{{ analytics.minutes_saved_this_month }} minutes total</small>
+    </article>
+    <article class="card metric-card">
+        <h3>Auto Answers</h3>
+        <p class="metric-value">{{ analytics.auto_answers_this_month }}</p>
+        <small>Sent automatically this month</small>
+    </article>
+    <article class="card metric-card">
+        <h3>Suggested Answers Used</h3>
+        <p class="metric-value">{{ analytics.suggested_used_this_month }}</p>
+        <small>Margaret approved this month</small>
+    </article>
+    <article class="card metric-card">
+        <h3>FAQ Readiness</h3>
+        <p class="metric-value">{{ "Ready" if analytics.faq_suggestion_ready else "Building" }}</p>
+        <small>Most common questions clustered for agent FAQ</small>
+    </article>
+</section>
+
+<section class="layout-two-col">
+    <div class="left-col">
+        <article class="card">
+            <h3>Common Q&A Library</h3>
+            <form method="get" class="filter-row">
+                <input type="text" name="q" value="{{ search_text }}" placeholder="Search question or answer...">
+                <select name="category">
+                    <option value="">All categories</option>
+                    {% for category_key, category_label in category_options %}
+                    <option value="{{ category_key }}" {% if selected_category == category_key %}selected{% endif %}>
+                        {{ category_label }}
+                    </option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="btn btn-secondary">Filter</button>
+            </form>
+
+            {% if qa_rows %}
+            <div class="qa-table-wrap">
+                <table class="qa-table">
+                    <thead>
+                        <tr>
+                            <th>Question</th>
+                            <th>Category</th>
+                            <th>Reused</th>
+                            <th>Auto</th>
+                            <th>Updated</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in qa_rows %}
+                        <tr>
+                            <td>
+                                <strong>{{ row.question_text }}</strong>
+                                <details>
+                                    <summary class="summary-link">View/Edit Answer</summary>
+                                    <form method="post" class="stack-form compact-form">
+                                        <input type="hidden" name="action" value="update">
+                                        <input type="hidden" name="qa_id" value="{{ row.id }}">
+                                        <div class="form-group">
+                                            <label>Answer</label>
+                                            <textarea name="answer_text" rows="3" required>{{ row.answer_text }}</textarea>
+                                        </div>
+                                        <div class="grid-2">
+                                            <div class="form-group">
+                                                <label>Category</label>
+                                                <select name="category">
+                                                    {% for category_key, category_label in category_options %}
+                                                    <option value="{{ category_key }}" {% if row.category == category_key %}selected{% endif %}>
+                                                        {{ category_label }}
+                                                    </option>
+                                                    {% endfor %}
+                                                </select>
+                                            </div>
+                                            <div class="form-group">
+                                                <label class="checkbox-row">
+                                                    <input type="checkbox" name="auto_answer" value="true" {% if row.auto_answer %}checked{% endif %}>
+                                                    Enable auto-answer
+                                                </label>
+                                            </div>
+                                        </div>
+                                        <button type="submit" class="btn btn-small btn-secondary">Save Changes</button>
+                                    </form>
+                                </details>
+                            </td>
+                            <td>{{ row.category_label }}</td>
+                            <td>{{ row.times_reused }}</td>
+                            <td>
+                                <span class="auto-pill {% if row.auto_answer %}on{% else %}off{% endif %}">
+                                    {{ row.auto_enabled_label }}
+                                </span>
+                            </td>
+                            <td>
+                                {{ row.updated_at_label }}<br>
+                                <small>Last used: {{ row.last_used_label }}</small>
+                            </td>
+                            <td>
+                                <form method="post" class="inline-form">
+                                    <input type="hidden" name="action" value="toggle_auto">
+                                    <input type="hidden" name="qa_id" value="{{ row.id }}">
+                                    <input type="hidden" name="auto_answer" value="{{ 0 if row.auto_answer else 1 }}">
+                                    <button type="submit" class="btn btn-small btn-secondary">
+                                        {{ "Disable" if row.auto_answer else "Enable" }}
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-box">No common Q&A entries found yet.</div>
+            {% endif %}
+        </article>
+    </div>
+
+    <div class="right-col">
+        <article class="card">
+            <h3>Add Manual Q&A</h3>
+            <form method="post" class="stack-form">
+                <input type="hidden" name="action" value="add">
+                <div class="form-group">
+                    <label>Question</label>
+                    <textarea name="question_text" rows="2" required></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Answer</label>
+                    <textarea name="answer_text" rows="4" required></textarea>
+                </div>
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label>Asked by Party</label>
+                        <select name="asked_by_party">
+                            <option value="agent">Agent</option>
+                            <option value="buyer">Buyer</option>
+                            <option value="seller">Seller</option>
+                            <option value="lender">Lender</option>
+                            <option value="title_company">Title Company</option>
+                            <option value="external">External</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Category</label>
+                        <select name="category">
+                            {% for category_key, category_label in category_options %}
+                            <option value="{{ category_key }}">{{ category_label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Transaction ID (optional)</label>
+                    <input type="number" name="transaction_id" min="1" placeholder="e.g., 123">
+                </div>
+                <button type="submit" class="btn">Add to Library</button>
+            </form>
+        </article>
+
+        <article class="card">
+            <h3>Most Common Questions</h3>
+            {% if analytics.monthly_top_questions %}
+            <ol class="top-question-list">
+                {% for row in analytics.monthly_top_questions %}
+                <li>
+                    <strong>{{ row.question_text or "Unspecified question" }}</strong>
+                    <small>{{ row.total }} uses this month</small>
+                </li>
+                {% endfor %}
+            </ol>
+            {% else %}
+            <div class="empty-box">No question activity this month yet.</div>
+            {% endif %}
+        </article>
+
+        <article class="card">
+            <h3>FAQ Draft for Agents</h3>
+            <p class="hint-text">
+                Suggested when common patterns are repeated frequently. Copy/edit this into your outbound agent FAQ.
+            </p>
+            <textarea rows="12" readonly>{{ faq_draft.content }}</textarea>
+            <small>{{ faq_draft.item_count }} Q&A entries included.</small>
+        </article>
+    </div>
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.top-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 12px;
+}
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.hint-text {
+    color: #64748b;
+}
+
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.metric-card h3 {
+    font-size: 15px;
+    margin-bottom: 8px;
+}
+
+.metric-value {
+    font-size: 30px;
+    font-weight: 800;
+    color: #1e3a8a;
+    margin-bottom: 4px;
+}
+
+.layout-two-col {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 14px;
+}
+
+.filter-row {
+    display: grid;
+    grid-template-columns: 2fr 1fr auto;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.qa-table-wrap {
+    overflow-x: auto;
+}
+
+.qa-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.qa-table th,
+.qa-table td {
+    border-bottom: 1px solid #e2e8f0;
+    padding: 10px;
+    text-align: left;
+    vertical-align: top;
+}
+
+.qa-table th {
+    font-size: 12px;
+    color: #334155;
+    background: #f8fafc;
+}
+
+.summary-link {
+    cursor: pointer;
+    color: #1d4ed8;
+    margin-top: 6px;
+}
+
+.compact-form {
+    margin-top: 8px;
+}
+
+.auto-pill {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 3px 9px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.auto-pill.on {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.auto-pill.off {
+    background: #e2e8f0;
+    color: #334155;
+}
+
+.inline-form {
+    margin: 0;
+}
+
+.top-question-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 8px;
+}
+
+.top-question-list small {
+    display: block;
+    color: #64748b;
+}
+
+.empty-box {
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    padding: 12px;
+    color: #64748b;
+    background: #f8fafc;
+}
+
+@media (max-width: 1024px) {
+    .summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .layout-two-col {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    .top-card {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .filter-row {
+        grid-template-columns: 1fr;
+    }
+
+    .summary-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+

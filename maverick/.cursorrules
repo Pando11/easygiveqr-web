@@ -1,0 +1,462 @@
+# MAVERICK TC - CURSOR AI RULES
+
+## Project Overview
+Maverick is a transaction coordination platform for Texas real estate agents.
+- Backend: Flask (Python)
+- Database: PostgreSQL
+- Storage: AWS S3
+- Payments: Stripe
+- SMS: Twilio
+- Deployment: Railway
+
+---
+
+## Code Style & Standards
+
+### Python
+- Follow PEP 8 style guide
+- Use type hints for function parameters
+- Use descriptive variable names (no single letters except in loops)
+- Keep functions under 50 lines when possible
+- Add docstrings for all functions
+
+### Imports
+- Group imports: standard library, third-party, local
+- Use absolute imports, not relative
+- Example:
+```python
+  import os
+  from datetime import datetime
+  
+  from flask import Flask, request
+  from dotenv import load_dotenv
+  
+  from utils.db import execute_query
+  from utils.sms import send_sms
+```
+
+### Naming Conventions
+- Functions: snake_case (e.g., send_reminder, get_transaction)
+- Classes: PascalCase (e.g., TransactionManager)
+- Constants: UPPER_SNAKE_CASE (e.g., MAX_FILE_SIZE)
+- Files: snake_case (e.g., send_reminders.py)
+
+---
+
+## Security Rules (CRITICAL)
+
+### Environment Variables
+- NEVER hardcode API keys, passwords, or secrets
+- ALWAYS use os.getenv('VARIABLE_NAME')
+- ALWAYS check if .env is in .gitignore
+- Example:
+```python
+  # ✅ CORRECT
+  stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
+  
+  # ❌ WRONG
+  stripe.api_key = 'sk_test_1234567890'
+```
+
+### Database Queries
+- ALWAYS use parameterized queries (prevent SQL injection)
+- NEVER use string formatting for SQL
+- Example:
+```python
+  # ✅ CORRECT
+  execute_query("SELECT * FROM transactions WHERE id = %s", (transaction_id,))
+  
+  # ❌ WRONG
+  execute_query(f"SELECT * FROM transactions WHERE id = {transaction_id}")
+```
+
+### Input Validation
+- Always validate user input before processing
+- Sanitize file uploads (check file type, size)
+- Validate phone numbers, emails, dates
+
+---
+
+## Database Rules
+
+### Connection
+- Always use utils/db.py helper functions
+- Never create direct psycopg2 connections in routes
+- Functions available:
+  - execute_query(query, params, fetch=False)
+  - execute_insert(query, params, return_id=True)
+
+### Queries
+- Use meaningful table aliases
+- Always include error handling
+- Close connections properly (handled by utils/db.py)
+
+### Schema
+- Reference schema.sql for table structure
+- Key tables:
+  - transactions - Main transaction records
+  - deadlines - 12 Texas deadlines per transaction
+  - tasks - 30+ tasks per transaction
+  - documents - S3 document tracking
+  - communications - Communication log
+  - referrals - Referral credit system
+
+---
+
+## File Storage Rules
+
+### AWS S3
+- ALWAYS upload files to S3, NEVER to Railway filesystem
+- Use utils/s3.py helper functions:
+  - upload_contract(file, transaction_id, property_address)
+  - upload_document(file, transaction_id, document_type, filename)
+  - get_presigned_url(s3_key, expiration=3600)
+- Store S3 keys in database, not full URLs
+- Always log document access for audit trail
+
+### File Upload Validation
+- Check file extensions: .pdf, .jpg, .jpeg, .png
+- Maximum file size: 16MB
+- Sanitize filenames with secure_filename()
+
+---
+
+## SMS Rules (Twilio)
+
+### Message Format
+- Keep under 160 characters when possible
+- Use clear, professional tone
+- Always include "- Maverick TC" signature
+- Format phone numbers with +1 prefix
+
+### Helper Functions
+- Use utils/sms.py functions:
+  - send_sms(to_number, message)
+  - send_payment_link(to_number, transaction_id, amount, payment_type)
+  - send_timeline_approved(to_number, property_address, dates)
+  - send_reminder(to_number, property_address, deadline_type, deadline_date, days_until)
+
+### Error Handling
+- Always check if SMS sent successfully
+- Log failures but don't crash app
+- Return success/failure status
+
+---
+
+## Payment Rules (Stripe)
+
+### Test vs Production
+- Use test keys (sk_test_*, pk_test_*) in development
+- Switch to live keys (sk_live_*, pk_live_*) only in production
+- Never mix test and live keys
+
+### Amount Handling
+- Store amounts in cents for Stripe API
+- Display amounts in dollars to users
+- Example:
+```python
+  # Convert to cents for Stripe
+  amount_cents = int(amount_dollars * 100)
+```
+
+### Payment Intent
+- Always confirm payment before updating database
+- Check intent.status == 'succeeded'
+- Send confirmation SMS after successful payment
+
+---
+
+## Flask Routes Rules
+
+### Route Naming
+- Use RESTful conventions
+- Use descriptive route names
+- Group related routes with prefixes
+- Examples:
+  - / - Public agent upload
+  - /tc/* - Margaret's dashboard routes
+  - /pay/* - Payment routes
+
+### Authentication
+- Use @login_required decorator for TC routes
+- Check session: if 'tc_logged_in' not in session
+- Redirect unauthorized users to login
+
+### Error Handling
+- Return appropriate HTTP status codes:
+  - 200: Success
+  - 400: Bad request (validation failed)
+  - 404: Not found
+  - 500: Server error
+- Provide helpful error messages
+
+### Response Format
+- HTML templates for pages
+- JSON for AJAX requests
+- Always include success/error status in JSON:
+```python
+  return jsonify({'success': True, 'data': result})
+  return jsonify({'success': False, 'error': 'Error message'}), 400
+```
+
+---
+
+## Template Rules (Jinja2)
+
+### Structure
+- Extend base.html for all pages
+- Use blocks: {% block title %}, {% block content %}
+- Keep templates focused (one purpose per template)
+
+### Styling
+- Use inline styles for now (CSS file in static/css later)
+- Mobile-first responsive design
+- Breakpoints: 768px (mobile), 1024px (tablet)
+
+### JavaScript
+- Use vanilla JavaScript (no jQuery)
+- Put scripts in {% block extra_js %}
+- Always handle errors in fetch() calls
+
+---
+
+## Automation Scripts Rules
+
+### Script Structure
+- All scripts in project root: send_reminders.py, closing_protocol.py, etc.
+- Include shebang: #!/usr/bin/env python3
+- Make executable: chmod +x script_name.py
+- Add docstring explaining purpose
+
+### Cron Jobs
+- Run via Railway cron scheduler
+- Always include error handling
+- Send alerts (SMS to Heidi) if critical failures
+- Log all actions with timestamps
+
+### Error Handling
+- Wrap main logic in try/except
+- Log errors with traceback
+- Don't fail silently
+- Example:
+```python
+  try:
+      send_reminders()
+  except Exception as e:
+      print(f"ERROR: {e}")
+      traceback.print_exc()
+      alert_heidi(f"Reminder job failed: {e}")
+```
+
+---
+
+## Texas Real Estate Rules
+
+### Critical Deadlines (Never Miss)
+- Option fee due (Day 3)
+- Earnest money due (Day 3)
+- Option period end (Day 7-10)
+- Financing approval (Day 21)
+- Closing date
+
+### Required Documents
+- Executed contract with all signatures
+- Earnest money receipt
+- Option fee receipt
+- Seller's disclosure
+- Inspection report
+- Appraisal
+- Title commitment
+- Loan approval letter
+- Insurance binder
+- Final settlement statement
+
+### Compliance
+- Maintain 4-year document retention (Texas law)
+- Never delete documents from S3
+- Log all document access for audit trail
+
+---
+
+## Testing Rules
+
+### Before Committing
+- Test all new routes locally
+- Verify database queries return expected data
+- Check SMS sends successfully
+- Verify file uploads to S3
+- Test payment flow with Stripe test card: 4242 4242 4242 4242
+
+### Test Data
+- Use realistic test data (actual Texas addresses, names)
+- Test edge cases (missing data, invalid input)
+- Test error handling (bad phone numbers, missing files)
+
+---
+
+## Git Rules
+
+### Commits
+- Write clear commit messages
+- Format: "Feature/Fix: Brief description"
+- Examples:
+  - "Feature: Add payment processing with Stripe"
+  - "Fix: Resolve SMS not sending for +1 prefixed numbers"
+  - "Update: Improve mobile responsiveness"
+
+### Files to Never Commit
+- .env (contains secrets)
+- __pycache__/ (Python cache)
+- *.pyc (compiled Python)
+- uploads/ (temporary files)
+- .DS_Store (Mac system file)
+
+### Before Push
+- Check .env not staged: git status
+- Verify .gitignore includes .env
+- Test on Railway after deploy
+
+---
+
+## Common Patterns
+
+### Loading Database Data
+```python
+# Single record
+query = "SELECT * FROM transactions WHERE id = %s"
+result = execute_query(query, (transaction_id,), fetch=True)
+transaction = result[0] if result else None
+
+# Multiple records
+query = "SELECT * FROM tasks WHERE transaction_id = %s ORDER BY due_date"
+tasks = execute_query(query, (transaction_id,), fetch=True) or []
+```
+
+### Sending SMS
+```python
+from utils.sms import send_sms
+
+success = send_sms(phone_number, "Your message here")
+if success:
+    # Log success
+else:
+    # Handle failure
+```
+
+### Uploading to S3
+```python
+from utils.s3 import upload_document
+
+s3_key = upload_document(file, transaction_id, 'inspection_report', filename)
+if s3_key:
+    # Save to database
+else:
+    # Handle failure
+```
+
+### Creating Payment Link
+```python
+from utils.sms import send_payment_link
+
+send_payment_link(
+    to_number=agent_phone,
+    transaction_id=transaction_id,
+    amount=200,
+    payment_type='upfront'
+)
+```
+
+---
+
+## Performance Rules
+
+### Database Queries
+- Avoid N+1 queries (use JOINs)
+- Add indexes for frequently queried columns
+- Limit results when possible
+
+### File Operations
+- Stream large files, don't load entirely into memory
+- Use presigned URLs for S3 downloads (don't proxy through Flask)
+
+### Caching
+- Cache expensive operations when possible
+- Use Railway's built-in caching for static files
+
+---
+
+## Documentation Rules
+
+### Code Comments
+- Comment WHY, not WHAT (code should be self-explanatory)
+- Add comments for complex logic
+- Document edge cases and workarounds
+
+### Function Docstrings
+```python
+def send_reminder(to_number, property_address, deadline_type, deadline_date, days_until):
+    """
+    Send SMS reminder to agent about upcoming deadline
+    
+    Args:
+        to_number: Agent's phone number (format: +18065551234)
+        property_address: Property address for context
+        deadline_type: Type of deadline (e.g., 'earnest_money', 'closing')
+        deadline_date: Date of deadline (YYYY-MM-DD)
+        days_until: Days until deadline
+    
+    Returns:
+        message_sid if successful, None if failed
+    """
+```
+
+---
+
+## Maverick-Specific Context
+
+### Margaret's Workflow
+- Reviews contracts manually (15-20 min each)
+- Makes coordination calls (30-45 min per transaction)
+- Logs all communications
+- Manages 10-15 transactions simultaneously
+
+### System Does
+- ✅ Deadline tracking and reminders
+- ✅ Task organization
+- ✅ Document storage
+- ✅ Payment processing
+- ✅ Problem detection
+
+### Margaret Does
+- ✅ Contract review and approval
+- ✅ Phone calls and relationship building
+- ✅ Problem-solving and judgment
+- ✅ Quality control
+
+### Pricing
+- Standard: $400 per transaction ($200 upfront, $200 at closing)
+- Rush: $600 per transaction
+- Referral credit: $50 off upfront payment
+
+---
+
+## When Building New Features
+
+### Always Ask
+1. Does this help Margaret do her job faster?
+2. Does this reduce agent stress?
+3. Does this prevent missed deadlines?
+4. Is it Texas-specific or general?
+5. Can it be automated or needs human judgment?
+
+### Priority Order
+1. Critical (deadline tracking, reminders) - Build first
+2. High (document storage, task management) - Build next
+3. Medium (communication logs, analytics) - Build later
+4. Low (nice-to-haves) - Defer to V2
+
+---
+
+## Quick Reference
+
+### File Structure

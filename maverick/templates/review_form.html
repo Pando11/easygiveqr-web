@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Maverick TC Review</title>
+    <style>
+        body { font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:24px; }
+        .card { max-width: 680px; margin: 0 auto; background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:22px; }
+        h2 { margin-top:0; color:#1d4ed8; }
+        .muted { color:#475569; font-size:14px; }
+        .error { margin:12px 0; padding:10px; border-radius:6px; background:#fef2f2; color:#991b1b; border:1px solid #fecaca; }
+        .ok { margin:12px 0; padding:10px; border-radius:6px; background:#ecfdf5; color:#166534; border:1px solid #86efac; }
+        .stars label { margin-right:12px; }
+        textarea { width:100%; min-height:120px; padding:10px; border:1px solid #cbd5e1; border-radius:6px; }
+        button { margin-top:12px; background:#1d4ed8; color:#fff; border:0; padding:10px 14px; border-radius:6px; cursor:pointer; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Maverick TC Review</h2>
+        <p class="muted">
+            {{ review_request.property_address }}<br>
+            Agent: {{ review_request.agent_name or "Agent" }}
+        </p>
+
+        {% if submitted %}
+        <div class="ok">Thank you for your feedback. We appreciate your partnership.</div>
+        {% elif error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+
+        {% if not submitted %}
+        <form method="post">
+            <div class="stars">
+                <p><strong>Rating</strong></p>
+                {% for value in [5,4,3,2,1] %}
+                <label><input type="radio" name="rating" value="{{ value }}" {% if value == 5 %}checked{% endif %}> {{ value }} star{{ "" if value == 1 else "s" }}</label>
+                {% endfor %}
+            </div>
+            <p><strong>Feedback</strong></p>
+            <textarea name="feedback" placeholder="Tell us about your experience..." required></textarea>
+            <button type="submit">Submit Review</button>
+        </form>
+        {% endif %}
+    </div>
+</body>
+</html>

@@ -1,0 +1,8 @@
+Hi {{ agent_name }},
+
+Title commitment for {{ property_address }} is still pending.
+Target date: {{ due_date|format_date }} ({{ days_remaining }} days).
+
+Reply with status, or call Margaret at {{ margaret_phone }}.
+
+- Maverick TC

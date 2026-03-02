@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Transaction Timeline Packet</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:700px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Maverick TC Timeline Packet</h2>
+                <p style="margin:8px 0 0; color:#334155;">
+                    Transaction #{{ data.transaction_id }} - {{ data.property_address }}
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                <p style="margin:0 0 14px;">Hello {{ data.recipient_name }},</p>
+                <p style="margin:0 0 14px;">{{ data.message_line }}</p>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+                    <tr>
+                        <td style="padding:6px 0; color:#64748b;">Effective Date</td>
+                        <td style="padding:6px 0; font-weight:600;">{{ data.effective_date }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:6px 0; color:#64748b;">Closing Date</td>
+                        <td style="padding:6px 0; font-weight:600;">{{ data.closing_date }}</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:6px 0; color:#64748b;">Update Trigger</td>
+                        <td style="padding:6px 0; font-weight:600;">{{ data.trigger_reason }}</td>
+                    </tr>
+                </table>
+                {% if data.focus_points %}
+                <h3 style="margin:18px 0 8px; font-size:16px;">What to watch</h3>
+                <ul style="margin:0 0 12px; padding-left:18px; color:#334155;">
+                    {% for point in data.focus_points %}
+                    <li style="margin-bottom:6px;">{{ point }}</li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+                {% if data.timeline_url %}
+                <p style="margin:14px 0 10px;">
+                    View timeline PDF: <a href="{{ data.timeline_url }}" target="_blank" rel="noopener">{{ data.timeline_url }}</a>
+                </p>
+                {% endif %}
+                {% if data.portal_link %}
+                <p style="margin:10px 0 0;">
+                    Upload portal: <a href="{{ data.portal_link }}" target="_blank" rel="noopener">{{ data.portal_link }}</a>
+                </p>
+                {% endif %}
+                <p style="margin:16px 0 0; color:#334155;">
+                    Questions? Reply to this email or call Margaret
+                    {% if data.margaret_phone %}at {{ data.margaret_phone }}{% endif %}
+                    {% if data.margaret_email %} ({{ data.margaret_email }}){% endif %}.
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:14px 24px; border-top:1px solid #e2e8f0; color:#64748b; font-size:13px;">
+                Maverick TC - Transaction Coordination
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

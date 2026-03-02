@@ -1,0 +1,16 @@
+<html>
+<body style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.6;">
+    <h2>HOA Documents Reminder</h2>
+    {% if custom_email_message %}
+    <p>{{ custom_email_message }}</p>
+    {% else %}
+    <p>Hi {{ seller_agent_name }},</p>
+    <p>
+        HOA documents for <strong>{{ property_address }}</strong> are due by
+        <strong>{{ due_date|format_date }}</strong> ({{ days_remaining }} days).
+    </p>
+    <p>Please share status, or call Margaret at {{ margaret_phone }} if support is needed.</p>
+    {% endif %}
+    <p>Thanks,<br>Maverick TC</p>
+</body>
+</html>

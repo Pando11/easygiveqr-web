@@ -1,0 +1,2489 @@
+{% extends "base.html" %}
+
+{% block title %}Transaction {{ transaction.id }} - Maverick TC{% endblock %}
+{% block subtitle %}Transaction Detail Workspace{% endblock %}
+
+{% block content %}
+<section class="card top-bar">
+    <div>
+        <a class="back-link" href="/tc/dashboard">&larr; Back to Dashboard</a>
+        <h2>{{ transaction.property_address }}</h2>
+        <p class="meta-line">
+            Transaction #{{ transaction.id }} - Status:
+            <span class="status-pill status-{{ status|lower|replace('_', '-') }}">{{ status.replace('_', ' ') }}</span>
+        </p>
+    </div>
+    <div class="meta-right">
+        <p><strong>Agent:</strong> {{ transaction.agent_name }}</p>
+        <p><strong>Uploaded:</strong> {{ transaction.uploaded_at_label }} ({{ transaction.upload_time_ago }})</p>
+    </div>
+</section>
+
+{% if doc_notice %}
+<div class="alert alert-{{ 'error' if doc_notice_type == 'error' else ('warning' if doc_notice_type == 'warning' else 'success') }} notice-banner">
+    {{ doc_notice }}
+</div>
+{% endif %}
+
+{% if mode == "review" %}
+<section class="layout-two-col review-layout">
+    <div class="card">
+        <h3>Contract PDF</h3>
+        {% if transaction.has_contract_pdf %}
+        <div class="pdf-shell">
+            <iframe src="{{ url_for('view_transaction_pdf', transaction_id=transaction.id) }}" title="Contract PDF"></iframe>
+        </div>
+        <a class="btn btn-secondary download-btn" href="{{ url_for('download_transaction_pdf', transaction_id=transaction.id) }}">
+            Download PDF
+        </a>
+        {% else %}
+        <div class="empty-box">No contract PDF was found for this transaction.</div>
+        {% endif %}
+    </div>
+
+    <div class="card" id="review-details">
+        <h3>Review & Activation</h3>
+
+        <div class="info-block">
+            <h4>Transaction Info</h4>
+            <p><strong>Agent:</strong> {{ transaction.agent_name }}</p>
+            <p><strong>Phone:</strong> <a href="tel:{{ transaction.agent_phone }}">{{ transaction.agent_phone }}</a></p>
+            <p><strong>Email:</strong> <a href="mailto:{{ transaction.agent_email }}">{{ transaction.agent_email }}</a></p>
+            <p><strong>Lender Email:</strong> {{ transaction.lender_email or "Not provided" }}</p>
+            <p><strong>Title Company Email:</strong> {{ transaction.title_officer_email or "Not provided" }}</p>
+            <p><strong>Upload Time:</strong> {{ transaction.uploaded_at_label }}</p>
+            <div class="email-status-grid">
+                <div class="email-status-item state-{{ email_status.lender.state }}">
+                    <strong>Lender Notification</strong>
+                    <p>{{ email_status.lender.label }}</p>
+                </div>
+                <div class="email-status-item state-{{ email_status.title.state }}">
+                    <strong>Title Notification</strong>
+                    <p>{{ email_status.title.label }}</p>
+                </div>
+            </div>
+            <div class="badge-row">
+                {% if transaction.rush_service %}
+                <span class="tag tag-rush">Rush Service</span>
+                {% endif %}
+                {% if transaction.referred_by_agent %}
+                <span class="tag tag-referral">Referral: {{ transaction.referred_by_agent }}</span>
+                <form method="post" action="{{ url_for('send_referrer_thanks', transaction_id=transaction.id) }}">
+                    <button type="submit" class="btn btn-small btn-secondary">Send Thank You Text</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="form-section extraction-section">
+            <h4>AI Contract Extraction (Triple-Scan Verification)</h4>
+            <p class="hint-text">
+                Maverick compares OCR, PyPDF2, and pdfplumber extraction. Verify all required fields
+                before activating the transaction.
+            </p>
+            <div class="badge-row">
+                <span class="tag tag-status">{{ extracted_data.status_label }}</span>
+                <span class="tag tag-confirmed">
+                    {{ extraction_review.verified_count }}/{{ extraction_review.required_count }} fields verified
+                </span>
+                {% if extracted_data.property_address_match is sameas true %}
+                <span class="tag tag-match">Address Match</span>
+                {% elif extracted_data.property_address_match is sameas false %}
+                <span class="tag tag-mismatch">Address Mismatch</span>
+                {% endif %}
+            </div>
+
+            {% if extracted_data.error %}
+            <div class="warning-box">
+                Extraction warning: {{ extracted_data.error }}
+            </div>
+            {% endif %}
+
+            <p><strong>Agent-entered address:</strong> {{ extracted_data.agent_property_address }}</p>
+            {% if extracted_data.confirmed and extracted_data.confirmed_at_label %}
+            <p><strong>Last confirmed:</strong> {{ extracted_data.confirmed_at_label }}</p>
+            {% endif %}
+
+            <form method="post" action="{{ url_for('verify_extraction', transaction_id=transaction.id) }}"
+                  class="stack-form compact-form">
+                <div class="extraction-grid">
+                    {% for field in extraction_review.fields %}
+                    <div class="extraction-field confidence-{{ field.confidence }}">
+                        <div class="extraction-field-head">
+                            <strong>
+                                {% if field.is_high_confidence %}✅{% elif field.manual_required %}❌{% else %}⚠️{% endif %}
+                                {{ field.field_label }}
+                            </strong>
+                            <span class="agreement-chip">{{ field.agreement }} agreement</span>
+                        </div>
+
+                        {% if field.is_high_confidence %}
+                        <p class="hint-text">High confidence: all 3 methods agree.</p>
+                        {% else %}
+                        <ul class="method-value-list">
+                            <li><strong>Method 1 (OCR):</strong> {{ field.method1_value or "No value" }}</li>
+                            <li><strong>Method 2 (PyPDF2):</strong> {{ field.method2_value or "No value" }}</li>
+                            <li><strong>Method 3 (pdfplumber):</strong> {{ field.method3_value or "No value" }}</li>
+                        </ul>
+                        {% if field.manual_required %}
+                        <p class="warning-text">Manual entry required for this field.</p>
+                        {% endif %}
+                        {% endif %}
+
+                        {% if field.method_options and not field.is_high_confidence %}
+                        <div class="form-group">
+                            <label for="choice_{{ field.field_name }}">Choose extracted value</label>
+                            <select id="choice_{{ field.field_name }}"
+                                    class="extraction-choice"
+                                    data-target="verified_{{ field.field_name }}">
+                                <option value="">Select an extracted value...</option>
+                                {% for option in field.method_options %}
+                                <option value="{{ option }}">{{ option }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        {% endif %}
+
+                        <div class="form-group">
+                            <label for="verified_{{ field.field_name }}">Verified {{ field.field_label }} *</label>
+                            {% if field.input_type == "textarea" %}
+                            <textarea id="verified_{{ field.field_name }}"
+                                      name="verified_{{ field.field_name }}"
+                                      rows="2"
+                                      data-high="{{ 1 if field.is_high_confidence else 0 }}"
+                                      data-suggested="{{ field.suggested_value|e }}"
+                                      required>{{ field.input_value }}</textarea>
+                            {% elif field.input_type == "date" %}
+                            <input type="date"
+                                   id="verified_{{ field.field_name }}"
+                                   name="verified_{{ field.field_name }}"
+                                   value="{{ field.input_value }}"
+                                   data-high="{{ 1 if field.is_high_confidence else 0 }}"
+                                   data-suggested="{{ field.suggested_value|e }}"
+                                   required>
+                            {% else %}
+                            <input type="text"
+                                   id="verified_{{ field.field_name }}"
+                                   name="verified_{{ field.field_name }}"
+                                   value="{{ field.input_value }}"
+                                   data-high="{{ 1 if field.is_high_confidence else 0 }}"
+                                   data-suggested="{{ field.suggested_value|e }}"
+                                   required>
+                            {% endif %}
+                        </div>
+
+                        {% if field.manually_verified %}
+                        <small class="verified-tag">Verified</small>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                <div class="extraction-actions-row">
+                    <button type="button" class="btn btn-small btn-secondary" id="acceptHighConfidenceBtn">
+                        Accept High-Confidence Values
+                    </button>
+                    <button type="submit" class="btn btn-secondary">Save Verified Extraction</button>
+                </div>
+            </form>
+
+            {% if extracted_data.raw_text_excerpt %}
+            <details>
+                <summary class="summary-btn">Preview OCR text excerpt</summary>
+                <pre class="ocr-preview">{{ extracted_data.raw_text_excerpt[:1200] }}</pre>
+            </details>
+            {% endif %}
+        </div>
+
+        <form method="post" action="{{ url_for('approve_transaction', transaction_id=transaction.id) }}" class="stack-form">
+            <div class="form-section">
+                <h4>Enter Contract Dates</h4>
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label for="effective_date">Effective Date *</label>
+                        <input type="date" id="effective_date" name="effective_date"
+                               value="{{ transaction.effective_date_input }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="closing_date">Closing Date *</label>
+                        <input type="date" id="closing_date" name="closing_date"
+                               value="{{ transaction.closing_date_input }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="earnest_due_date">Earnest Money Due *</label>
+                        <input type="date" id="earnest_due_date" name="earnest_due_date"
+                               value="{{ transaction.earnest_due_date_input }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="option_period_end_date">Option Period End *</label>
+                        <input type="date" id="option_period_end_date" name="option_period_end_date"
+                               value="{{ transaction.option_period_end_date_input }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="financing_approval_date">Financing Approval *</label>
+                        <input type="date" id="financing_approval_date" name="financing_approval_date"
+                               value="{{ transaction.financing_approval_date_input }}" required>
+                    </div>
+                </div>
+                <p class="hint-text">
+                    Effective date auto-fills earnest (+3), option end (+10), and financing (+21). You can adjust manually.
+                </p>
+            </div>
+
+            <div class="form-section">
+                <h4>Transaction Parties</h4>
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label for="buyer_name">Buyer Name *</label>
+                        <input type="text" id="buyer_name" name="buyer_name" value="{{ transaction.buyer_name or '' }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="buyer_phone">Buyer Phone</label>
+                        <input type="tel" id="buyer_phone" name="buyer_phone" value="{{ transaction.buyer_phone or '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="buyer_email">Buyer Email (for client portal)</label>
+                        <input type="email" id="buyer_email" name="buyer_email" value="{{ client_portal_links.buyer.email or '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="seller_name">Seller Name *</label>
+                        <input type="text" id="seller_name" name="seller_name" value="{{ transaction.seller_name or '' }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="seller_phone">Seller Phone</label>
+                        <input type="tel" id="seller_phone" name="seller_phone" value="{{ transaction.seller_phone or '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="seller_email">Seller Email (for client portal)</label>
+                        <input type="email" id="seller_email" name="seller_email" value="{{ client_portal_links.seller.email or '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="lender_name">Lender Name</label>
+                        <input type="text" id="lender_name" name="lender_name" value="{{ transaction.lender_name or '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="lender_email">Lender Email</label>
+                        <input type="email" id="lender_email" name="lender_email" value="{{ transaction.lender_email or '' }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="title_company">Title Company *</label>
+                        <input type="text" id="title_company" name="title_company" value="{{ transaction.title_company or '' }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="title_company_email">Title Company Email</label>
+                        <input type="email" id="title_company_email" name="title_company_email" value="{{ transaction.title_officer_email or '' }}">
+                    </div>
+                </div>
+            </div>
+
+            {% if not extraction_review.all_verified %}
+            <div class="warning-box">
+                Verify all extraction fields above before approving and creating deadlines.
+            </div>
+            {% endif %}
+            <button type="submit" class="btn approve-btn" {% if not extraction_review.all_verified %}disabled{% endif %}>
+                APPROVE & ACTIVATE TRANSACTION
+            </button>
+        </form>
+    </div>
+</section>
+{% elif mode == "active" %}
+<section class="layout-two-col active-layout">
+    <div class="left-col">
+        <article class="card" id="tasks">
+            <h3>Tasks</h3>
+            {% if task_preview %}
+            <ul class="simple-list">
+                {% for task in task_preview %}
+                <li class="list-row state-{{ task.status_class }}">
+                    <label>
+                        <input type="checkbox" {% if task.completed or task.status == 'completed' %}checked{% endif %} disabled>
+                        <span>{{ task.task_description }}</span>
+                    </label>
+                    <div class="row-meta">
+                        <span>{{ task.due_label }}</span>
+                        <small>{{ task.category_label }}</small>
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty-box">No tasks created yet.</div>
+            {% endif %}
+            <a class="text-link" href="/tc/tasks?transaction_id={{ transaction.id }}">View all {{ task_total }} tasks</a>
+        </article>
+
+        <article class="card" id="documents">
+            <h3>Documents</h3>
+            <form method="post" action="{{ url_for('upload_transaction_document', transaction_id=transaction.id) }}"
+                  enctype="multipart/form-data" class="upload-row">
+                <select name="document_type" required>
+                    <option value="">Document type...</option>
+                    <option value="earnest_receipt">Earnest Receipt</option>
+                    <option value="option_receipt">Option Receipt</option>
+                    <option value="seller_disclosure">Seller Disclosure</option>
+                    <option value="survey">Survey</option>
+                    <option value="hoa_docs">HOA Docs</option>
+                    <option value="title_commitment">Title Commitment</option>
+                    <option value="inspection_report">Inspection Report</option>
+                    <option value="appraisal">Appraisal</option>
+                    <option value="loan_approval">Loan Approval</option>
+                    <option value="insurance_binder">Insurance Binder</option>
+                    <option value="settlement_statement">Settlement Statement</option>
+                    <option value="other">Other</option>
+                </select>
+                <input type="file" name="document_file" accept=".pdf,.jpg,.jpeg,.png" required>
+                <button type="submit" class="btn">Upload Document</button>
+            </form>
+
+            {% if missing_document_types %}
+            <div class="warning-box">
+                <strong>Missing documents:</strong>
+                {% for item in missing_document_items %}
+                    {{ item.document_label }}{% if not loop.last %}, {% endif %}
+                {% endfor %}
+                <div class="missing-doc-actions">
+                    {% for item in missing_document_items %}
+                    <form method="post" action="{{ url_for('send_document_request_now', transaction_id=transaction.id) }}"
+                          class="inline-doc-request-form">
+                        <input type="hidden" name="document_type" value="{{ item.document_type }}">
+                        <button type="submit" class="btn btn-small btn-secondary">
+                            Send request now: {{ item.document_label }}
+                        </button>
+                        <p class="request-target-note">Recipient: {{ item.requested_from_label }}</p>
+                    </form>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            {% if document_requests %}
+            <div class="doc-requests-box">
+                <h4>Document Requests</h4>
+                <ul class="simple-list">
+                    {% for req in document_requests %}
+                    <li class="list-row request-row status-{{ req.status }}">
+                        <div>
+                            <strong>{{ req.document_label }}</strong>
+                            <p>Requested from {{ req.requested_from_label }}</p>
+                            {% if req.email_sent_label %}
+                            <small>Email sent: {{ req.email_sent_label }}</small><br>
+                            {% endif %}
+                            {% if req.reminder_sent_label %}
+                            <small>Reminder sent: {{ req.reminder_sent_label }}</small><br>
+                            {% endif %}
+                            {% if req.received_label %}
+                            <small>Received: {{ req.received_label }}</small>
+                            {% endif %}
+                        </div>
+                        <span class="request-status status-{{ req.status }}">{{ req.status_label }}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
+            <div class="doc-analysis-box">
+                <h4>Document Analysis</h4>
+                <p>
+                    Analyzed: {{ analysis_overview.total_analyzed }} |
+                    Pending review: {{ analysis_overview.pending_review_count }} |
+                    Action items: {{ analysis_overview.action_item_count }}
+                </p>
+                <a class="text-link" href="{{ url_for('tc_document_analysis', transaction_id=transaction.id) }}">
+                    View Full Analysis Dashboard
+                </a>
+            </div>
+
+            {% if documents %}
+            <ul class="simple-list">
+                {% for doc in documents %}
+                <li class="list-row">
+                    <span>
+                        <strong>{{ doc.document_type.replace('_', ' ').title() }}:</strong> {{ doc.filename }}
+                        {% if doc.was_reclassified %}
+                        <small class="doc-classification-pill">
+                            Reclassified from {{ doc.original_document_type|replace('_', ' ')|title }}
+                        </small>
+                        {% endif %}
+                        <small class="doc-analysis-status status-{{ 'reviewed' if doc.analysis_reviewed else ('pending' if doc.analysis_available else 'none') }}">
+                            Analysis: {{ doc.analysis_status_label }}
+                            {% if doc.analysis_action_count %}
+                            ({{ doc.analysis_action_count }} actions)
+                            {% endif %}
+                        </small>
+                        <form method="post"
+                              action="{{ url_for('correct_document_classification', document_id=doc.id) }}"
+                              class="doc-correction-form">
+                            <label class="small-muted">Correct document type</label>
+                            <div class="doc-correction-row">
+                                <select name="corrected_document_type" required>
+                                    {% for doc_type in document_classification_types %}
+                                    <option value="{{ doc_type }}" {% if doc.document_type == doc_type %}selected{% endif %}>
+                                        {{ doc_type|replace('_', ' ')|title }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <input type="text" name="correction_reason" maxlength="180" placeholder="Reason (optional)">
+                                <button type="submit" class="btn btn-small btn-secondary">Update</button>
+                            </div>
+                        </form>
+                    </span>
+                    <div class="actions-inline">
+                        <a href="{{ url_for('view_document', document_id=doc.id) }}" title="View">View</a>
+                        <a href="{{ url_for('download_document', document_id=doc.id) }}" title="Download">Download</a>
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty-box">No documents uploaded yet.</div>
+            {% endif %}
+        </article>
+
+        <article class="card" id="communications">
+            <h3>Communication Log</h3>
+            <div class="inbound-alias-box">
+                <p><strong>Inbound Alias Addresses</strong></p>
+                <ul class="simple-list compact-list">
+                    <li><code>{{ inbound_aliases.buyer }}</code></li>
+                    <li><code>{{ inbound_aliases.seller }}</code></li>
+                    <li><code>{{ inbound_aliases.lender }}</code></li>
+                </ul>
+            </div>
+            <details>
+                <summary class="summary-btn">Inbound Routing Rules</summary>
+                <form method="post"
+                      action="{{ url_for('save_inbound_email_rule', transaction_id=transaction.id) }}"
+                      class="stack-form compact-form">
+                    <div class="grid-2">
+                        <div class="form-group">
+                            <label>Sender Role</label>
+                            <select name="sender_role" required>
+                                <option value="lender">Lender</option>
+                                <option value="buyer">Buyer</option>
+                                <option value="seller">Seller</option>
+                                <option value="inspector">Inspector</option>
+                                <option value="title_company">Title Company</option>
+                                <option value="agent">Agent</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Forward Policy</label>
+                            <select name="forward_policy">
+                                <option value="default">Default routing</option>
+                                <option value="all">Always forward awareness</option>
+                                <option value="never">Never auto-forward</option>
+                            </select>
+                        </div>
+                    </div>
+                    <label class="checkbox-row">
+                        <input type="checkbox" name="always_notify_margaret" value="true">
+                        Always notify Margaret (SMS) for this sender role
+                    </label>
+                    <p class="small-muted">
+                        Current lender rule: notify={{ "yes" if inbound_rules.lender.always_notify_margaret else "no" }},
+                        policy={{ inbound_rules.lender.forward_policy }}
+                    </p>
+                    <button type="submit" class="btn btn-secondary">Save Inbound Rule</button>
+                </form>
+            </details>
+            {% if risk_state.is_at_risk %}
+            <div class="notice-banner notice-error" style="margin-top:12px;">
+                <strong>At Risk:</strong> {{ risk_state.reason or "Sensitive concern detected." }}
+                {% if risk_state.flagged_at_label %}<small>(flagged {{ risk_state.flagged_at_label }})</small>{% endif %}
+            </div>
+            {% endif %}
+            <details open>
+                <summary class="summary-btn">Log Call/Email</summary>
+                <form method="post" action="{{ url_for('log_transaction_communication', transaction_id=transaction.id) }}"
+                      class="stack-form compact-form">
+                    <div class="grid-2">
+                        <div class="form-group">
+                            <label>Type</label>
+                            <select name="communication_type" required>
+                                <option value="phone_call">Phone Call</option>
+                                <option value="email">Email</option>
+                                <option value="text">Text</option>
+                                <option value="meeting">Meeting</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Contact Party</label>
+                            <select name="contact_party" required>
+                                <option value="agent">Agent</option>
+                                <option value="buyer">Buyer</option>
+                                <option value="seller">Seller</option>
+                                <option value="lender">Lender</option>
+                                <option value="title_company">Title Company</option>
+                                <option value="inspector">Inspector</option>
+                                <option value="hoa">HOA</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Summary</label>
+                        <textarea name="summary" rows="2" required></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Outcome (optional)</label>
+                        <textarea name="outcome" rows="2"></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-secondary">Save Communication</button>
+                </form>
+            </details>
+
+            <h4 style="margin-top:14px;">Inbound Email Timeline</h4>
+            {% if inbound_messages %}
+            <ul class="simple-list inbound-list">
+                {% for msg in inbound_messages %}
+                <li class="list-row inbound-{{ msg.urgency }}">
+                    <div>
+                        <strong>{{ msg.subject or "(No subject)" }}</strong>
+                        <p>
+                            From {{ msg.sender_email }} ({{ msg.sender_role_label }}) →
+                            {{ msg.mailbox_role_label }} alias
+                        </p>
+                        <small>
+                            Urgency: {{ msg.urgency_label }} |
+                            Category: {{ msg.category_label }} |
+                            Action Required: {{ "Yes" if msg.action_required else "No" }} |
+                            Route: {{ (msg.applied_route or msg.recommended_route or "log_only").replace('_', ' ').title() }}
+                        </small>
+                        {% if msg.sms_sent %}
+                        <small class="pill-status">Margaret alerted via SMS</small>
+                        {% endif %}
+                        {% if msg.at_risk %}
+                        <small class="pill-risk">At Risk</small>
+                        {% endif %}
+                        {% if msg.forwarded_to %}
+                        <small>Forwarded to:
+                            {% for target in msg.forwarded_to %}
+                                {{ target.role|replace('_', ' ')|title }}{% if not loop.last %}, {% endif %}
+                            {% endfor %}
+                        </small>
+                        {% endif %}
+                        {% if msg.qa_decision and msg.qa_decision != 'none' %}
+                        <div class="qa-suggestion-box">
+                            <p>
+                                <strong>Smart Q&A:</strong>
+                                {{ msg.qa_decision_label }}
+                                {% if msg.qa_confidence_pct %}
+                                ({{ "%.1f"|format(msg.qa_confidence_pct) }}%)
+                                {% endif %}
+                            </p>
+                            {% if msg.qa_answer_text %}
+                            <p class="qa-answer-preview">{{ msg.qa_answer_text }}</p>
+                            {% endif %}
+                            {% if msg.qa_decision == 'auto_answer' and msg.reply_message_id %}
+                            <small class="pill-status">Auto-answer sent · {{ msg.replied_at_label or "just now" }}</small>
+                            {% elif msg.reply_message_id %}
+                            <small class="pill-status">Margaret replied · {{ msg.replied_at_label or "recently" }}</small>
+                            {% else %}
+                            {% if msg.qa_answer_text %}
+                            <form method="post"
+                                  action="{{ url_for('reply_inbound_email_with_qa', transaction_id=transaction.id, message_id=msg.id) }}"
+                                  class="stack-form compact-form inline-override-form">
+                                <input type="hidden" name="action" value="use_suggested">
+                                <button type="submit" class="btn btn-small btn-secondary">Use Suggested Answer</button>
+                            </form>
+                            {% endif %}
+                            <details>
+                                <summary class="summary-btn">Edit / Send Reply</summary>
+                                <form method="post"
+                                      action="{{ url_for('reply_inbound_email_with_qa', transaction_id=transaction.id, message_id=msg.id) }}"
+                                      class="stack-form compact-form inline-override-form">
+                                    <input type="hidden" name="action" value="send_custom">
+                                    <div class="form-group">
+                                        <label>Reply Email Text</label>
+                                        <textarea name="answer_text" rows="3" required>{{ msg.qa_answer_text or '' }}</textarea>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Q&A Category</label>
+                                        <select name="qa_category">
+                                            {% for category_key, category_label in common_qa_categories %}
+                                            <option value="{{ category_key }}" {% if msg.category == category_key %}selected{% endif %}>
+                                                {{ category_label }}
+                                            </option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                    <button type="submit" class="btn btn-small btn-secondary">Send Reply + Learn</button>
+                                </form>
+                            </details>
+                            {% endif %}
+                        </div>
+                        {% else %}
+                        <details>
+                            <summary class="summary-btn">Reply and Save to Smart Q&A</summary>
+                            <form method="post"
+                                  action="{{ url_for('reply_inbound_email_with_qa', transaction_id=transaction.id, message_id=msg.id) }}"
+                                  class="stack-form compact-form inline-override-form">
+                                <input type="hidden" name="action" value="send_custom">
+                                <div class="form-group">
+                                    <label>Reply Email Text</label>
+                                    <textarea name="answer_text" rows="3" required></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label>Q&A Category</label>
+                                    <select name="qa_category">
+                                        {% for category_key, category_label in common_qa_categories %}
+                                        <option value="{{ category_key }}" {% if msg.category == category_key %}selected{% endif %}>
+                                            {{ category_label }}
+                                        </option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-small btn-secondary">Send Reply + Save Q&A</button>
+                            </form>
+                        </details>
+                        {% endif %}
+                        <details>
+                            <summary class="summary-btn">Override Routing</summary>
+                            <form method="post"
+                                  action="{{ url_for('override_inbound_email_routing', transaction_id=transaction.id, message_id=msg.id) }}"
+                                  class="stack-form compact-form inline-override-form">
+                                <div class="grid-2">
+                                    <div class="form-group">
+                                        <label>Override Route</label>
+                                        <select name="override_route" required>
+                                            <option value="log_only">Log only</option>
+                                            <option value="medium_awareness">Forward relevant parties</option>
+                                            <option value="high_action">High urgency (SMS + broad forward)</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Override Notes</label>
+                                        <input type="text" name="override_notes" maxlength="240">
+                                    </div>
+                                </div>
+                                <label class="checkbox-row">
+                                    <input type="checkbox" name="clear_risk" value="true">
+                                    Clear At-Risk flag for this transaction
+                                </label>
+                                <button type="submit" class="btn btn-secondary btn-small">Apply Override</button>
+                            </form>
+                        </details>
+                    </div>
+                    <small>{{ msg.received_at_label }}</small>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty-box">No inbound mailbox messages yet.</div>
+            {% endif %}
+
+            {% if communications %}
+            <ul class="simple-list">
+                {% for entry in communications %}
+                <li class="list-row">
+                    <div>
+                        {% if entry.is_voice_note %}
+                        <strong>🎤 Voice Note</strong> · {{ entry.voice_note_type_label }}
+                        {% if entry.voice_review_required %}
+                        <small class="pill-risk">Needs Margaret review</small>
+                        {% endif %}
+                        {% if entry.voice_note_id %}
+                        <a class="btn btn-small btn-secondary voice-audio-btn"
+                           href="{{ url_for('tc_voice_note_audio', voice_note_id=entry.voice_note_id) }}"
+                           target="_blank"
+                           rel="noopener">Play original audio</a>
+                        {% endif %}
+                        <p>{{ entry.summary }}</p>
+                        {% if entry.voice_note_transcription %}
+                        <small class="voice-note-line"><strong>Transcription:</strong> {{ entry.voice_note_transcription }}</small>
+                        {% endif %}
+                        {% set actions = entry.voice_actions_taken or {} %}
+                        {% if actions %}
+                        <small class="voice-note-line">
+                            <strong>Actions:</strong>
+                            {% if actions.auto_executed %}Auto-executed.{% else %}No auto-execution.{% endif %}
+                            {% if actions.completed_task_ids %} Completed tasks: {{ actions.completed_task_ids|length }}.{% endif %}
+                            {% if actions.created_task_ids %} Created tasks: {{ actions.created_task_ids|length }}.{% endif %}
+                            {% if actions.review_task_id %} Review task #{{ actions.review_task_id }} created.{% endif %}
+                        </small>
+                        {% endif %}
+                        <small class="voice-note-line">Status: {{ entry.voice_note_status_label }} · Confidence: {{ entry.voice_confidence_score }}%</small>
+                        {% else %}
+                        <strong>{{ entry.type_label }}</strong> with {{ entry.party_label }}
+                        <p>{{ entry.summary }}</p>
+                        {% if entry.outcome %}<small>Outcome: {{ entry.outcome }}</small>{% endif %}
+                        {% endif %}
+                    </div>
+                    <small>{{ entry.created_at_label }}</small>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty-box">No communications logged yet.</div>
+            {% endif %}
+        </article>
+    </div>
+
+    <div class="right-col">
+        <article class="card" id="timeline">
+            <h3>Timeline</h3>
+            {% if timeline %}
+            <ul class="simple-list">
+                {% for deadline in timeline %}
+                <li class="list-row state-{{ deadline.status_class }}">
+                    <span>{{ deadline.name_label }}</span>
+                    <strong>{{ deadline.deadline_label }}</strong>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty-box">No deadlines have been created yet.</div>
+            {% endif %}
+        </article>
+
+        <article class="card" id="date-cascade">
+            <h3>Automatic Cascade Date Update</h3>
+            <p class="hint-text">
+                Change a key date once and Maverick can update dependent deadlines/tasks/calendar + notify parties.
+            </p>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label for="cascadeField">Date Field</label>
+                    <select id="cascadeField">
+                        {% for item in date_cascade_fields %}
+                        <option value="{{ item.field }}" {% if item.field == 'closing_date' %}selected{% endif %}>
+                            {{ item.label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="cascadeNewDate">New Date</label>
+                    <input type="date" id="cascadeNewDate">
+                </div>
+            </div>
+            <p class="hint-text" id="cascadeCurrentDateLabel">Current date: --</p>
+
+            <div class="cascade-option-grid">
+                <label class="checkbox-row"><input type="checkbox" id="optDeadlines" checked> Update deadlines</label>
+                <label class="checkbox-row"><input type="checkbox" id="optAppointments" checked> Reschedule appointments</label>
+                <label class="checkbox-row"><input type="checkbox" id="optTasks" checked> Update tasks</label>
+                <label class="checkbox-row"><input type="checkbox" id="optCalendar" checked> Sync Google Calendar</label>
+                <label class="checkbox-row"><input type="checkbox" id="optNotify" checked> Notify parties</label>
+            </div>
+            <button type="button" class="btn btn-secondary action-btn" id="previewCascadeBtn">Preview Cascade Changes</button>
+
+            {% if date_cascade_history %}
+            <details style="margin-top:12px;">
+                <summary class="summary-btn">Recent date cascades ({{ date_cascade_history|length }})</summary>
+                <ul class="simple-list compact-list">
+                    {% for entry in date_cascade_history %}
+                    <li class="list-row">
+                        <div>
+                            <strong>{{ entry.field_label }}</strong>:
+                            {{ entry.old_date_label }} → {{ entry.new_date_label }}
+                            <p class="small-muted">Applied {{ entry.created_at_label }}</p>
+                            {% if entry.undo_available %}
+                            <small class="pill-status">Undo available until {{ entry.expires_at_label }}</small>
+                            {% else %}
+                            <small class="small-muted">Undo unavailable</small>
+                            {% endif %}
+                        </div>
+                        {% if entry.undo_available %}
+                        <button type="button"
+                                class="btn btn-small btn-secondary undo-cascade-btn"
+                                data-cascade-log-id="{{ entry.id }}">
+                            Undo
+                        </button>
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% endif %}
+        </article>
+
+        <article class="card" id="timeline-pdf">
+            <h3>Transaction Timeline PDF</h3>
+            {% if timeline_pdf_url %}
+            <p>
+                <a class="text-link" href="{{ timeline_pdf_url }}" target="_blank" rel="noopener">
+                    View Current Timeline PDF
+                </a>
+            </p>
+            {% else %}
+            <p class="hint-text">Timeline PDF has not been generated yet.</p>
+            {% endif %}
+            <form method="post" action="{{ url_for('regenerate_transaction_timeline', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Regenerate &amp; Resend Timeline</button>
+            </form>
+            <p class="hint-text">Last sent: {{ timeline_last_sent_ago or "Not sent yet" }}</p>
+            <p class="hint-text">Recipients: {{ timeline_recipients_label }}</p>
+        </article>
+
+        <article class="card" id="closing-checklist">
+            <h3>Dynamic Closing Checklist</h3>
+            {% if closing_checklist %}
+            <p><strong>Status:</strong> {{ closing_checklist.status_label }}</p>
+            <p class="hint-text">Generated: {{ closing_checklist.generated_at_label }}</p>
+            <p class="hint-text">Auto-send deadline: {{ closing_checklist.auto_send_after_label }}</p>
+            <p class="hint-text">Items: {{ closing_checklist.summary.item_count or 0 }}</p>
+            {% if closing_checklist_pdf_url %}
+            <p>
+                <a class="text-link" href="{{ closing_checklist_pdf_url }}" target="_blank" rel="noopener">
+                    View Closing Checklist PDF
+                </a>
+            </p>
+            {% endif %}
+            <a class="btn btn-secondary action-btn" href="{{ url_for('tc_closing_checklist_detail', checklist_id=closing_checklist.id) }}">
+                Review / Edit Checklist
+            </a>
+            {% else %}
+            <p class="hint-text">Checklist not generated yet. Maverick auto-generates this 3 days before closing.</p>
+            {% endif %}
+            <form method="post" action="{{ url_for('generate_transaction_closing_checklist', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Generate Dynamic Checklist</button>
+            </form>
+        </article>
+
+        <article class="card" id="calendar-sync">
+            <h3>Google Calendar Sync</h3>
+            <p class="hint-text">
+                {% if calendar_sync_settings.enabled %}
+                Enabled · Calendar: {{ calendar_sync_settings.calendar_id }} · Timezone: {{ calendar_sync_settings.timezone }}
+                {% else %}
+                Disabled globally. Enable under Smart Calendar settings.
+                {% endif %}
+            </p>
+            <form method="post" action="{{ url_for('sync_transaction_calendar_now', transaction_id=transaction.id) }}">
+                <input type="hidden" name="action" value="sync">
+                <button type="submit" class="btn btn-secondary action-btn">Sync Calendar Now</button>
+            </form>
+            <form method="post" action="{{ url_for('sync_transaction_calendar_now', transaction_id=transaction.id) }}">
+                <input type="hidden" name="action" value="delete_events">
+                <button type="submit" class="btn btn-secondary action-btn">Delete Synced Events</button>
+            </form>
+
+            <details>
+                <summary class="summary-btn">Closing Event Preferences</summary>
+                <form method="post"
+                      action="{{ url_for('save_transaction_calendar_closing', transaction_id=transaction.id) }}"
+                      class="stack-form compact-form">
+                    <div class="grid-2">
+                        <div class="form-group">
+                            <label for="closing_time">Closing Time</label>
+                            <input type="time" id="closing_time" name="closing_time" value="{{ calendar_preferences.closing_time_input }}">
+                        </div>
+                        <div class="form-group">
+                            <label for="closing_duration_minutes">Duration (minutes)</label>
+                            <input type="number" id="closing_duration_minutes" name="closing_duration_minutes"
+                                   min="30" max="240" step="15"
+                                   value="{{ calendar_preferences.closing_duration_minutes }}">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="closing_location">Closing Location</label>
+                        <input type="text" id="closing_location" name="closing_location"
+                               value="{{ calendar_preferences.closing_location or '' }}"
+                               placeholder="Title office address or meeting location">
+                    </div>
+                    <button type="submit" class="btn btn-secondary btn-small">Save Closing Calendar Details</button>
+                </form>
+            </details>
+
+            {% if calendar_mappings %}
+            <details>
+                <summary class="summary-btn">Synced Event IDs ({{ calendar_mappings|length }})</summary>
+                <ul class="simple-list compact-list calendar-map-list">
+                    {% for mapping in calendar_mappings[:12] %}
+                    <li class="list-row">
+                        <div>
+                            <strong>{{ mapping.event_type_label }}</strong> - {{ mapping.source_label }}
+                            <small class="small-muted">
+                                {{ mapping.status_label }} · {{ mapping.updated_at_label }}
+                            </small>
+                        </div>
+                        <small>{{ mapping.google_event_id }}</small>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% else %}
+            <p class="hint-text">No Google Calendar events synced yet.</p>
+            {% endif %}
+        </article>
+
+        <article class="card" id="payments">
+            <h3>Payments</h3>
+            <div class="payment-row">
+                <div>
+                    <strong>Upfront ${{ "%.2f"|format(payment_context.upfront_amount) }}</strong>
+                    <p>{{ "Paid" if transaction.payment_upfront_paid else "Pending" }}</p>
+                </div>
+                {% if not transaction.payment_upfront_paid %}
+                <form method="post" action="{{ url_for('mark_transaction_payment', transaction_id=transaction.id) }}">
+                    <input type="hidden" name="payment_type" value="upfront">
+                    <button type="submit" class="btn btn-small">Mark Paid</button>
+                </form>
+                {% endif %}
+            </div>
+            <div class="payment-row">
+                <div>
+                    <strong>Closing ${{ "%.2f"|format(payment_context.closing_amount) }}</strong>
+                    <p>{{ "Paid" if transaction.payment_closing_paid else "Pending" }}</p>
+                </div>
+                {% if not transaction.payment_closing_paid %}
+                <form method="post" action="{{ url_for('mark_transaction_payment', transaction_id=transaction.id) }}">
+                    <input type="hidden" name="payment_type" value="closing">
+                    <button type="submit" class="btn btn-small">Mark Paid</button>
+                </form>
+                {% endif %}
+            </div>
+            <p class="outstanding">Outstanding: ${{ "%.2f"|format(payment_context.outstanding_amount) }}</p>
+        </article>
+
+        <article class="card" id="email-status">
+            <h3>Email Notifications</h3>
+            <div class="email-status-grid">
+                <div class="email-status-item state-{{ email_status.lender.state }}">
+                    <strong>Lender</strong>
+                    <p>{{ email_status.lender.label }}</p>
+                    <small>{{ transaction.lender_email or "No lender email on file" }}</small>
+                </div>
+                <div class="email-status-item state-{{ email_status.title.state }}">
+                    <strong>Title Company</strong>
+                    <p>{{ email_status.title.label }}</p>
+                    <small>{{ transaction.title_officer_email or "No title company email on file" }}</small>
+                </div>
+            </div>
+        </article>
+
+        <article class="card actions-card">
+            <h3>Actions</h3>
+            <form method="post" action="{{ url_for('generate_party_portals', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Generate Party Portals</button>
+            </form>
+            <button type="button" class="btn btn-secondary action-btn" id="openScriptLibraryBtn">📝 Use Script</button>
+            <form method="post" action="{{ url_for('generate_client_portal_link', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Generate Client Portal Link</button>
+            </form>
+            <form method="post" action="{{ url_for('regenerate_transaction_timeline', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Regenerate &amp; Resend Timeline</button>
+            </form>
+            <div class="portal-links-box">
+                <p><strong>Buyer Portal:</strong>
+                    {% if client_portal_links.buyer.exists %}
+                    <a href="{{ client_portal_links.buyer.link }}" target="_blank" rel="noopener">{{ client_portal_links.buyer.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                {% if client_portal_links.buyer.last_accessed_label %}
+                <p><small>Last buyer access: {{ client_portal_links.buyer.last_accessed_label }}</small></p>
+                {% endif %}
+                <p><strong>Seller Portal:</strong>
+                    {% if client_portal_links.seller.exists %}
+                    <a href="{{ client_portal_links.seller.link }}" target="_blank" rel="noopener">{{ client_portal_links.seller.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                {% if client_portal_links.seller.last_accessed_label %}
+                <p><small>Last seller access: {{ client_portal_links.seller.last_accessed_label }}</small></p>
+                {% endif %}
+            </div>
+            <div class="portal-links-box">
+                <p><strong>Buyer Party Portal:</strong>
+                    {% if party_portal_links.buyer.exists %}
+                    <a href="{{ party_portal_links.buyer.link }}" target="_blank" rel="noopener">{{ party_portal_links.buyer.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                <p><strong>Seller Party Portal:</strong>
+                    {% if party_portal_links.seller.exists %}
+                    <a href="{{ party_portal_links.seller.link }}" target="_blank" rel="noopener">{{ party_portal_links.seller.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                <p><strong>Agent Party Portal:</strong>
+                    {% if party_portal_links.agent.exists %}
+                    <a href="{{ party_portal_links.agent.link }}" target="_blank" rel="noopener">{{ party_portal_links.agent.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                <p><small>Views: {{ party_portal_analytics.views }} · Docs Downloaded: {{ party_portal_analytics.document_downloads }} · Text Questions: {{ party_portal_analytics.text_questions_after_portal }}</small></p>
+            </div>
+            {% if script_effectiveness.best_line %}
+            <div class="portal-links-box">
+                <p><strong>Script Effectiveness:</strong> {{ script_effectiveness.best_line }}</p>
+            </div>
+            {% endif %}
+            <form method="post" action="{{ url_for('mark_transaction_complete', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn action-btn">Mark Complete</button>
+            </form>
+            <form method="post" action="{{ url_for('cancel_transaction', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Cancel Transaction</button>
+            </form>
+        </article>
+    </div>
+</section>
+
+<div class="cascade-modal-backdrop" id="scriptModalBackdrop">
+    <div class="cascade-modal script-modal" role="dialog" aria-modal="true" aria-labelledby="scriptModalTitle">
+        <h3 id="scriptModalTitle">Scenario Script Library</h3>
+        <p class="hint-text">Choose a situation to load personalized script approaches.</p>
+        <label for="situationType"><strong>Select Situation</strong></label>
+        <select id="situationType">
+            <option value="">Choose situation...</option>
+            <option value="appraisal_gap">Appraisal Gap</option>
+            <option value="inspection_negotiate">Inspection Negotiations</option>
+            <option value="seller_wont_repair">Seller Won't Repair</option>
+            <option value="buyer_cold_feet">Buyer Cold Feet</option>
+            <option value="lender_delay">Lender Delays</option>
+            <option value="title_issue">Title Issues</option>
+            <option value="extension_request">Extension Request</option>
+            <option value="termination">Termination Notice</option>
+            <option value="rush_closing">Rush Closing</option>
+        </select>
+        <p class="hint-text" id="scriptStatsLine">{{ script_effectiveness.best_line or '' }}</p>
+        <div id="scriptsContainer" class="script-container"></div>
+        <div class="actions-inline">
+            <button type="button" class="btn btn-secondary" id="closeScriptModalBtn">Close</button>
+        </div>
+    </div>
+</div>
+
+<div class="cascade-modal-backdrop" id="cascadeModalBackdrop">
+    <div class="cascade-modal" role="dialog" aria-modal="true" aria-labelledby="cascadeModalTitle">
+        <h3 id="cascadeModalTitle">Confirm Cascade Update</h3>
+        <p id="cascadeModalIntro" class="hint-text"></p>
+        <ul class="simple-list compact-list" id="cascadeModalSummary"></ul>
+        <div class="warning-box" id="cascadeConflictBox" style="display:none;">
+            <strong>Conflicts detected:</strong>
+            <ul id="cascadeConflictList"></ul>
+        </div>
+        <div class="actions-inline">
+            <button type="button" class="btn btn-secondary" id="cancelCascadeBtn">Cancel</button>
+            <button type="button" class="btn" id="confirmCascadeBtn">Confirm Changes</button>
+        </div>
+    </div>
+</div>
+{% else %}
+<section class="card summary-card">
+    <h3>{{ "Completed Transaction Summary" if status == "COMPLETED" else "Transaction Summary" }}</h3>
+    <div class="grid-2">
+        <div>
+            <p><strong>Agent:</strong> {{ transaction.agent_name }} ({{ transaction.agent_phone }})</p>
+            <p><strong>Agent Email:</strong> {{ transaction.agent_email }}</p>
+            <p><strong>Buyer:</strong> {{ transaction.buyer_name or "Not set" }}</p>
+            <p><strong>Seller:</strong> {{ transaction.seller_name or "Not set" }}</p>
+            <p><strong>Lender:</strong> {{ transaction.lender_name or "Not set" }}</p>
+            <p><strong>Lender Email:</strong> {{ transaction.lender_email or "Not set" }}</p>
+            <p><strong>Title Company:</strong> {{ transaction.title_company or "Not set" }}</p>
+            <p><strong>Title Email:</strong> {{ transaction.title_officer_email or "Not set" }}</p>
+        </div>
+        <div>
+            <p><strong>Effective:</strong> {{ transaction.effective_date|default("Not set", true) }}</p>
+            <p><strong>Closing:</strong> {{ transaction.closing_date|default("Not set", true) }}</p>
+            <p><strong>Upfront Payment:</strong> {{ "Paid" if transaction.payment_upfront_paid else "Pending" }}</p>
+            <p><strong>Closing Payment:</strong> {{ "Paid" if transaction.payment_closing_paid else "Pending" }}</p>
+            <p><strong>Total Outstanding:</strong> ${{ "%.2f"|format(payment_context.outstanding_amount) }}</p>
+        </div>
+    </div>
+    <div class="email-status-grid">
+        <div class="email-status-item state-{{ email_status.lender.state }}">
+            <strong>Lender Notification</strong>
+            <p>{{ email_status.lender.label }}</p>
+        </div>
+        <div class="email-status-item state-{{ email_status.title.state }}">
+            <strong>Title Notification</strong>
+            <p>{{ email_status.title.label }}</p>
+        </div>
+    </div>
+</section>
+
+<section class="card">
+    <h3>All Documents</h3>
+    {% if documents %}
+    <ul class="simple-list">
+        {% for doc in documents %}
+        <li class="list-row">
+            <span>{{ doc.document_type.replace('_', ' ').title() }} - {{ doc.filename }}</span>
+            <div class="actions-inline">
+                <a href="{{ url_for('view_document', document_id=doc.id) }}" title="View">View</a>
+                <a href="{{ url_for('download_document', document_id=doc.id) }}" title="Download">Download</a>
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty-box">No documents found.</div>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>Communication History</h3>
+    {% if communications %}
+    <ul class="simple-list">
+        {% for entry in communications %}
+        <li class="list-row">
+            <div>
+                {% if entry.is_voice_note %}
+                <strong>🎤 Voice Note</strong> · {{ entry.voice_note_type_label }}
+                {% if entry.voice_review_required %}
+                <small class="pill-risk">Needs Margaret review</small>
+                {% endif %}
+                {% if entry.voice_note_id %}
+                <a class="btn btn-small btn-secondary voice-audio-btn"
+                   href="{{ url_for('tc_voice_note_audio', voice_note_id=entry.voice_note_id) }}"
+                   target="_blank"
+                   rel="noopener">Play original audio</a>
+                {% endif %}
+                <p>{{ entry.summary }}</p>
+                {% if entry.voice_note_transcription %}
+                <small class="voice-note-line"><strong>Transcription:</strong> {{ entry.voice_note_transcription }}</small>
+                {% endif %}
+                {% set actions = entry.voice_actions_taken or {} %}
+                {% if actions %}
+                <small class="voice-note-line">
+                    <strong>Actions:</strong>
+                    {% if actions.auto_executed %}Auto-executed.{% else %}No auto-execution.{% endif %}
+                    {% if actions.completed_task_ids %} Completed tasks: {{ actions.completed_task_ids|length }}.{% endif %}
+                    {% if actions.created_task_ids %} Created tasks: {{ actions.created_task_ids|length }}.{% endif %}
+                    {% if actions.review_task_id %} Review task #{{ actions.review_task_id }} created.{% endif %}
+                </small>
+                {% endif %}
+                <small class="voice-note-line">Status: {{ entry.voice_note_status_label }} · Confidence: {{ entry.voice_confidence_score }}%</small>
+                {% else %}
+                <strong>{{ entry.type_label }}</strong> ({{ entry.party_label }})
+                <p>{{ entry.summary }}</p>
+                {% if entry.outcome %}<small>Outcome: {{ entry.outcome }}</small>{% endif %}
+                {% endif %}
+            </div>
+            <small>{{ entry.created_at_label }}</small>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty-box">No communications logged.</div>
+    {% endif %}
+</section>
+{% endif %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.top-bar {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+}
+
+.back-link {
+    color: #1d4ed8;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.meta-line {
+    margin-top: 6px;
+    color: #334155;
+}
+
+.meta-right {
+    text-align: right;
+    color: #334155;
+}
+
+.status-pill {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.status-needs-margaret-review {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.status-active {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.status-completed {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.status-cancelled {
+    background: #e2e8f0;
+    color: #334155;
+}
+
+.layout-two-col {
+    display: grid;
+    gap: 16px;
+}
+
+.review-layout {
+    grid-template-columns: 1.1fr 1fr;
+}
+
+.active-layout {
+    grid-template-columns: 2fr 1fr;
+}
+
+.left-col,
+.right-col {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.pdf-shell {
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    overflow: hidden;
+    min-height: 520px;
+}
+
+.pdf-shell iframe {
+    width: 100%;
+    height: 520px;
+    border: 0;
+}
+
+.download-btn {
+    margin-top: 12px;
+}
+
+.info-block {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 14px;
+}
+
+.badge-row {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.email-status-grid {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.email-status-item {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: #f8fafc;
+}
+
+.email-status-item p {
+    margin: 4px 0 0;
+    font-size: 13px;
+}
+
+.email-status-item small {
+    color: #64748b;
+}
+
+.email-status-item.state-sent {
+    background: #f0fdf4;
+    border-color: #86efac;
+}
+
+.email-status-item.state-pending {
+    background: #fffbeb;
+    border-color: #fcd34d;
+}
+
+.email-status-item.state-failed {
+    background: #fff1f2;
+    border-color: #fda4af;
+}
+
+.email-status-item.state-missing {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+}
+
+.tag {
+    border-radius: 999px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.tag-rush {
+    background: #ffedd5;
+    color: #9a3412;
+}
+
+.tag-referral {
+    background: #e0f2fe;
+    color: #075985;
+}
+
+.tag-status {
+    background: #e2e8f0;
+    color: #1e293b;
+}
+
+.tag-confirmed {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.tag-match {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.tag-mismatch {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.stack-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.form-section {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 6px;
+    color: #0f172a;
+    font-weight: 600;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    font-size: 15px;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+.grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.hint-text {
+    margin-top: 6px;
+    color: #64748b;
+    font-size: 13px;
+}
+
+.extraction-section {
+    margin-bottom: 12px;
+}
+
+.extraction-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.extraction-field {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 10px;
+    background: #ffffff;
+}
+
+.extraction-field.confidence-high {
+    border-color: #86efac;
+    background: #f0fdf4;
+}
+
+.extraction-field.confidence-low {
+    border-color: #fde68a;
+    background: #fffbeb;
+}
+
+.extraction-field-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.agreement-chip {
+    background: #e2e8f0;
+    color: #1e293b;
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.method-value-list {
+    margin: 0 0 8px 0;
+    padding-left: 18px;
+    color: #334155;
+    font-size: 13px;
+}
+
+.warning-text {
+    color: #991b1b;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.verified-tag {
+    display: inline-block;
+    margin-top: 4px;
+    color: #166534;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+.extraction-actions-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.ocr-preview {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 8px;
+    background: #f8fafc;
+    color: #334155;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+}
+
+.approve-btn {
+    width: 100%;
+    font-size: 17px;
+    background: linear-gradient(135deg, #16a34a, #10b981);
+}
+
+.approve-btn:hover {
+    background: linear-gradient(135deg, #15803d, #059669);
+}
+
+.simple-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.list-row {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: center;
+}
+
+.row-meta {
+    text-align: right;
+    color: #64748b;
+}
+
+.state-overdue {
+    background: #fff1f2;
+    border-color: #fda4af;
+}
+
+.state-today {
+    background: #fffbeb;
+    border-color: #fcd34d;
+}
+
+.state-complete {
+    background: #f0fdf4;
+    border-color: #86efac;
+}
+
+.upload-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.warning-box {
+    background: #fffbeb;
+    border: 1px solid #facc15;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+    color: #854d0e;
+}
+
+.notice-banner {
+    margin-bottom: 14px;
+}
+
+.missing-doc-actions {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 8px;
+}
+
+.inline-doc-request-form {
+    background: rgba(255, 255, 255, 0.6);
+    border: 1px solid #fde68a;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+.request-target-note {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #92400e;
+}
+
+.doc-requests-box {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+    background: #f8fafc;
+}
+
+.doc-analysis-box {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+    background: #f8fbff;
+}
+
+.doc-analysis-box h4 {
+    margin-bottom: 6px;
+    color: #0f172a;
+}
+
+.doc-analysis-status {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.doc-analysis-status.status-reviewed {
+    color: #166534;
+}
+
+.doc-analysis-status.status-pending {
+    color: #92400e;
+}
+
+.doc-analysis-status.status-none {
+    color: #64748b;
+}
+
+.doc-classification-pill {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
+.doc-correction-form {
+    margin-top: 8px;
+}
+
+.doc-correction-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+    align-items: center;
+    margin-top: 4px;
+}
+
+.doc-requests-box h4 {
+    margin-bottom: 8px;
+    color: #0f172a;
+}
+
+.request-row {
+    align-items: flex-start;
+}
+
+.request-status {
+    border-radius: 999px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.request-status.status-pending {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.request-status.status-overdue {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.request-status.status-received {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.actions-inline a {
+    text-decoration: none;
+    margin-left: 8px;
+}
+
+.summary-btn {
+    cursor: pointer;
+    color: #1d4ed8;
+    font-weight: 700;
+    margin-bottom: 10px;
+}
+
+.compact-form {
+    margin-top: 10px;
+}
+
+.inbound-alias-box {
+    border: 1px solid #dbeafe;
+    background: #f8fbff;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.compact-list li {
+    padding: 4px 0;
+}
+
+.small-muted {
+    color: #475569;
+    font-size: 12px;
+    margin: 6px 0 0;
+}
+
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+    font-size: 13px;
+}
+
+.inbound-list .list-row {
+    align-items: flex-start;
+}
+
+.inbound-low {
+    border-left: 3px solid #10b981;
+}
+
+.inbound-medium {
+    border-left: 3px solid #f59e0b;
+}
+
+.inbound-high {
+    border-left: 3px solid #ef4444;
+}
+
+.pill-status,
+.pill-risk {
+    display: inline-block;
+    margin-top: 6px;
+    margin-right: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.pill-status {
+    background: #e0f2fe;
+    color: #0c4a6e;
+}
+
+.pill-risk {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.voice-audio-btn {
+    margin-left: 8px;
+}
+
+.voice-note-line {
+    display: block;
+    margin-top: 6px;
+    color: #334155;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.inline-override-form {
+    margin-top: 8px;
+}
+
+.qa-suggestion-box {
+    border: 1px solid #bfdbfe;
+    background: #eff6ff;
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 8px;
+}
+
+.qa-answer-preview {
+    background: #ffffff;
+    border: 1px solid #dbeafe;
+    border-radius: 6px;
+    padding: 8px;
+    font-size: 13px;
+    color: #1e293b;
+    white-space: pre-wrap;
+    margin: 6px 0;
+}
+
+.payment-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.outstanding {
+    font-weight: 700;
+    color: #1e293b;
+}
+
+.actions-card .action-btn {
+    width: 100%;
+    margin-bottom: 10px;
+    text-align: center;
+}
+
+.cascade-option-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin: 8px 0 10px;
+}
+
+.cascade-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 4000;
+}
+
+.cascade-modal-backdrop.open {
+    display: flex;
+}
+
+.cascade-modal {
+    width: min(680px, 100%);
+    background: #ffffff;
+    border-radius: 12px;
+    border: 1px solid #cbd5e1;
+    box-shadow: 0 18px 45px rgba(15, 23, 42, 0.28);
+    padding: 18px;
+}
+
+.cascade-modal h3 {
+    margin-bottom: 8px;
+}
+
+#cascadeModalSummary li {
+    align-items: flex-start;
+}
+
+.portal-links-box {
+    border: 1px solid #dbeafe;
+    background: #f8fbff;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+    font-size: 13px;
+    word-break: break-word;
+}
+
+.portal-links-box a {
+    color: #1d4ed8;
+    text-decoration: none;
+}
+
+.empty-box {
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    padding: 12px;
+    color: #64748b;
+    background: #f8fafc;
+}
+
+.text-link {
+    color: #1d4ed8;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.script-modal {
+    max-width: 900px;
+}
+
+.script-container {
+    max-height: 52vh;
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px;
+    background: #f8fafc;
+    margin-top: 8px;
+}
+
+.script-scenario-card {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.script-approach {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 8px;
+    background: #f8fafc;
+}
+
+.script-message {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 8px;
+    margin-top: 8px;
+    background: #ffffff;
+}
+
+.script-message p {
+    margin: 6px 0 8px;
+    white-space: pre-wrap;
+}
+
+.btn-small {
+    padding: 8px 12px;
+    font-size: 13px;
+}
+
+@media (max-width: 1024px) {
+    .review-layout,
+    .active-layout {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    .top-bar {
+        flex-direction: column;
+    }
+
+    .meta-right {
+        text-align: left;
+    }
+
+    .grid-2,
+    .upload-row,
+    .email-status-grid,
+    .doc-correction-row,
+    .cascade-option-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const effectiveInput = document.getElementById("effective_date");
+const earnestInput = document.getElementById("earnest_due_date");
+const optionEndInput = document.getElementById("option_period_end_date");
+const financingInput = document.getElementById("financing_approval_date");
+const openScriptLibraryBtn = document.getElementById("openScriptLibraryBtn");
+const scriptModalBackdrop = document.getElementById("scriptModalBackdrop");
+const closeScriptModalBtn = document.getElementById("closeScriptModalBtn");
+const situationTypeSelect = document.getElementById("situationType");
+const scriptsContainer = document.getElementById("scriptsContainer");
+const scriptStatsLine = document.getElementById("scriptStatsLine");
+let lastScriptUsageId = null;
+
+function openScriptLibrary() {
+    if (!scriptModalBackdrop) return;
+    scriptModalBackdrop.classList.add("open");
+}
+
+function closeScriptLibrary() {
+    if (!scriptModalBackdrop) return;
+    scriptModalBackdrop.classList.remove("open");
+}
+
+function recipientKeyToRole(recipientKey) {
+    const normalized = String(recipientKey || "").replace("_message", "").trim().toLowerCase();
+    if (normalized === "title") return "title_company";
+    if (normalized === "lender") return "lender";
+    if (normalized === "buyer") return "buyer";
+    if (normalized === "seller") return "seller";
+    return "agent";
+}
+
+function copyTextToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+    }
+    const temp = document.createElement("textarea");
+    temp.value = text;
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand("copy");
+    document.body.removeChild(temp);
+    return Promise.resolve();
+}
+
+function prefillCommunicationForm(recipientRole, messageText) {
+    const form = document.querySelector('form[action*="/log-communication"]');
+    if (!form) {
+        return;
+    }
+    const partySelect = form.querySelector('select[name="contact_party"]');
+    const summaryField = form.querySelector('textarea[name="summary"]');
+    if (partySelect) {
+        const option = Array.from(partySelect.options).find((opt) => opt.value === recipientRole);
+        if (option) {
+            partySelect.value = recipientRole;
+        }
+    }
+    if (summaryField) {
+        summaryField.value = messageText;
+    }
+    const detailsParent = form.closest("details");
+    if (detailsParent) {
+        detailsParent.open = true;
+    }
+    form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function trackScriptUsage(scenarioId, approachName, recipientRole, messageText, situationType, context = {}) {
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/track-script-usage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                scenario_id: Number(scenarioId),
+                approach_name: approachName,
+                recipient_role: recipientRole,
+                message_text: messageText,
+                situation_type: situationType,
+                context,
+            }),
+        });
+        const payload = await response.json();
+        if (response.ok && payload.success) {
+            lastScriptUsageId = payload.usage_id || null;
+        }
+    } catch (error) {
+        console.error("Script usage tracking failed", error);
+    }
+}
+
+function displayScripts(scenarios, stats, situationType) {
+    if (!scriptsContainer) return;
+    scriptsContainer.innerHTML = "";
+    if (scriptStatsLine) {
+        scriptStatsLine.textContent = stats && stats.best_line ? stats.best_line : "";
+    }
+    if (!Array.isArray(scenarios) || !scenarios.length) {
+        const emptyBox = document.createElement("div");
+        emptyBox.className = "empty-box";
+        emptyBox.textContent = "No matching scripts found for this situation.";
+        scriptsContainer.appendChild(emptyBox);
+        return;
+    }
+
+    scenarios.forEach((scenario) => {
+        const scenarioDiv = document.createElement("div");
+        scenarioDiv.className = "script-scenario-card";
+
+        const title = document.createElement("h3");
+        title.textContent = `${scenario.scenario_name} (${(scenario.category || "general").replace("_", " ")})`;
+        scenarioDiv.appendChild(title);
+
+        const stat = document.createElement("p");
+        const successRatePct = Number(scenario.success_rate || 0) * 100;
+        stat.className = "hint-text";
+        stat.textContent = `Usage: ${Number(scenario.usage_count || 0)} · Success: ${successRatePct.toFixed(1)}%`;
+        scenarioDiv.appendChild(stat);
+
+        (scenario.approaches || []).forEach((approach) => {
+            const approachDiv = document.createElement("div");
+            approachDiv.className = "script-approach";
+
+            const approachTitle = document.createElement("h4");
+            approachTitle.textContent = approach.approach || "Approach";
+            approachDiv.appendChild(approachTitle);
+
+            const messages = approach.messages || {};
+            Object.entries(messages).forEach(([recipientKey, messageText]) => {
+                const messageDiv = document.createElement("div");
+                messageDiv.className = "script-message";
+
+                const label = document.createElement("strong");
+                label.textContent = `To ${recipientKey.replace("_message", "").replace("_", " ")}:`;
+                messageDiv.appendChild(label);
+
+                const messageP = document.createElement("p");
+                messageP.textContent = messageText;
+                messageDiv.appendChild(messageP);
+
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "btn btn-small btn-secondary";
+                button.textContent = "Use This Script";
+                button.addEventListener("click", async () => {
+                    const recipientRole = recipientKeyToRole(recipientKey);
+                    await copyTextToClipboard(messageText);
+                    prefillCommunicationForm(recipientRole, messageText);
+                    await trackScriptUsage(
+                        scenario.scenario_id,
+                        approach.approach || "Approach",
+                        recipientRole,
+                        messageText,
+                        situationType,
+                        { scenario_name: scenario.scenario_name }
+                    );
+                    alert("Script copied and loaded into communication form.");
+                    closeScriptLibrary();
+                });
+                messageDiv.appendChild(button);
+
+                approachDiv.appendChild(messageDiv);
+            });
+            scenarioDiv.appendChild(approachDiv);
+        });
+
+        scriptsContainer.appendChild(scenarioDiv);
+    });
+}
+
+async function loadScriptsForSituation() {
+    if (!situationTypeSelect || !situationTypeSelect.value) {
+        return;
+    }
+    const situationType = situationTypeSelect.value;
+    const payload = { situation_type: situationType };
+
+    if (situationType === "appraisal_gap") {
+        const value = window.prompt("Appraised value? (numbers only)");
+        if (!value) return;
+        payload.appraisal_value = Number(String(value).replace(/[^\d.]/g, "")) || 0;
+    } else if (situationType === "inspection_negotiate") {
+        const count = window.prompt("Number of inspection items?");
+        if (!count) return;
+        payload.inspection_items_count = Number(String(count).replace(/[^\d]/g, "")) || 0;
+        const cost = window.prompt("Estimated repair cost?");
+        if (cost) {
+            payload.estimated_cost = Number(String(cost).replace(/[^\d.]/g, "")) || 0;
+        }
+        const credit = window.prompt("Requested credit amount?");
+        if (credit) {
+            payload.requested_credit = Number(String(credit).replace(/[^\d.]/g, "")) || 0;
+        }
+    } else if (situationType === "extension_request") {
+        const extensionDays = window.prompt("How many extension days are needed?");
+        if (extensionDays) {
+            payload.extension_days = Number(String(extensionDays).replace(/[^\d]/g, "")) || 0;
+        }
+    }
+
+    if (scriptsContainer) {
+        scriptsContainer.innerHTML = "<p class='hint-text'>Loading scripts...</p>";
+    }
+
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/suggest-scripts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.error || "Unable to load scripts");
+        }
+        displayScripts(result.scenarios || [], result.stats || {}, situationType);
+    } catch (error) {
+        if (scriptsContainer) {
+            scriptsContainer.innerHTML = "";
+        }
+        alert(`Could not load scripts: ${error.message}`);
+    }
+}
+
+function addDays(baseDate, days) {
+    const dateValue = new Date(baseDate + "T00:00:00");
+    if (Number.isNaN(dateValue.getTime())) {
+        return "";
+    }
+    dateValue.setDate(dateValue.getDate() + days);
+    const year = dateValue.getFullYear();
+    const month = String(dateValue.getMonth() + 1).padStart(2, "0");
+    const day = String(dateValue.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+}
+
+function autoFillContractDates() {
+    if (!effectiveInput || !effectiveInput.value) {
+        return;
+    }
+    if (earnestInput) {
+        earnestInput.value = addDays(effectiveInput.value, 3);
+    }
+    if (optionEndInput) {
+        optionEndInput.value = addDays(effectiveInput.value, 10);
+    }
+    if (financingInput) {
+        financingInput.value = addDays(effectiveInput.value, 21);
+    }
+}
+
+if (effectiveInput) {
+    effectiveInput.addEventListener("change", autoFillContractDates);
+    if (effectiveInput.value && (!earnestInput?.value || !optionEndInput?.value || !financingInput?.value)) {
+        autoFillContractDates();
+    }
+}
+
+document.querySelectorAll(".extraction-choice").forEach((selectEl) => {
+    selectEl.addEventListener("change", (event) => {
+        const targetName = event.target.getAttribute("data-target");
+        if (!targetName) {
+            return;
+        }
+        const targetField = document.querySelector(`[name="${targetName}"]`);
+        if (!targetField || !event.target.value) {
+            return;
+        }
+        targetField.value = event.target.value;
+    });
+});
+
+const acceptHighConfidenceBtn = document.getElementById("acceptHighConfidenceBtn");
+if (acceptHighConfidenceBtn) {
+    acceptHighConfidenceBtn.addEventListener("click", () => {
+        document.querySelectorAll("[data-high='1'][data-suggested]").forEach((inputEl) => {
+            if (inputEl.dataset.suggested) {
+                inputEl.value = inputEl.dataset.suggested;
+            }
+        });
+    });
+}
+
+const cascadeFieldOptions = {{ date_cascade_fields | tojson }};
+const cascadeFieldSelect = document.getElementById("cascadeField");
+const cascadeNewDateInput = document.getElementById("cascadeNewDate");
+const cascadeCurrentDateLabel = document.getElementById("cascadeCurrentDateLabel");
+const previewCascadeBtn = document.getElementById("previewCascadeBtn");
+const cascadeModalBackdrop = document.getElementById("cascadeModalBackdrop");
+const cascadeModalIntro = document.getElementById("cascadeModalIntro");
+const cascadeModalSummary = document.getElementById("cascadeModalSummary");
+const cascadeConflictBox = document.getElementById("cascadeConflictBox");
+const cascadeConflictList = document.getElementById("cascadeConflictList");
+const cancelCascadeBtn = document.getElementById("cancelCascadeBtn");
+const confirmCascadeBtn = document.getElementById("confirmCascadeBtn");
+let pendingCascadePayload = null;
+
+function getCascadeOptionValues() {
+    return {
+        update_deadlines: document.getElementById("optDeadlines")?.checked ?? true,
+        reschedule_appointments: document.getElementById("optAppointments")?.checked ?? true,
+        update_tasks: document.getElementById("optTasks")?.checked ?? true,
+        sync_calendar: document.getElementById("optCalendar")?.checked ?? true,
+        notify_parties: document.getElementById("optNotify")?.checked ?? true,
+    };
+}
+
+function selectedCascadeFieldMeta() {
+    if (!cascadeFieldSelect) {
+        return null;
+    }
+    const field = cascadeFieldSelect.value;
+    return cascadeFieldOptions.find((item) => item.field === field) || null;
+}
+
+function humanDate(isoDate) {
+    if (!isoDate) return "Not set";
+    const parsed = new Date(`${isoDate}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return isoDate;
+    return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function updateCascadeCurrentDateDisplay() {
+    if (!cascadeFieldSelect || !cascadeCurrentDateLabel || !cascadeNewDateInput) {
+        return;
+    }
+    const meta = selectedCascadeFieldMeta();
+    const currentValue = (meta && meta.value) || "";
+    cascadeCurrentDateLabel.textContent = `Current date: ${humanDate(currentValue)}`;
+    if (!cascadeNewDateInput.value && currentValue) {
+        cascadeNewDateInput.value = currentValue;
+    }
+}
+
+function openCascadeModal() {
+    if (!cascadeModalBackdrop) return;
+    cascadeModalBackdrop.classList.add("open");
+}
+
+function closeCascadeModal() {
+    if (!cascadeModalBackdrop) return;
+    cascadeModalBackdrop.classList.remove("open");
+}
+
+function renderCascadePreview(preview, fieldLabel, oldDate, newDate) {
+    if (!cascadeModalSummary || !cascadeModalIntro) return;
+    const delta = Number(preview.delta_days || 0);
+    const deltaLabel = delta > 0 ? `+${delta}` : `${delta}`;
+    cascadeModalIntro.textContent = `${fieldLabel} changed to ${humanDate(newDate)} (${deltaLabel} days)`;
+    cascadeModalSummary.innerHTML = "";
+    const options = getCascadeOptionValues();
+    const summaryRows = [];
+    if (options.update_deadlines) {
+        summaryRows.push(`Update ${preview.deadlines_updated || 0} deadlines`);
+    }
+    if (options.reschedule_appointments) {
+        summaryRows.push(`Reschedule ${preview.appointments_updated || 0} appointments`);
+    }
+    if (options.update_tasks) {
+        summaryRows.push(`Adjust ${preview.tasks_updated || 0} tasks`);
+    }
+    if (options.sync_calendar) {
+        summaryRows.push(`Update Google Calendar (${preview.calendar_events_updated || 0} events)`);
+    }
+    if (options.notify_parties) {
+        summaryRows.push("Notify buyer, seller, agent, lender, title");
+    }
+    summaryRows.push("Regenerate timeline PDF");
+    summaryRows.forEach((line) => {
+        const li = document.createElement("li");
+        li.className = "list-row";
+        li.innerHTML = `<span>✓ ${line}</span>`;
+        cascadeModalSummary.appendChild(li);
+    });
+
+    const conflicts = Array.isArray(preview.conflicts) ? preview.conflicts : [];
+    if (conflicts.length > 0) {
+        cascadeConflictList.innerHTML = "";
+        conflicts.forEach((item) => {
+            const li = document.createElement("li");
+            li.textContent = item.message || "Potential conflict detected";
+            cascadeConflictList.appendChild(li);
+        });
+        cascadeConflictBox.style.display = "block";
+    } else {
+        cascadeConflictBox.style.display = "none";
+        cascadeConflictList.innerHTML = "";
+    }
+}
+
+async function requestCascadePreview() {
+    const fieldMeta = selectedCascadeFieldMeta();
+    if (!fieldMeta) {
+        alert("Select a date field.");
+        return;
+    }
+    const oldDate = fieldMeta.value;
+    const newDate = cascadeNewDateInput?.value || "";
+    if (!oldDate) {
+        alert("Current value is not set for this field.");
+        return;
+    }
+    if (!newDate) {
+        alert("Select a new date.");
+        return;
+    }
+    const payload = {
+        field: fieldMeta.field,
+        old_date: oldDate,
+        new_date: newDate,
+        cascade_options: getCascadeOptionValues(),
+        preview_only: true,
+    };
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/update-date`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+            throw new Error(data.error || data.message || "Preview failed");
+        }
+        const preview = data.preview || {};
+        pendingCascadePayload = {
+            field: fieldMeta.field,
+            old_date: oldDate,
+            new_date: newDate,
+            cascade_options: getCascadeOptionValues(),
+            preview_only: false,
+            force: true,
+        };
+        renderCascadePreview(preview, fieldMeta.label, oldDate, newDate);
+        openCascadeModal();
+    } catch (error) {
+        alert(`Preview failed: ${error.message}`);
+    }
+}
+
+async function applyCascadeDateChange() {
+    if (!pendingCascadePayload) {
+        closeCascadeModal();
+        return;
+    }
+    confirmCascadeBtn.disabled = true;
+    const originalText = confirmCascadeBtn.textContent;
+    confirmCascadeBtn.textContent = "Applying...";
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/update-date`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(pendingCascadePayload),
+        });
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+            throw new Error(data.message || data.error || "Date cascade failed");
+        }
+        const changes = data.changes || {};
+        alert(
+            `✅ Date change applied\n` +
+            `Deadlines updated: ${changes.deadlines_updated || 0}\n` +
+            `Tasks updated: ${changes.tasks_updated || 0}\n` +
+            `Calendar events updated: ${changes.calendar_events_updated || 0}\n` +
+            `Notifications sent: ${data.notifications_sent || 0}`
+        );
+        window.location.reload();
+    } catch (error) {
+        alert(`Date change failed: ${error.message}`);
+    } finally {
+        confirmCascadeBtn.disabled = false;
+        confirmCascadeBtn.textContent = originalText;
+    }
+}
+
+async function undoCascadeChange(cascadeLogId) {
+    if (!cascadeLogId) {
+        return;
+    }
+    if (!window.confirm("Undo this date cascade and notify parties to disregard prior message?")) {
+        return;
+    }
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/update-date/undo`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cascade_log_id: Number(cascadeLogId) }),
+        });
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+            throw new Error(data.error || "Undo failed");
+        }
+        alert("Date cascade undone successfully.");
+        window.location.reload();
+    } catch (error) {
+        alert(`Undo failed: ${error.message}`);
+    }
+}
+
+if (cascadeFieldSelect && previewCascadeBtn) {
+    updateCascadeCurrentDateDisplay();
+    cascadeFieldSelect.addEventListener("change", updateCascadeCurrentDateDisplay);
+    previewCascadeBtn.addEventListener("click", requestCascadePreview);
+    cancelCascadeBtn?.addEventListener("click", closeCascadeModal);
+    confirmCascadeBtn?.addEventListener("click", applyCascadeDateChange);
+    cascadeModalBackdrop?.addEventListener("click", (event) => {
+        if (event.target === cascadeModalBackdrop) {
+            closeCascadeModal();
+        }
+    });
+    document.querySelectorAll(".undo-cascade-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+            undoCascadeChange(button.dataset.cascadeLogId);
+        });
+    });
+}
+
+if (openScriptLibraryBtn) {
+    openScriptLibraryBtn.addEventListener("click", openScriptLibrary);
+}
+if (closeScriptModalBtn) {
+    closeScriptModalBtn.addEventListener("click", closeScriptLibrary);
+}
+if (scriptModalBackdrop) {
+    scriptModalBackdrop.addEventListener("click", (event) => {
+        if (event.target === scriptModalBackdrop) {
+            closeScriptLibrary();
+        }
+    });
+}
+if (situationTypeSelect) {
+    situationTypeSelect.addEventListener("change", loadScriptsForSituation);
+}
+</script>
+{% endblock %}

@@ -1,0 +1,23 @@
+<html>
+<body style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.6;">
+    <h2>Inspection Scheduling Reminder</h2>
+    {% if custom_email_message %}
+    <p>{{ custom_email_message }}</p>
+    {% else %}
+    <p>Hi {{ agent_name }},</p>
+    <p>
+        Quick reminder for <strong>{{ property_address }}</strong>:
+        inspection should be scheduled before
+        <strong>{{ option_period_end|format_date }}</strong> ({{ days_remaining }} days remaining).
+    </p>
+    <p>Recommended inspectors:</p>
+    <ul>
+        {% for inspector in inspector_recommendations %}
+        <li>{{ inspector.name }} - {{ inspector.phone }}</li>
+        {% endfor %}
+    </ul>
+    <p>Reply YES if scheduled, or call Margaret at {{ margaret_phone }} if you need help.</p>
+    {% endif %}
+    <p>Thanks,<br>Maverick TC</p>
+</body>
+</html>

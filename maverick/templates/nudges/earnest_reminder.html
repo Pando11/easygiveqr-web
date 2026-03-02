@@ -1,0 +1,25 @@
+<html>
+<body style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.6;">
+    <h2>Earnest Money Reminder</h2>
+
+    {% if custom_email_message %}
+    <p>{{ custom_email_message }}</p>
+    {% else %}
+    <p>Hi {{ agent_name }},</p>
+
+    <p>
+        Friendly reminder that earnest money for <strong>{{ property_address }}</strong>
+        is due by <strong>{{ due_date|format_date }}</strong> (in {{ days_remaining }} days).
+    </p>
+
+    <p><strong>Amount Due:</strong> {{ earnest_amount|currency }}</p>
+    <p><strong>Buyer:</strong> {{ buyer_name }}</p>
+
+    <p>Please remind your buyer to wire or deliver the earnest money to the title company.</p>
+
+    <p>Questions? Call Margaret at {{ margaret_phone }}</p>
+    {% endif %}
+
+    <p>Thanks!<br>Maverick TC</p>
+</body>
+</html>

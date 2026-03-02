@@ -1,0 +1,454 @@
+{% extends "base.html" %}
+
+{% block title %}Automated Status Updates - Maverick TC{% endblock %}
+{% block subtitle %}Weekly Agent Update Automation{% endblock %}
+
+{% block content %}
+<section class="card page-header">
+    <div>
+        <h2>📬 Automated Status Updates</h2>
+        <p class="subtle">Send personalized weekly status updates to agents and reduce routine "status check" calls.</p>
+    </div>
+    <div class="header-actions">
+        <a href="/tc/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+    <h3>Schedule + Template Controls</h3>
+    <form method="post" class="stack-form">
+        <div class="grid-2">
+            <label class="checkbox-row">
+                <input type="checkbox" name="enabled" value="true" {% if form_state.enabled %}checked{% endif %}>
+                Enable automated sends
+            </label>
+            <label>
+                Schedule Slot
+                <select name="schedule_slot">
+                    {% for key, label in schedule_slot_options %}
+                    <option value="{{ key }}" {% if form_state.schedule_slot == key %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+        </div>
+
+        <label>
+            Subject Template
+            <input type="text" name="subject_template" value="{{ form_state.subject_template }}" maxlength="255">
+        </label>
+
+        <label>
+            Body Template
+            <textarea name="body_template" rows="8">{{ form_state.body_template }}</textarea>
+        </label>
+
+        <div class="token-row">
+            {% for token in template_tokens %}
+            <span class="token-pill">{{ "{{" ~ token ~ "}}" }}</span>
+            {% endfor %}
+        </div>
+
+        <div class="button-row">
+            <button class="btn" type="submit" name="action" value="update_settings">Save Settings</button>
+            <button class="btn btn-secondary" type="submit" name="action" value="preview_now">Preview Before Sending</button>
+            <button class="btn btn-secondary" type="submit" name="action" value="send_now">Send Update Now</button>
+        </div>
+    </form>
+</section>
+
+<section class="card">
+    <h3>Agent Opt-Out List</h3>
+    <p class="subtle">Disable automated status emails for agents who do not want weekly updates.</p>
+    <form method="post" class="grid-4">
+        <input type="hidden" name="action" value="add_opt_out">
+        <label>
+            Agent Name
+            <input type="text" name="agent_name" maxlength="255">
+        </label>
+        <label>
+            Agent Email
+            <input type="email" name="agent_email" maxlength="255">
+        </label>
+        <label>
+            Agent Phone
+            <input type="text" name="agent_phone" maxlength="25">
+        </label>
+        <label>
+            Reason
+            <input type="text" name="reason" maxlength="240">
+        </label>
+        <div class="full-width">
+            <button class="btn btn-secondary" type="submit">Add Opt-Out</button>
+        </div>
+    </form>
+
+    {% if opt_out_rows %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Agent</th>
+                    <th>Email</th>
+                    <th>Phone</th>
+                    <th>Reason</th>
+                    <th>Added</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in opt_out_rows %}
+                <tr>
+                    <td>{{ row.agent_name or "N/A" }}</td>
+                    <td>{{ row.agent_email or "N/A" }}</td>
+                    <td>{{ row.agent_phone or "N/A" }}</td>
+                    <td>{{ row.reason or "" }}</td>
+                    <td>{{ row.created_at_label }}</td>
+                    <td>
+                        {% if row.active %}
+                        <form method="post">
+                            <input type="hidden" name="action" value="remove_opt_out">
+                            <input type="hidden" name="opt_out_id" value="{{ row.id }}">
+                            <button class="btn btn-secondary btn-small" type="submit">Enable Updates</button>
+                        </form>
+                        {% else %}
+                        <small class="subtle">Inactive</small>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="subtle">No opt-out agents yet.</p>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>Status-Check Reduction Metrics</h3>
+    <div class="metric-grid">
+        <article class="metric-box">
+            <h4>Updates Sent This Week</h4>
+            <p>{{ metrics.this_week_sent }}</p>
+        </article>
+        <article class="metric-box">
+            <h4>Status Checks This Week</h4>
+            <p>{{ metrics.this_week_status_checks }}</p>
+        </article>
+        <article class="metric-box">
+            <h4>Status Checks Last Week</h4>
+            <p>{{ metrics.previous_week_status_checks }}</p>
+        </article>
+        <article class="metric-box">
+            <h4>Estimated Questions Answered</h4>
+            <p>{{ metrics.answered_questions_estimate }}</p>
+            <small class="subtle">"This update answered {{ metrics.answered_questions_estimate }} questions this week."</small>
+        </article>
+    </div>
+    <p class="subtle">
+        Weekly reduction: {{ metrics.reduction_count }} fewer status-check messages/calls
+        {% if metrics.reduction_pct %}({{ metrics.reduction_pct }}% improvement){% endif %}.
+    </p>
+
+    {% if metrics.weekly %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Week</th>
+                    <th>Runs</th>
+                    <th>Candidates</th>
+                    <th>Sent</th>
+                    <th>Failed</th>
+                    <th>Status Checks</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in metrics.weekly %}
+                <tr>
+                    <td>{{ row.week_label }}</td>
+                    <td>{{ row.run_count }}</td>
+                    <td>{{ row.candidate_count }}</td>
+                    <td>{{ row.sent_count }}</td>
+                    <td>{{ row.failed_count }}</td>
+                    <td>{{ row.status_checks }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>Recent Runs</h3>
+    {% if recent_runs %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Started</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Candidates</th>
+                    <th>Sent</th>
+                    <th>Failed</th>
+                    <th>Reduction</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in recent_runs %}
+                <tr>
+                    <td>{{ run.started_at_label }}</td>
+                    <td>{{ run.run_kind }}{% if run.preview_only %} (preview){% endif %}</td>
+                    <td>{{ run.status }}</td>
+                    <td>{{ run.candidate_count }}</td>
+                    <td>{{ run.sent_count }}</td>
+                    <td>{{ run.failed_count }}</td>
+                    <td>{{ run.question_reduction_estimate }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="subtle">No runs yet.</p>
+    {% endif %}
+</section>
+
+{% if preview_payloads %}
+<section class="card">
+    <h3>Preview ({{ preview_payloads|length }} updates)</h3>
+    <p class="subtle">Preview shows what each agent will receive. No emails were sent.</p>
+    <div class="preview-grid">
+        {% for item in preview_payloads %}
+        <article class="preview-card">
+            <h4>{{ item.property_address }}</h4>
+            <p><strong>Agent:</strong> {{ item.agent_name }} ({{ item.agent_email }})</p>
+            <p><strong>Subject:</strong> {{ item.subject }}</p>
+            <p><strong>Health:</strong> <span class="status-badge status-{{ item.health_status }}">{{ item.health_status|title }}</span></p>
+            <p><strong>Days to closing:</strong> {{ item.days_to_closing_label }}</p>
+            <div class="progress-shell">
+                <div class="progress-fill" style="width: {{ item.progress_pct }}%;"></div>
+            </div>
+            <p class="subtle">Progress {{ item.progress_pct }}%</p>
+            {% if item.urgent_items %}
+            <p><strong>Urgent:</strong></p>
+            <ul>
+                {% for urgent in item.urgent_items %}
+                <li>{{ urgent }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+            {% if item.agent_action_items %}
+            <p><strong>Agent needs to do:</strong></p>
+            <ul>
+                {% for action in item.agent_action_items[:4] %}
+                <li>{{ action }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.stack-form {
+    display: grid;
+    gap: 10px;
+}
+
+.grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.grid-4 {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.full-width {
+    grid-column: 1 / -1;
+}
+
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+}
+
+.checkbox-row input {
+    width: auto;
+}
+
+.token-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.token-pill {
+    background: #e0e7ff;
+    color: #312e81;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.button-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.metric-box {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 12px;
+    background: #f8fafc;
+}
+
+.metric-box h4 {
+    margin: 0 0 6px 0;
+    font-size: 13px;
+    color: #334155;
+}
+
+.metric-box p {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 700;
+    color: #1e3a8a;
+}
+
+.table-wrap {
+    overflow-x: auto;
+}
+
+.table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.table th,
+.table td {
+    border: 1px solid #e2e8f0;
+    text-align: left;
+    padding: 8px;
+    font-size: 13px;
+    vertical-align: top;
+}
+
+.table th {
+    background: #f8fafc;
+}
+
+.preview-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.preview-card {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 12px;
+    background: #f8fafc;
+}
+
+.progress-shell {
+    width: 100%;
+    height: 12px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    overflow: hidden;
+    margin: 8px 0 4px;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #2563eb, #10b981);
+}
+
+.status-badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.status-healthy {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.status-watch {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.status-urgent {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+@media (max-width: 1024px) {
+    .metric-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .preview-grid,
+    .grid-4 {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    .page-header {
+        flex-direction: column;
+    }
+
+    .grid-2,
+    .metric-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}

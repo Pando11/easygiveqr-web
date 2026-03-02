@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}{{ status_code }} - Maverick{% endblock %}
+{% block subtitle %}System Response{% endblock %}
+
+{% block content %}
+<section class="card" style="max-width: 720px; margin: 0 auto;">
+    <span class="badge badge-red" style="margin-bottom: 10px;">Error {{ status_code }}</span>
+    <h2 style="margin-bottom: 10px;">{{ title }}</h2>
+    <p style="color: #475569; margin-bottom: 16px;">{{ message }}</p>
+    <a href="/" class="btn">Return Home</a>
+</section>
+{% endblock %}

@@ -1,0 +1,567 @@
+{% extends "base.html" %}
+
+{% block title %}Submit Contract - Maverick TC{% endblock %}
+{% block subtitle %}Professional Transaction Coordination Intake{% endblock %}
+
+{% block content %}
+<section class="upload-shell">
+    <div class="upload-info card">
+        <span class="eyebrow">Maverick Intake Portal</span>
+        <h2>Submit Your Executed Contract</h2>
+        <p>
+            Upload your contract package and transaction details in one step.
+            Margaret reviews every intake personally and replies fast.
+        </p>
+
+        <ul class="benefits">
+            <li><strong>2-hour review target</strong> during business hours</li>
+            <li><strong>Deadline automation</strong> starts once approved</li>
+            <li><strong>Secure document storage</strong> with audit logs</li>
+            <li><strong>Clear communication</strong> by text and dashboard</li>
+        </ul>
+    </div>
+
+    <div class="card upload-card">
+        <form id="uploadForm" enctype="multipart/form-data" novalidate>
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="agent_name">Agent Name *</label>
+                    <input type="text" id="agent_name" name="agent_name" autocomplete="name" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="agent_phone">Agent Phone *</label>
+                    <input type="tel" id="agent_phone" name="agent_phone" placeholder="806-555-1234" autocomplete="tel" required>
+                </div>
+
+                <div class="form-group form-group-full">
+                    <label for="agent_email">Agent Email *</label>
+                    <input type="email" id="agent_email" name="agent_email" placeholder="you@brokerage.com" autocomplete="email" required>
+                </div>
+
+                <div class="form-group form-group-full">
+                    <label for="property_address">Property Address *</label>
+                    <textarea id="property_address" name="property_address" rows="3" placeholder="123 Main St, Lubbock, TX 79401" required></textarea>
+                </div>
+            </div>
+
+            <div class="form-group form-group-full">
+                <label for="contract_pdf">Contract PDF *</label>
+                <div class="file-upload-area" id="dropZone" role="button" tabindex="0" aria-label="Upload contract PDF">
+                    <input type="file" id="contract_pdf" name="contract_pdf" accept=".pdf,application/pdf" required hidden>
+                    <div class="upload-icon">⬆</div>
+                    <p class="upload-title">Drag and drop your contract PDF here</p>
+                    <p class="upload-subtitle">or <span id="browseTrigger">click to browse</span></p>
+                    <p class="upload-note">PDF only, max 16MB</p>
+                    <p id="fileName" class="file-name" aria-live="polite"></p>
+                </div>
+            </div>
+
+            <div class="form-group rush-group">
+                <label class="rush-label">
+                    <input type="checkbox" id="rush_service" name="rush_service">
+                    <span>
+                        Need rush service (24-hour turnaround)?
+                        <strong>+ $200</strong>
+                    </span>
+                </label>
+            </div>
+
+            <div class="form-group">
+                <label for="referral_source">Referral Source *</label>
+                <select id="referral_source" name="referral_source" required>
+                    <option value="">Select one...</option>
+                    <option value="referral">Referral from agent</option>
+                    <option value="broker">Broker</option>
+                    <option value="facebook">Facebook</option>
+                    <option value="google">Google</option>
+                    <option value="other">Other</option>
+                </select>
+            </div>
+
+            <div class="form-group" id="referralNameGroup" style="display: none;">
+                <label for="referred_by">Who referred you?</label>
+                <input type="text" id="referred_by" name="referred_by" placeholder="Referring agent name">
+            </div>
+
+            <div id="loadingMessage" class="status-line" style="display: none;">
+                Submitting contract package...
+            </div>
+
+            <div id="successMessage" class="alert alert-success" style="display: none;">
+                <p><strong>Contract received.</strong></p>
+                <p>Margaret will review your file and text timeline details shortly.</p>
+                <p id="successMeta" style="display: none; margin-top: 6px; font-weight: 700;"></p>
+            </div>
+
+            <div id="warningMessage" class="alert alert-warning" style="display: none;">
+                <p id="warningText"></p>
+            </div>
+
+            <div id="errorMessage" class="alert alert-error" style="display: none;">
+                <p id="errorText"></p>
+            </div>
+
+            <button type="submit" class="btn submit-btn" id="submitBtn">Submit Contract</button>
+        </form>
+    </div>
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.upload-shell {
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 22px;
+    align-items: start;
+}
+
+.upload-info {
+    border: 1px solid #bfdbfe;
+    background: linear-gradient(135deg, #eff6ff, #f0fdf4);
+}
+
+.upload-info h2 {
+    margin-top: 10px;
+    margin-bottom: 12px;
+    color: #1e3a8a;
+    font-size: 26px;
+}
+
+.upload-info p {
+    color: #334155;
+}
+
+.eyebrow {
+    display: inline-block;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    color: #0369a1;
+    background: #e0f2fe;
+    border-radius: 999px;
+    padding: 6px 10px;
+}
+
+.benefits {
+    margin-top: 16px;
+    margin-left: 18px;
+    color: #0f172a;
+}
+
+.benefits li {
+    margin-bottom: 8px;
+}
+
+.upload-card {
+    border: 1px solid #dbeafe;
+    box-shadow: 0 8px 28px rgba(30, 58, 138, 0.08);
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+
+.form-group {
+    margin-bottom: 16px;
+}
+
+.form-group-full {
+    grid-column: 1 / -1;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 7px;
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.form-group input[type="text"],
+.form-group input[type="tel"],
+.form-group input[type="email"],
+.form-group textarea,
+.form-group select {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    font-size: 16px;
+    font-family: inherit;
+    background: #fff;
+}
+
+.form-group input:focus,
+.form-group textarea:focus,
+.form-group select:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+.file-upload-area {
+    border: 2px dashed #93c5fd;
+    border-radius: 12px;
+    padding: 34px 20px;
+    text-align: center;
+    background: #f8fbff;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.file-upload-area:hover {
+    border-color: #3b82f6;
+    background: #eef6ff;
+}
+
+.file-upload-area.drag-over {
+    border-color: #10b981;
+    background: #ecfdf5;
+}
+
+.upload-icon {
+    width: 48px;
+    height: 48px;
+    margin: 0 auto 10px;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    background: #dbeafe;
+    color: #1d4ed8;
+    font-weight: 700;
+}
+
+.upload-title {
+    margin-bottom: 4px;
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.upload-subtitle {
+    margin-bottom: 6px;
+    color: #475569;
+}
+
+#browseTrigger {
+    color: #2563eb;
+    font-weight: 700;
+    text-decoration: underline;
+}
+
+.upload-note {
+    font-size: 13px;
+    color: #64748b;
+}
+
+.file-name {
+    margin-top: 10px;
+    color: #065f46;
+    font-weight: 600;
+    display: none;
+}
+
+.rush-group {
+    border: 1px solid #bbf7d0;
+    background: #f0fdf4;
+    border-radius: 10px;
+    padding: 10px 12px;
+}
+
+.rush-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    margin: 0;
+}
+
+.rush-label input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+}
+
+.status-line {
+    margin-bottom: 14px;
+    color: #0f766e;
+    font-weight: 600;
+}
+
+.submit-btn {
+    width: 100%;
+    font-size: 18px;
+    padding: 14px 20px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #2563eb, #10b981);
+}
+
+.submit-btn:hover {
+    background: linear-gradient(135deg, #1d4ed8, #059669);
+}
+
+@media (max-width: 1024px) {
+    .upload-shell {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    .form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .file-upload-area {
+        padding: 28px 16px;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("contract_pdf");
+const fileName = document.getElementById("fileName");
+const uploadForm = document.getElementById("uploadForm");
+const submitBtn = document.getElementById("submitBtn");
+const loadingMsg = document.getElementById("loadingMessage");
+const successMsg = document.getElementById("successMessage");
+const successMeta = document.getElementById("successMeta");
+const warningMsg = document.getElementById("warningMessage");
+const warningText = document.getElementById("warningText");
+const errorMsg = document.getElementById("errorMessage");
+const errorText = document.getElementById("errorText");
+const referralSelect = document.getElementById("referral_source");
+const referralGroup = document.getElementById("referralNameGroup");
+const referralInput = document.getElementById("referred_by");
+const browseTrigger = document.getElementById("browseTrigger");
+
+function showError(message) {
+    successMsg.style.display = "none";
+    successMeta.style.display = "none";
+    successMeta.textContent = "";
+    warningMsg.style.display = "none";
+    errorMsg.style.display = "block";
+    errorText.textContent = message;
+    if (typeof window.showError === "function") {
+        window.showError(message);
+    }
+}
+
+function showSuccess(message, confirmationCode = "", transactionId = null) {
+    warningMsg.style.display = "none";
+    errorMsg.style.display = "none";
+    successMsg.style.display = "block";
+
+    const details = [];
+    if (confirmationCode) {
+        details.push(`Confirmation code: ${confirmationCode}`);
+    }
+    if (transactionId !== null && transactionId !== undefined && String(transactionId).trim() !== "") {
+        details.push(`Transaction ID: ${transactionId}`);
+    }
+    if (details.length > 0) {
+        successMeta.textContent = details.join(" - ");
+        successMeta.style.display = "block";
+    } else {
+        successMeta.style.display = "none";
+        successMeta.textContent = "";
+    }
+
+    if (typeof window.showSuccess === "function") {
+        window.showSuccess(message);
+    }
+}
+
+function showWarning(message) {
+    successMsg.style.display = "none";
+    successMeta.style.display = "none";
+    successMeta.textContent = "";
+    errorMsg.style.display = "none";
+    warningMsg.style.display = "block";
+    warningText.textContent = message;
+    if (typeof window.showSuccess === "function") {
+        window.showSuccess(message);
+    }
+}
+
+function resetBanners() {
+    successMsg.style.display = "none";
+    successMeta.style.display = "none";
+    successMeta.textContent = "";
+    warningMsg.style.display = "none";
+    errorMsg.style.display = "none";
+}
+
+function setLoading(isLoading) {
+    loadingMsg.style.display = isLoading ? "block" : "none";
+    submitBtn.disabled = isLoading;
+    submitBtn.textContent = isLoading ? "Submitting..." : "Submit Contract";
+}
+
+function setFileDisplay(file) {
+    if (!file) {
+        fileName.style.display = "none";
+        fileName.textContent = "";
+        return;
+    }
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+    fileName.textContent = `PDF selected: ${file.name} (${sizeMb} MB)`;
+    fileName.style.display = "block";
+}
+
+function isPhoneValid(value) {
+    const phoneRegex = /^\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}$/;
+    return phoneRegex.test(value.trim());
+}
+
+function isEmailValid(value) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(value.trim());
+}
+
+function isPdfValid(file) {
+    if (!file) {
+        return [false, "Please upload your contract PDF."];
+    }
+    const byName = file.name.toLowerCase().endsWith(".pdf");
+    const byType = (file.type || "").toLowerCase().includes("pdf");
+    if (!byName && !byType) {
+        return [false, "Only PDF files are allowed."];
+    }
+    if (file.size > 16 * 1024 * 1024) {
+        return [false, "File too large. Maximum allowed size is 16MB."];
+    }
+    return [true, ""];
+}
+
+dropZone.addEventListener("click", () => fileInput.click());
+dropZone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        fileInput.click();
+    }
+});
+if (browseTrigger) {
+    browseTrigger.addEventListener("click", (event) => {
+        event.stopPropagation();
+        fileInput.click();
+    });
+}
+
+fileInput.addEventListener("change", (event) => {
+    setFileDisplay(event.target.files[0]);
+});
+
+dropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dropZone.classList.add("drag-over");
+});
+
+dropZone.addEventListener("dragleave", () => {
+    dropZone.classList.remove("drag-over");
+});
+
+dropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    dropZone.classList.remove("drag-over");
+    const file = event.dataTransfer.files[0];
+    if (!file) {
+        return;
+    }
+    const [ok, message] = isPdfValid(file);
+    if (!ok) {
+        showError(message);
+        return;
+    }
+    fileInput.files = event.dataTransfer.files;
+    setFileDisplay(file);
+});
+
+referralSelect.addEventListener("change", (event) => {
+    const selected = event.target.value;
+    if (selected === "referral") {
+        referralGroup.style.display = "block";
+        referralInput.required = true;
+    } else {
+        referralGroup.style.display = "none";
+        referralInput.required = false;
+        referralInput.value = "";
+    }
+});
+
+uploadForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    resetBanners();
+
+    const agentPhone = document.getElementById("agent_phone").value;
+    const agentEmail = document.getElementById("agent_email").value;
+    const file = fileInput.files[0];
+
+    if (!isPhoneValid(agentPhone)) {
+        showError("Please enter a valid phone number (example: 806-555-1234).");
+        return;
+    }
+    if (!isEmailValid(agentEmail)) {
+        showError("Please enter a valid email address.");
+        return;
+    }
+    const [pdfOk, pdfMessage] = isPdfValid(file);
+    if (!pdfOk) {
+        showError(pdfMessage);
+        return;
+    }
+    if (referralSelect.value === "referral" && !referralInput.value.trim()) {
+        showError("Please provide who referred you.");
+        return;
+    }
+
+    const formData = new FormData(uploadForm);
+    setLoading(true);
+    if (typeof window.showLoading === "function") {
+        window.showLoading("Submitting contract...");
+    }
+
+    try {
+        const response = await fetch("/upload", {
+            method: "POST",
+            body: formData
+        });
+
+        let payload = {};
+        try {
+            payload = await response.json();
+        } catch (_error) {
+            payload = {};
+        }
+
+        if (response.ok && payload.success) {
+            const transactionId = payload.transaction_id;
+            const confirmationCode = payload.confirmation_code || "";
+            showSuccess("Contract submitted successfully.", confirmationCode, transactionId);
+            uploadForm.reset();
+            setFileDisplay(null);
+            referralGroup.style.display = "none";
+            referralInput.required = false;
+            successMsg.scrollIntoView({ behavior: "smooth", block: "center" });
+        } else {
+            showError(payload.error || "Upload failed. Please review and try again.");
+        }
+    } catch (_error) {
+        showWarning(
+            "Submission sent. Connection dropped before confirmation. "
+            + "Please check Margaret's dashboard before submitting again."
+        );
+    } finally {
+        setLoading(false);
+        if (typeof window.hideLoading === "function") {
+            window.hideLoading();
+        }
+    }
+});
+</script>
+{% endblock %}

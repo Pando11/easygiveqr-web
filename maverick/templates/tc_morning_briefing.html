@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+
+{% block title %}Morning Briefing - Maverick TC{% endblock %}
+{% block subtitle %}Intelligent Morning Briefing{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="section-header">
+        <div>
+            <h2>Morning Briefing</h2>
+            <p class="hint-text">AI-prioritized plan for Margaret with interactive tracking and 2 PM recap.</p>
+        </div>
+        <a href="{{ url_for('tc_dashboard') }}" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<section class="card">
+    <div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+</section>
+{% endif %}
+
+<section class="grid-two">
+    <article class="card">
+        <h3>Schedule Settings</h3>
+        <form method="post" class="stack-form compact-form">
+            <input type="hidden" name="action" value="update_settings">
+            <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+
+            <label><input type="checkbox" name="enabled" value="1" {% if settings.enabled %}checked{% endif %}> Enable morning briefing</label>
+            <label>Morning send time
+                <input type="time" name="send_time" value="{{ settings.send_time or '07:30' }}">
+            </label>
+            <label><input type="checkbox" name="recap_enabled" value="1" {% if settings.recap_enabled %}checked{% endif %}> Enable 2 PM recap</label>
+            <label>Recap send time
+                <input type="time" name="recap_time" value="{{ settings.recap_time or '14:00' }}">
+            </label>
+            <label>Timezone
+                <input type="text" name="timezone" value="{{ settings.timezone or 'America/Chicago' }}">
+            </label>
+            <label><input type="checkbox" name="ai_enabled" value="1" {% if settings.ai_enabled %}checked{% endif %}> Enable AI-generated copy</label>
+            <button type="submit" class="btn">Save Settings</button>
+        </form>
+    </article>
+
+    <article class="card">
+        <h3>Run Automation</h3>
+        <form method="post" class="stack-form">
+            <input type="hidden" name="action" value="generate_now">
+            <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+            <label><input type="checkbox" name="send_messages" value="1" checked> Send SMS + email now</label>
+            <button type="submit" class="btn">Generate Morning Briefing Now</button>
+        </form>
+
+        <form method="post" class="stack-form top-gap">
+            <input type="hidden" name="action" value="send_recap_now">
+            <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+            <label><input type="checkbox" name="send_messages" value="1" checked> Send recap SMS + email now</label>
+            <button type="submit" class="btn btn-secondary">Generate 2 PM Recap Now</button>
+        </form>
+
+        <div class="quick-summary">
+            <h4>Selected date: {{ selected_date.strftime("%A, %b %d, %Y") }}</h4>
+            {% if briefing %}
+            <p class="hint-text">
+                Generated: {{ briefing.generated_at }}<br>
+                Sent SMS: {{ "Yes" if briefing.sent_sms else "No" }} · Sent Email: {{ "Yes" if briefing.sent_email else "No" }}<br>
+                Recap Sent: {{ "Yes" if briefing.recap_sent_sms or briefing.recap_sent_email else "No" }}
+            </p>
+            {% else %}
+            <p class="hint-text">No briefing found yet for this date.</p>
+            {% endif %}
+        </div>
+    </article>
+</section>
+
+{% if briefing %}
+<section class="card">
+    <h3>Briefing Snapshot</h3>
+    <div class="metric-grid">
+        <div class="metric-item"><span>Active transactions</span><strong>{{ briefing.total_transactions }}</strong></div>
+        <div class="metric-item"><span>Closing today</span><strong>{{ briefing.closing_today_count }}</strong></div>
+        <div class="metric-item"><span>Urgent items</span><strong>{{ briefing.urgent_count }}</strong></div>
+        <div class="metric-item"><span>Est. time</span><strong>{{ briefing.estimated_day_minutes }} min</strong></div>
+        <div class="metric-item"><span>Pending</span><strong>{{ item_summary.pending_count }}</strong></div>
+        <div class="metric-item"><span>Completed</span><strong>{{ item_summary.completed_count }}</strong></div>
+        <div class="metric-item"><span>Deferred</span><strong>{{ item_summary.deferred_count }}</strong></div>
+    </div>
+    {% if briefing_email.opening %}
+    <p class="opening">{{ briefing_email.opening }}</p>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>Interactive Priorities</h3>
+    {% if items %}
+    <ul class="briefing-list">
+        {% for item in items %}
+        <li class="briefing-item status-{{ item.status }}">
+            <div class="item-head">
+                <div>
+                    <strong>#{{ item.display_order }} · {{ item.title }}</strong>
+                    <p class="hint-text">
+                        {{ item.priority_label }} priority · {{ item.estimated_minutes }} min
+                        {% if item.transaction_id %}· <a href="{{ item.transaction_url }}">Transaction #{{ item.transaction_id }}</a>{% endif %}
+                    </p>
+                </div>
+                <div class="actions-inline">
+                    <form method="post" action="{{ url_for('move_morning_briefing_item_route', item_id=item.id) }}">
+                        <input type="hidden" name="direction" value="up">
+                        <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+                        <button type="submit" class="btn btn-small btn-secondary">↑</button>
+                    </form>
+                    <form method="post" action="{{ url_for('move_morning_briefing_item_route', item_id=item.id) }}">
+                        <input type="hidden" name="direction" value="down">
+                        <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+                        <button type="submit" class="btn btn-small btn-secondary">↓</button>
+                    </form>
+                </div>
+            </div>
+
+            {% if item.details %}
+            <p>{{ item.details }}</p>
+            {% endif %}
+            <div class="contact-links">
+                {% if item.phone_link %}<a href="{{ item.phone_link }}">Call</a>{% endif %}
+                {% if item.sms_link %}<a href="{{ item.sms_link }}">Text</a>{% endif %}
+                {% if item.email_link %}<a href="{{ item.email_link }}">Email</a>{% endif %}
+            </div>
+
+            <form method="post" action="{{ url_for('update_morning_briefing_item_route', item_id=item.id) }}" class="item-form">
+                <input type="hidden" name="selected_date" value="{{ selected_date.isoformat() }}">
+                <textarea name="notes" placeholder="Notes...">{{ item.notes or '' }}</textarea>
+                <div class="item-form-row">
+                    <label>Defer date
+                        <input type="date" name="deferred_to_date" value="{{ item.deferred_to_date.isoformat() if item.deferred_to_date else '' }}">
+                    </label>
+                    <div class="actions-inline">
+                        <button type="submit" name="action" value="complete" class="btn btn-small">Complete</button>
+                        <button type="submit" name="action" value="reopen" class="btn btn-small btn-secondary">Pending</button>
+                        <button type="submit" name="action" value="defer" class="btn btn-small btn-secondary">Defer</button>
+                    </div>
+                </div>
+                {% if item.deferred_label and item.status == "deferred" %}
+                <small class="hint-text">Deferred to {{ item.deferred_label }}</small>
+                {% endif %}
+            </form>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="hint-text">No priorities captured for this briefing yet.</p>
+    {% endif %}
+</section>
+{% endif %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.grid-two {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.hint-text {
+    color: #475569;
+    font-size: 13px;
+}
+
+.top-gap {
+    margin-top: 10px;
+}
+
+.quick-summary {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.metric-item {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    background: #f8fbff;
+    padding: 10px;
+}
+
+.metric-item span {
+    display: block;
+    font-size: 12px;
+    color: #64748b;
+}
+
+.metric-item strong {
+    font-size: 20px;
+    color: #0f172a;
+}
+
+.opening {
+    margin-top: 12px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.briefing-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 12px;
+}
+
+.briefing-item {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px;
+    background: #fff;
+}
+
+.briefing-item.status-completed {
+    border-color: #86efac;
+    background: #f0fdf4;
+}
+
+.briefing-item.status-deferred {
+    border-color: #fcd34d;
+    background: #fffbeb;
+}
+
+.item-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+.contact-links {
+    display: flex;
+    gap: 10px;
+    margin: 6px 0 10px;
+}
+
+.item-form textarea {
+    width: 100%;
+    min-height: 62px;
+}
+
+.item-form-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: end;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.actions-inline {
+    display: flex;
+    gap: 6px;
+}
+
+@media (max-width: 980px) {
+    .grid-two,
+    .metric-grid,
+    .item-form-row {
+        grid-template-columns: 1fr;
+        display: grid;
+    }
+}
+</style>
+{% endblock %}

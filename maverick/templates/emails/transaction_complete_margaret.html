@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Transaction Complete</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Transaction Completed</h2>
+                <p style="margin:8px 0 0;">{{ transaction.property_address }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                <p style="margin:0 0 12px;">The one-click completion workflow finished successfully.</p>
+                <ul style="margin:0 0 12px; padding-left:18px;">
+                    <li>Transaction ID: {{ transaction.id }}</li>
+                    <li>Agent: {{ transaction.agent_name }}</li>
+                    <li>Buyer: {{ transaction.buyer_name or "N/A" }}</li>
+                    <li>Seller: {{ transaction.seller_name or "N/A" }}</li>
+                    <li>Archive key: {{ archive_s3_key or "not generated" }}</li>
+                </ul>
+                {% if summary_pdf and summary_pdf.summary_url %}
+                <p style="margin:0 0 12px;">
+                    Completion summary link (7 days):
+                    <a href="{{ summary_pdf.summary_url }}" target="_blank" rel="noopener">{{ summary_pdf.summary_url }}</a>
+                </p>
+                {% endif %}
+                <p style="margin:0;">The completion summary PDF is also attached to this email.</p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

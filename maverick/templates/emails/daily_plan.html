@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ subject or "Daily Plan" }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f8fafc; color: #0f172a; margin: 0; padding: 20px; }
+        .wrap { max-width: 760px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }
+        .header { background: #0f172a; color: #fff; padding: 20px; }
+        .content { padding: 20px; }
+        .block { border: 1px solid #e2e8f0; border-left: 5px solid #64748b; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+        .block.critical { border-left-color: #ef4444; }
+        .block.high_priority { border-left-color: #f97316; }
+        .block.batch_able { border-left-color: #2563eb; }
+        .block.routine { border-left-color: #6b7280; }
+        .block.break { border-left-color: #16a34a; }
+        .block.buffer { border-left-color: #7c3aed; }
+        .title { font-weight: 700; margin: 0 0 4px; }
+        .meta { color: #475569; font-size: 13px; margin: 0 0 8px; }
+        ul { margin: 0; padding-left: 18px; }
+        li { margin-bottom: 4px; }
+        .footer { padding: 18px 20px; border-top: 1px solid #e2e8f0; background: #f8fafc; color: #475569; font-size: 13px; }
+        .btn { display: inline-block; background: #2563eb; color: #fff !important; text-decoration: none; border-radius: 8px; padding: 10px 14px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <div class="header">
+            <h1 style="margin:0; font-size:22px;">📅 Daily Plan</h1>
+            <p style="margin:6px 0 0 0;">{{ date }}</p>
+        </div>
+        <div class="content">
+            <p><strong>Total blocks:</strong> {{ (schedule.blocks or [])|length }}</p>
+            <p><strong>Estimated end time:</strong>
+                {% if schedule.estimated_end_time %}
+                    {{ schedule.estimated_end_time.strftime("%I:%M %p").lstrip("0") }}
+                {% else %}
+                    --
+                {% endif %}
+            </p>
+            <p><strong>Total tasks:</strong> {{ schedule.total_tasks or 0 }}</p>
+            <p><strong>Estimated work hours:</strong> {{ schedule.total_work_hours or 0 }}</p>
+
+            {% for block in schedule.blocks or [] %}
+            <div class="block {{ block.tier or 'routine' }}">
+                <p class="title">
+                    {{ block.start_time.strftime("%I:%M %p").lstrip("0") if block.start_time else "" }} -
+                    {{ block.end_time.strftime("%I:%M %p").lstrip("0") if block.end_time else "" }}
+                    · {{ block.title }}
+                </p>
+                <p class="meta">{{ block.duration_minutes or 0 }} min · {{ (block.tier or "routine").replace("_", " ").title() }}</p>
+                {% if block.tasks %}
+                <ul>
+                    {% for item in block.tasks[:8] %}
+                    <li>{{ item.title }} ({{ item.estimated_minutes or 0 }} min)</li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <p class="meta">No tasks in this block.</p>
+                {% endif %}
+            </div>
+            {% endfor %}
+
+            {% if schedule.delegate_suggestions %}
+            <h3 style="margin-top:16px;">Delegate / Automate Suggestions</h3>
+            <ul>
+                {% for item in schedule.delegate_suggestions[:8] %}
+                <li>{{ item.title }}</li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+
+            <a class="btn" href="{{ plan_url }}">Open Interactive Plan</a>
+        </div>
+        <div class="footer">
+            Maverick TC · Intelligent task prioritization and adaptive scheduling.
+        </div>
+    </div>
+</body>
+</html>

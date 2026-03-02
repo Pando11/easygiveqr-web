@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Maverick Client Portal Access</title>
+</head>
+<body style="margin:0;padding:0;background:#f5f8fc;font-family:Arial,sans-serif;color:#1f2937;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f8fc;padding:24px 12px;">
+        <tr>
+            <td align="center">
+                <table width="620" cellpadding="0" cellspacing="0" style="max-width:620px;width:100%;background:#ffffff;border:1px solid #dbe3ee;border-radius:10px;overflow:hidden;">
+                    <tr>
+                        <td style="background:#1e3a8a;color:#ffffff;padding:18px 20px;">
+                            <h2 style="margin:0;font-size:20px;">Maverick Client Portal</h2>
+                            <p style="margin:6px 0 0;font-size:13px;opacity:0.95;">Track your transaction progress anytime</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding:20px;">
+                            <p style="margin:0 0 12px;">Hello {{ client_type }},</p>
+                            <p style="margin:0 0 12px;">
+                                Your secure client portal is ready for:
+                                <strong>{{ property_address }}</strong>
+                            </p>
+                            <p style="margin:0 0 12px;">
+                                Scheduled closing date: <strong>{{ closing_date_label }}</strong>
+                            </p>
+                            <p style="margin:0 0 16px;">
+                                Use this secure link to view your timeline and upload signed documents:
+                            </p>
+                            <p style="margin:0 0 18px;">
+                                <a href="{{ portal_url }}" style="display:inline-block;background:#10b981;color:#ffffff;text-decoration:none;padding:11px 16px;border-radius:8px;font-weight:700;">
+                                    Open Client Portal
+                                </a>
+                            </p>
+                            <p style="margin:0 0 8px;font-size:12px;color:#64748b;">
+                                Direct link:
+                            </p>
+                            <p style="margin:0 0 8px;font-size:12px;word-break:break-all;">
+                                <a href="{{ portal_url }}" style="color:#1d4ed8;">{{ portal_url }}</a>
+                            </p>
+                            <p style="margin:14px 0 0;font-size:12px;color:#64748b;">
+                                If you did not expect this message, please contact Maverick support.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

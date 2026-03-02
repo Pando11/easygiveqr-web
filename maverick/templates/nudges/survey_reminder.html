@@ -1,0 +1,17 @@
+<html>
+<body style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.6;">
+    <h2>Survey Reminder</h2>
+    {% if custom_email_message %}
+    <p>{{ custom_email_message }}</p>
+    {% else %}
+    <p>Hi {{ agent_name }},</p>
+    <p>
+        Quick reminder: survey should be ordered for
+        <strong>{{ property_address }}</strong> before
+        <strong>{{ due_date|format_date }}</strong> ({{ days_remaining }} days).
+    </p>
+    <p>Reply with status, or call Margaret at {{ margaret_phone }} if you need help.</p>
+    {% endif %}
+    <p>Thanks,<br>Maverick TC</p>
+</body>
+</html>

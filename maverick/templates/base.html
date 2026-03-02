@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="description" content="Maverick Transaction Coordinator platform">
+    <title>{% block title %}Maverick Transaction Coordinator{% endblock %}</title>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --maverick-navy: #1e3a8a;
+            --maverick-navy-dark: #172554;
+            --maverick-green: #10b981;
+            --maverick-green-dark: #059669;
+            --maverick-gray: #6b7280;
+            --maverick-gray-dark: #4b5563;
+            --maverick-bg: #f5f8fc;
+            --maverick-text: #1f2937;
+            --maverick-border: #dbe3ee;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--maverick-text);
+            background: var(--maverick-bg);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, var(--maverick-navy), var(--maverick-navy-dark));
+            color: #ffffff;
+            padding: 20px 0 22px;
+            margin-bottom: 26px;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.18);
+        }
+
+        .header h1 {
+            font-size: 26px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+        }
+
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-top: 6px;
+        }
+
+        .card {
+            background: #ffffff;
+            border-radius: 10px;
+            padding: 30px;
+            border: 1px solid var(--maverick-border);
+            box-shadow: 0 6px 22px rgba(15, 23, 42, 0.06);
+            margin-bottom: 20px;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background-color: var(--maverick-green);
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: background-color 0.2s ease, transform 0.2s ease;
+        }
+
+        .btn:hover {
+            background-color: var(--maverick-green-dark);
+            transform: translateY(-1px);
+        }
+
+        .btn:disabled {
+            background-color: #94a3b8;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background-color: var(--maverick-gray);
+        }
+
+        .btn-secondary:hover {
+            background-color: var(--maverick-gray-dark);
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border: 1px solid transparent;
+        }
+
+        .alert-success {
+            background-color: #d1fae5;
+            color: #065f46;
+            border-color: #10b981;
+        }
+
+        .alert-error {
+            background-color: #fee2e2;
+            color: #991b1b;
+            border-color: #ef4444;
+        }
+
+        .alert-warning {
+            background-color: #fffbeb;
+            color: #92400e;
+            border-color: #f59e0b;
+        }
+
+        input,
+        select,
+        textarea {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+            background: #ffffff;
+            color: #0f172a;
+        }
+
+        input:focus,
+        select:focus,
+        textarea:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.16);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .badge-red {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .badge-yellow {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge-green {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .loading-spinner {
+            width: 20px;
+            height: 20px;
+            border-radius: 999px;
+            border: 2px solid rgba(255, 255, 255, 0.45);
+            border-top-color: #ffffff;
+            animation: maverick-spin 1s linear infinite;
+        }
+
+        .template-autocomplete {
+            position: absolute;
+            z-index: 3000;
+            min-width: 280px;
+            max-width: 520px;
+            max-height: 260px;
+            overflow-y: auto;
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.2);
+        }
+
+        .template-autocomplete-option {
+            padding: 10px 12px;
+            border-bottom: 1px solid #f1f5f9;
+            cursor: pointer;
+        }
+
+        .template-autocomplete-option:last-child {
+            border-bottom: 0;
+        }
+
+        .template-autocomplete-option.is-active,
+        .template-autocomplete-option:hover {
+            background: #eff6ff;
+        }
+
+        .template-autocomplete-option strong {
+            color: #1e3a8a;
+            font-size: 13px;
+        }
+
+        .template-autocomplete-option p {
+            margin: 4px 0 0;
+            color: #334155;
+            font-size: 12px;
+            line-height: 1.35;
+        }
+
+        @keyframes maverick-spin {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 12px;
+            }
+
+            .card {
+                padding: 20px 16px;
+            }
+
+            h2 {
+                font-size: 20px;
+            }
+
+            h3 {
+                font-size: 18px;
+            }
+
+            [style*="grid-template-columns"] {
+                display: block !important;
+            }
+
+            [style*="grid-template-columns"] > * {
+                margin-bottom: 20px;
+            }
+
+            .btn {
+                width: 100%;
+                margin-bottom: 10px;
+            }
+
+            body {
+                font-size: 14px;
+            }
+
+            .hide-mobile {
+                display: none;
+            }
+
+            .header h1 {
+                font-size: 22px;
+            }
+        }
+
+        @media (max-width: 1024px) and (min-width: 769px) {
+            [style*="grid-template-columns: 3fr"] {
+                grid-template-columns: 2fr 1fr !important;
+            }
+
+            .container {
+                padding: 18px;
+            }
+        }
+    </style>
+
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <div class="header">
+        <div class="container">
+            <h1>Maverick Transaction Coordinator</h1>
+            <p>{% block subtitle %}AI-Enhanced Transaction Coordination for Texas Real Estate{% endblock %}</p>
+        </div>
+    </div>
+
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+
+    <script src="/static/js/main.js"></script>
+    <script>
+        window.MAVERICK_TEMPLATE_EXPANSION_ENABLED = {{ "true" if session.get('tc_logged_in') else "false" }};
+
+        (function() {
+            if (!window.MAVERICK_TEMPLATE_EXPANSION_ENABLED) return;
+
+            const state = {
+                dropdown: null,
+                target: null,
+                options: [],
+                activeIndex: 0,
+                replaceStart: null,
+                replaceEnd: null,
+                requestToken: 0,
+                debounceTimer: null,
+            };
+
+            function isEligibleField(target) {
+                if (!target) return false;
+                const tag = (target.tagName || "").toUpperCase();
+                if (tag === "TEXTAREA") return !target.readOnly && !target.disabled;
+                if (tag === "INPUT") {
+                    const type = (target.type || "text").toLowerCase();
+                    return ["text", "search", "email"].includes(type) && !target.readOnly && !target.disabled;
+                }
+                return false;
+            }
+
+            function closeAutocomplete() {
+                if (state.dropdown && state.dropdown.parentNode) {
+                    state.dropdown.parentNode.removeChild(state.dropdown);
+                }
+                state.dropdown = null;
+                state.target = null;
+                state.options = [];
+                state.activeIndex = 0;
+                state.replaceStart = null;
+                state.replaceEnd = null;
+            }
+
+            function getCurrentTransactionId() {
+                const pathMatch = (window.location.pathname || "").match(/\/tc\/transaction\/(\d+)/);
+                if (pathMatch) return parseInt(pathMatch[1], 10);
+                const hidden = document.querySelector("input[name='transaction_id']");
+                if (hidden && hidden.value) {
+                    const parsed = parseInt(hidden.value, 10);
+                    return Number.isFinite(parsed) ? parsed : null;
+                }
+                return null;
+            }
+
+            function getShortcodeMatch(value, caret) {
+                const prefix = (value || "").slice(0, caret);
+                const match = prefix.match(/(^|\s)(\/[a-z0-9_]{1,49})$/i);
+                if (!match) return null;
+                const shortcode = match[2];
+                return {
+                    shortcode: shortcode.toLowerCase(),
+                    start: caret - shortcode.length,
+                    end: caret,
+                };
+            }
+
+            function setActiveOption(index) {
+                state.activeIndex = Math.max(0, Math.min(index, state.options.length - 1));
+                const nodes = state.dropdown ? state.dropdown.querySelectorAll(".template-autocomplete-option") : [];
+                nodes.forEach((node, idx) => {
+                    if (idx === state.activeIndex) {
+                        node.classList.add("is-active");
+                        node.scrollIntoView({ block: "nearest" });
+                    } else {
+                        node.classList.remove("is-active");
+                    }
+                });
+            }
+
+            function displayAutocomplete(templates, target) {
+                closeAutocomplete();
+                if (!Array.isArray(templates) || templates.length === 0) return;
+                state.target = target;
+                state.options = templates;
+                state.activeIndex = 0;
+
+                const dropdown = document.createElement("div");
+                dropdown.className = "template-autocomplete";
+                templates.forEach((template, index) => {
+                    const option = document.createElement("div");
+                    option.className = "template-autocomplete-option";
+                    const strong = document.createElement("strong");
+                    strong.textContent = template.shortcode || "";
+                    const preview = document.createElement("p");
+                    preview.textContent = template.preview || "";
+                    option.appendChild(strong);
+                    option.appendChild(preview);
+                    option.addEventListener("mousedown", (event) => {
+                        event.preventDefault();
+                        selectTemplate(index);
+                    });
+                    option.addEventListener("touchstart", (event) => {
+                        event.preventDefault();
+                        selectTemplate(index);
+                    }, { passive: false });
+                    dropdown.appendChild(option);
+                });
+
+                const rect = target.getBoundingClientRect();
+                dropdown.style.left = `${rect.left + window.scrollX}px`;
+                dropdown.style.top = `${rect.bottom + window.scrollY + 4}px`;
+                dropdown.style.width = `${Math.max(rect.width, 280)}px`;
+                document.body.appendChild(dropdown);
+                state.dropdown = dropdown;
+                setActiveOption(0);
+            }
+
+            function showTemplateOptions(shortcode, target) {
+                const token = ++state.requestToken;
+                fetch(`/api/templates/search?q=${encodeURIComponent(shortcode)}`)
+                    .then((response) => response.json())
+                    .then((payload) => {
+                        if (token !== state.requestToken) return;
+                        const templates = Array.isArray(payload) ? payload : (payload.templates || []);
+                        displayAutocomplete(templates, target);
+                    })
+                    .catch(() => {
+                        if (token !== state.requestToken) return;
+                        closeAutocomplete();
+                    });
+            }
+
+            function replaceShortcodeInField(target, expandedText) {
+                const currentValue = target.value || "";
+                const before = currentValue.slice(0, state.replaceStart || 0);
+                const after = currentValue.slice(state.replaceEnd || 0);
+                const needsSpace = after && !/^\s/.test(after);
+                const insertion = `${expandedText || ""}${needsSpace ? " " : ""}`;
+                target.value = `${before}${insertion}${after}`;
+                const caret = before.length + insertion.length;
+                target.focus();
+                target.setSelectionRange(caret, caret);
+                target.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+
+            function selectTemplate(index) {
+                if (!state.target || !state.options[index]) return;
+                const selected = state.options[index];
+                fetch("/api/templates/expand", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        template_id: selected.id,
+                        transaction_id: getCurrentTransactionId(),
+                    }),
+                })
+                    .then((response) => response.json())
+                    .then((payload) => {
+                        if (!payload || payload.success === false) return;
+                        replaceShortcodeInField(state.target, payload.text || "");
+                        closeAutocomplete();
+                    })
+                    .catch(() => closeAutocomplete());
+            }
+
+            document.addEventListener("input", (event) => {
+                const target = event.target;
+                if (!isEligibleField(target)) {
+                    closeAutocomplete();
+                    return;
+                }
+                const caret = target.selectionStart || 0;
+                const match = getShortcodeMatch(target.value || "", caret);
+                if (!match) {
+                    closeAutocomplete();
+                    return;
+                }
+                state.replaceStart = match.start;
+                state.replaceEnd = match.end;
+                clearTimeout(state.debounceTimer);
+                state.debounceTimer = setTimeout(() => showTemplateOptions(match.shortcode, target), 120);
+            });
+
+            document.addEventListener("keydown", (event) => {
+                if (!state.dropdown || !state.target) return;
+                if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setActiveOption(state.activeIndex + 1);
+                } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setActiveOption(state.activeIndex - 1);
+                } else if (event.key === "Enter" || event.key === "Tab") {
+                    event.preventDefault();
+                    selectTemplate(state.activeIndex);
+                } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    closeAutocomplete();
+                }
+            });
+
+            document.addEventListener("click", (event) => {
+                if (!state.dropdown) return;
+                if (event.target === state.target || state.dropdown.contains(event.target)) return;
+                closeAutocomplete();
+            });
+
+            window.addEventListener("resize", closeAutocomplete);
+            window.addEventListener("scroll", closeAutocomplete, true);
+        })();
+    </script>
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

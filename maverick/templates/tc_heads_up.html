@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+
+{% block title %}Heads Up Report - Maverick TC{% endblock %}
+{% block subtitle %}Daily Predictive Guidance{% endblock %}
+
+{% block content %}
+<section class="card top-row">
+    <div>
+        <a class="text-link" href="{{ url_for('tc_dashboard') }}">&larr; Back to Dashboard</a>
+        <h2>📊 Heads Up Report</h2>
+        <p class="subtle">{{ report.signal_date_label }}</p>
+    </div>
+    <form method="post" action="{{ url_for('refresh_tc_heads_up') }}">
+        <button class="btn" type="submit">Refresh Signals</button>
+    </form>
+</section>
+
+{% if notice %}
+<section class="card">
+    <div class="notice notice-{{ notice_type }}">{{ notice }}</div>
+</section>
+{% endif %}
+
+<section class="card">
+    <h3>Transaction Health Summary</h3>
+    <div class="summary-grid">
+        <article class="summary-box healthy">
+            <h4>🟢 Healthy</h4>
+            <p>{{ report.summary.healthy_count }}</p>
+            <small>On track, no intervention needed</small>
+        </article>
+        <article class="summary-box watch">
+            <h4>🟡 Watch</h4>
+            <p>{{ report.summary.watch_count }}</p>
+            <small>Need awareness + proactive follow-up</small>
+        </article>
+        <article class="summary-box urgent">
+            <h4>🔴 Urgent</h4>
+            <p>{{ report.summary.urgent_count }}</p>
+            <small>Immediate intervention recommended</small>
+        </article>
+    </div>
+</section>
+
+<section class="card">
+    <h3>🔴 Urgent Signals</h3>
+    {% if report.open_urgent %}
+    <div class="signal-grid">
+        {% for signal in report.open_urgent %}
+        <article class="signal-card urgency-urgent">
+            <h4>{{ signal.property_address }}</h4>
+            <p><strong>{{ signal.headline }}</strong></p>
+            <p>💡 {{ signal.suggestion }}</p>
+            {% if signal.details.extension_addendum_draft %}
+            <details>
+                <summary class="summary-btn">Extension addendum draft ready</summary>
+                <pre class="draft-box">{{ signal.details.extension_addendum_draft }}</pre>
+            </details>
+            {% endif %}
+
+            <form method="post" action="{{ url_for('accept_tc_heads_up_signal', signal_id=signal.id) }}" class="stack-form">
+                <label>Modify suggestion before accepting</label>
+                <textarea name="suggestion" rows="3">{{ signal.suggestion }}</textarea>
+                <button class="btn" type="submit">Accept Suggestion</button>
+            </form>
+            <form method="post" action="{{ url_for('dismiss_tc_heads_up_signal', signal_id=signal.id) }}" class="stack-form">
+                <label>Dismiss notes (optional)</label>
+                <input type="text" name="dismissal_notes" maxlength="240">
+                <button class="btn btn-secondary" type="submit">Dismiss</button>
+            </form>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-box">No urgent signals right now.</div>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>🟡 Watch Signals</h3>
+    {% if report.open_watch %}
+    <div class="signal-grid">
+        {% for signal in report.open_watch %}
+        <article class="signal-card urgency-watch">
+            <h4>{{ signal.property_address }}</h4>
+            <p><strong>{{ signal.headline }}</strong></p>
+            <p>💡 {{ signal.suggestion }}</p>
+
+            <form method="post" action="{{ url_for('accept_tc_heads_up_signal', signal_id=signal.id) }}" class="stack-form">
+                <label>Modify suggestion before accepting</label>
+                <textarea name="suggestion" rows="3">{{ signal.suggestion }}</textarea>
+                <button class="btn" type="submit">Accept Suggestion</button>
+            </form>
+            <form method="post" action="{{ url_for('dismiss_tc_heads_up_signal', signal_id=signal.id) }}" class="stack-form">
+                <label>Dismiss notes (optional)</label>
+                <input type="text" name="dismissal_notes" maxlength="240">
+                <button class="btn btn-secondary" type="submit">Dismiss</button>
+            </form>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-box">No watch signals right now.</div>
+    {% endif %}
+</section>
+
+<section class="card">
+    <h3>Preferences</h3>
+    <p class="subtle">Set pattern preferences: “Always alert me for X, auto-handle Y”.</p>
+    <div class="prefs-grid">
+        {% for row in pattern_rows %}
+        <form method="post" action="{{ url_for('save_tc_heads_up_preferences') }}" class="pref-card">
+            <input type="hidden" name="pattern_key" value="{{ row.pattern_key }}">
+            <h4>{{ row.label }}</h4>
+            <p>{{ row.description }}</p>
+            <label class="checkbox-row">
+                <input type="hidden" name="always_alert" value="false">
+                <input type="checkbox" name="always_alert" value="true" {% if row.always_alert %}checked{% endif %}>
+                Always alert Margaret
+            </label>
+            <label class="checkbox-row">
+                <input type="hidden" name="auto_handle" value="false">
+                <input type="checkbox" name="auto_handle" value="true" {% if row.auto_handle %}checked{% endif %}>
+                Auto-handle suggestion
+            </label>
+            <button class="btn btn-secondary" type="submit">Save Preference</button>
+        </form>
+        {% endfor %}
+    </div>
+</section>
+
+{% if report.accepted %}
+<section class="card">
+    <h3>Accepted / Auto-Handled Today</h3>
+    <ul class="simple-list">
+        {% for signal in report.accepted %}
+        <li class="list-row">
+            <div>
+                <strong>{{ signal.property_address }}</strong> - {{ signal.headline }}
+                <p>{{ signal.modified_suggestion or signal.suggestion }}</p>
+            </div>
+            <small>{{ signal.accepted_at_label or signal.status|replace('_', ' ')|title }}</small>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.top-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.summary-box {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    background: #fff;
+}
+
+.summary-box p {
+    font-size: 26px;
+    font-weight: 800;
+    margin: 6px 0 4px;
+}
+
+.summary-box.healthy {
+    border-left: 4px solid #16a34a;
+}
+
+.summary-box.watch {
+    border-left: 4px solid #d97706;
+}
+
+.summary-box.urgent {
+    border-left: 4px solid #dc2626;
+}
+
+.signal-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.signal-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    background: #fff;
+}
+
+.signal-card.urgency-urgent {
+    border-left: 4px solid #dc2626;
+    background: #fff7f7;
+}
+
+.signal-card.urgency-watch {
+    border-left: 4px solid #d97706;
+    background: #fffaf0;
+}
+
+.stack-form {
+    margin-top: 10px;
+    display: grid;
+    gap: 6px;
+}
+
+.stack-form textarea,
+.stack-form input {
+    width: 100%;
+}
+
+.prefs-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.pref-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 12px;
+    background: #fff;
+}
+
+.pref-card h4 {
+    margin-bottom: 6px;
+}
+
+.pref-card p {
+    color: #475569;
+    margin-bottom: 8px;
+}
+
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.draft-box {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    white-space: pre-wrap;
+    font-size: 12px;
+}
+
+.notice {
+    border-radius: 8px;
+    padding: 10px;
+    font-weight: 600;
+}
+
+.notice-success {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.notice-warning {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.notice-error {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+@media (max-width: 1024px) {
+    .summary-grid,
+    .signal-grid,
+    .prefs-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}

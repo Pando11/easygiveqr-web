@@ -1,0 +1,385 @@
+{% extends "base.html" %}
+
+{% block title %}Revenue Dashboard - Maverick TC{% endblock %}
+{% block subtitle %}Commission & Revenue Tracking{% endblock %}
+
+{% block content %}
+<section class="card revenue-header">
+    <div>
+        <a class="back-link" href="/tc/dashboard">&larr; Back to Dashboard</a>
+        <h2>Revenue Dashboard</h2>
+        <p class="subtle">Showing {{ filters.label }} data across {{ totals.transaction_count }} transaction(s).</p>
+    </div>
+    <div class="header-actions">
+        <a class="btn btn-secondary" href="{{ export_url }}">Export CSV</a>
+    </div>
+</section>
+
+<section class="card">
+    <form method="get" class="filter-form">
+        <div class="form-group">
+            <label for="period">Filter Period</label>
+            <select id="period" name="period">
+                <option value="month" {% if filters.period == "month" %}selected{% endif %}>Month</option>
+                <option value="quarter" {% if filters.period == "quarter" %}selected{% endif %}>Quarter</option>
+                <option value="year" {% if filters.period == "year" %}selected{% endif %}>Year</option>
+            </select>
+        </div>
+        <div class="form-group period-input period-month">
+            <label for="month">Month</label>
+            <input type="month" id="month" name="month" value="{{ filters.month }}">
+        </div>
+        <div class="form-group period-input period-quarter">
+            <label for="quarter">Quarter (YYYY-Q1..Q4)</label>
+            <input type="text" id="quarter" name="quarter" value="{{ filters.quarter }}" placeholder="2026-Q1">
+        </div>
+        <div class="form-group period-input period-year">
+            <label for="year">Year</label>
+            <input type="number" id="year" name="year" value="{{ filters.year }}" min="2020" max="2100">
+        </div>
+        <div class="form-group action-group">
+            <button type="submit" class="btn">Apply Filter</button>
+        </div>
+    </form>
+</section>
+
+<section class="stats-grid">
+    <article class="card stat-card">
+        <h3>Total Revenue</h3>
+        <p class="stat-value">${{ "%.2f"|format(totals.total_revenue) }}</p>
+    </article>
+    <article class="card stat-card">
+        <h3>Payments Pending</h3>
+        <p class="stat-value">${{ "%.2f"|format(totals.payments_pending) }}</p>
+    </article>
+    <article class="card stat-card">
+        <h3>Referral Credits</h3>
+        <p class="stat-value">${{ "%.2f"|format(totals.referral_credits) }}</p>
+    </article>
+    <article class="card stat-card">
+        <h3>Paid / Pending</h3>
+        <p class="subtle">
+            Upfront: {{ totals.paid_upfront_count }} paid / {{ totals.pending_upfront_count }} pending
+        </p>
+        <p class="subtle">
+            Closing: {{ totals.paid_closing_count }} paid / {{ totals.pending_closing_count }} pending
+        </p>
+    </article>
+</section>
+
+<section class="card">
+    <h3>KPI Overview</h3>
+    <div id="kpiChart" class="chart-shell"></div>
+</section>
+
+<section class="card">
+    <h3>Monthly Trend</h3>
+    <div id="monthlyChart" class="chart-shell"></div>
+</section>
+
+<section class="card">
+    <h3>Revenue Rows</h3>
+    {% if rows %}
+    <div class="table-wrap">
+        <table class="revenue-table">
+            <thead>
+                <tr>
+                    <th>Month</th>
+                    <th>Transaction</th>
+                    <th>Property</th>
+                    <th>Agent</th>
+                    <th>Upfront</th>
+                    <th>Closing</th>
+                    <th>Referral</th>
+                    <th>Total</th>
+                    <th>Pending</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                <tr>
+                    <td>{{ row.month }}</td>
+                    <td>#{{ row.transaction_id }}</td>
+                    <td>{{ row.property_address }}</td>
+                    <td>{{ row.agent_name }}</td>
+                    <td>${{ "%.2f"|format(row.upfront_fee) }}</td>
+                    <td>${{ "%.2f"|format(row.closing_fee) }}</td>
+                    <td>${{ "%.2f"|format(row.referral_credit_given) }}</td>
+                    <td>${{ "%.2f"|format(row.total_revenue) }}</td>
+                    <td>${{ "%.2f"|format(row.pending_amount) }}</td>
+                    <td>{{ row.status }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-box">No commission data found for this filter.</div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.revenue-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+}
+
+.back-link {
+    color: #1d4ed8;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.header-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.filter-form {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr 1fr 1fr auto;
+    gap: 12px;
+    align-items: end;
+}
+
+.action-group .btn {
+    white-space: nowrap;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.stat-card {
+    margin-bottom: 0;
+}
+
+.stat-value {
+    margin-top: 6px;
+    font-size: 26px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.chart-shell {
+    border: 1px solid #dbe3ee;
+    border-radius: 10px;
+    padding: 14px;
+    background: #f8fafc;
+    min-height: 220px;
+}
+
+.chart-grid {
+    display: grid;
+    gap: 10px;
+}
+
+.chart-row {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    align-items: center;
+    gap: 10px;
+}
+
+.chart-label {
+    font-size: 13px;
+    color: #334155;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chart-bars {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.chart-bar {
+    height: 18px;
+    border-radius: 999px;
+    min-width: 6px;
+}
+
+.legend-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 10px;
+    font-size: 13px;
+}
+
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+}
+
+.table-wrap {
+    overflow-x: auto;
+}
+
+.revenue-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 980px;
+}
+
+.revenue-table th,
+.revenue-table td {
+    border-bottom: 1px solid #e2e8f0;
+    padding: 10px 8px;
+    text-align: left;
+    font-size: 14px;
+}
+
+.revenue-table th {
+    color: #0f172a;
+    background: #f8fafc;
+}
+
+.empty-box {
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    padding: 12px;
+    color: #64748b;
+    background: #f8fafc;
+}
+
+@media (max-width: 1024px) {
+    .filter-form {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .stats-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    .revenue-header {
+        flex-direction: column;
+    }
+
+    .filter-form {
+        grid-template-columns: 1fr;
+    }
+
+    .stats-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const chartPayload = {{ chart_payload | tojson }};
+
+function chart_display_v0(containerId, payload) {
+    const container = document.getElementById(containerId);
+    if (!container || !payload || !payload.labels || !payload.series) {
+        return;
+    }
+
+    const labels = payload.labels;
+    const series = payload.series;
+    const allValues = [];
+    series.forEach((item) => {
+        (item.values || []).forEach((value) => allValues.push(Number(value) || 0));
+    });
+    const maxValue = Math.max(...allValues, 1);
+
+    const grid = document.createElement("div");
+    grid.className = "chart-grid";
+
+    labels.forEach((label, index) => {
+        const row = document.createElement("div");
+        row.className = "chart-row";
+
+        const labelEl = document.createElement("div");
+        labelEl.className = "chart-label";
+        labelEl.textContent = label;
+        row.appendChild(labelEl);
+
+        const barsWrap = document.createElement("div");
+        barsWrap.className = "chart-bars";
+
+        series.forEach((item) => {
+            const value = Number((item.values || [])[index] || 0);
+            const width = Math.max((value / maxValue) * 220, value > 0 ? 8 : 0);
+            const bar = document.createElement("div");
+            bar.className = "chart-bar";
+            bar.style.width = `${width}px`;
+            bar.style.background = item.color || "#1d4ed8";
+            bar.title = `${item.name}: $${value.toFixed(2)}`;
+            barsWrap.appendChild(bar);
+
+            const valueLabel = document.createElement("span");
+            valueLabel.style.fontSize = "12px";
+            valueLabel.style.color = "#334155";
+            valueLabel.textContent = `$${value.toFixed(2)}`;
+            barsWrap.appendChild(valueLabel);
+        });
+
+        row.appendChild(barsWrap);
+        grid.appendChild(row);
+    });
+
+    const legend = document.createElement("div");
+    legend.className = "legend-row";
+    series.forEach((item) => {
+        const legendItem = document.createElement("div");
+        legendItem.className = "legend-item";
+        const dot = document.createElement("span");
+        dot.className = "legend-dot";
+        dot.style.background = item.color || "#1d4ed8";
+        const labelEl = document.createElement("span");
+        labelEl.textContent = item.name;
+        legendItem.appendChild(dot);
+        legendItem.appendChild(labelEl);
+        legend.appendChild(legendItem);
+    });
+
+    container.innerHTML = "";
+    container.appendChild(grid);
+    container.appendChild(legend);
+}
+
+function togglePeriodInputs() {
+    const period = document.getElementById("period");
+    if (!period) return;
+    const monthWrap = document.querySelector(".period-month");
+    const quarterWrap = document.querySelector(".period-quarter");
+    const yearWrap = document.querySelector(".period-year");
+
+    if (monthWrap) monthWrap.style.display = period.value === "month" ? "block" : "none";
+    if (quarterWrap) quarterWrap.style.display = period.value === "quarter" ? "block" : "none";
+    if (yearWrap) yearWrap.style.display = period.value === "year" ? "block" : "none";
+}
+
+document.getElementById("period")?.addEventListener("change", togglePeriodInputs);
+togglePeriodInputs();
+
+chart_display_v0("kpiChart", chartPayload.kpi);
+chart_display_v0("monthlyChart", chartPayload.monthly);
+</script>
+{% endblock %}

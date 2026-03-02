@@ -1,0 +1,319 @@
+{% extends "base.html" %}
+
+{% block title %}Party Portal - Maverick TC{% endblock %}
+{% block subtitle %}Secure Transaction Portal{% endblock %}
+
+{% block content %}
+<div class="party-portal">
+    <header class="portal-header card">
+        <div>
+            <h1>📍 {{ transaction.property_address }}</h1>
+            <p class="muted-line">{{ party_type.title() }} Portal · Transaction #{{ transaction.id }}</p>
+        </div>
+        <div class="closing-countdown">
+            {% if data.days_to_closing is not none %}
+            <strong>Closing in {{ data.days_to_closing }} day{{ "" if data.days_to_closing == 1 else "s" }}</strong>
+            {% else %}
+            <strong>Closing date pending</strong>
+            {% endif %}
+            <span>{{ data.closing_date_label }}</span>
+        </div>
+    </header>
+
+    <section class="card">
+        <div class="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ data.progress_percent }}">
+            <div class="progress" style="width: {{ data.progress_percent }}%;"></div>
+        </div>
+        <span class="progress-label">{{ data.progress_percent }}% Complete</span>
+    </section>
+
+    <nav class="portal-nav card">
+        <a href="#timeline" data-section="timeline">Timeline</a>
+        <a href="#documents" data-section="documents">Documents</a>
+        <a href="#action-items" data-section="action_items">Your To-Do</a>
+        <a href="#recent-activity" data-section="recent_activity">Recent Updates</a>
+        {% if can_upload %}
+        <a href="#upload-section" data-section="upload">Upload</a>
+        {% endif %}
+    </nav>
+
+    <section class="timeline card" id="timeline">
+        <h2>Timeline</h2>
+        {% if data.timeline %}
+            {% for item in data.timeline %}
+            <div class="timeline-item {{ item.status }}">
+                <span class="icon">
+                    {% if item.status == 'complete' %}✅
+                    {% elif item.status == 'in_progress' %}🔄
+                    {% else %}○{% endif %}
+                </span>
+                <div class="content">
+                    <strong>{{ item.title }}</strong>
+                    <span class="date">{{ item.date_label }}</span>
+                </div>
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="empty-box">Timeline is being prepared.</div>
+        {% endif %}
+    </section>
+
+    <section class="documents card" id="documents">
+        <h2>Documents</h2>
+        {% for doc in data.documents %}
+        <div class="document-item {{ doc.status }}">
+            <span class="icon">📄</span>
+            <strong>{{ doc.name }}</strong>
+            {% if doc.available %}
+                <a href="{{ doc.view_url }}" target="_blank" rel="noopener">View</a>
+            {% else %}
+                <span class="pending">Pending</span>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </section>
+
+    {% if data.your_todo %}
+    <section class="action-items card" id="action-items">
+        <h2>Your To-Do List</h2>
+        {% for todo in data.your_todo %}
+        <div class="todo-item">
+            <span class="icon">⏰</span>
+            <span>{{ todo.description }}</span>
+            {% if todo.due_label %}
+                <span class="due">Due {{ todo.due_label }}</span>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </section>
+    {% endif %}
+
+    {% if can_upload %}
+    <section class="upload-section card" id="upload-section">
+        <h2>Upload Documents</h2>
+        <p class="muted-line">Agents can upload multiple files (PDF/JPG/PNG, max 20, 16MB each).</p>
+        <div class="upload-zone">
+            <input type="file" id="portalUpload" name="files" multiple accept=".pdf,.jpg,.jpeg,.png">
+            <button type="button" class="btn" onclick="uploadFromPortal()">Upload</button>
+        </div>
+        <p id="uploadResult" class="muted-line"></p>
+    </section>
+    {% endif %}
+
+    <section class="recent-activity card" id="recent-activity">
+        <h2>Recent Updates</h2>
+        {% if data.recent_updates %}
+            {% for update in data.recent_updates %}
+            <div class="activity-item">
+                <span class="timestamp">{{ update.timeago }}</span>
+                <p>{{ update.description }}</p>
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="empty-box">No updates yet.</div>
+        {% endif %}
+    </section>
+
+    <section class="contact card">
+        <h2>Questions?</h2>
+        <div class="contact-card">
+            <strong>{{ data.contacts.coordinator.name }}</strong>
+            {% if data.contacts.coordinator.phone %}
+            <a href="tel:{{ data.contacts.coordinator.phone }}">{{ data.contacts.coordinator.phone }}</a>
+            {% endif %}
+            {% if data.contacts.coordinator.email %}
+            <a href="mailto:{{ data.contacts.coordinator.email }}">{{ data.contacts.coordinator.email }}</a>
+            {% endif %}
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.party-portal {
+    display: grid;
+    gap: 14px;
+}
+
+.portal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.closing-countdown {
+    text-align: right;
+    color: #334155;
+}
+
+.closing-countdown span {
+    display: block;
+    margin-top: 4px;
+    font-size: 13px;
+    color: #64748b;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 15px;
+    background: #e2e8f0;
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+.progress {
+    height: 100%;
+    background: linear-gradient(90deg, #22c55e, #16a34a);
+}
+
+.progress-label {
+    display: inline-block;
+    margin-top: 8px;
+    font-weight: 700;
+}
+
+.portal-nav {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.portal-nav a {
+    text-decoration: none;
+    border-radius: 8px;
+    padding: 7px 10px;
+    background: #f1f5f9;
+    color: #0f172a;
+    font-weight: 600;
+}
+
+.timeline-item,
+.document-item,
+.todo-item,
+.activity-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 8px;
+}
+
+.timeline-item.complete {
+    border-color: #86efac;
+    background: #f0fdf4;
+}
+
+.timeline-item.in_progress {
+    border-color: #93c5fd;
+    background: #eff6ff;
+}
+
+.document-item.pending {
+    background: #f8fafc;
+}
+
+.document-item .pending {
+    color: #b45309;
+    font-weight: 700;
+}
+
+.content {
+    display: grid;
+}
+
+.content .date,
+.timestamp,
+.due,
+.muted-line {
+    color: #64748b;
+    font-size: 13px;
+}
+
+.upload-zone {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.contact-card {
+    display: grid;
+    gap: 6px;
+}
+
+.contact-card a {
+    color: #1d4ed8;
+    text-decoration: none;
+}
+
+.contact-card a:hover {
+    text-decoration: underline;
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+    const accessToken = {{ access_token|tojson }};
+    const trackUrl = `/portal/${accessToken}/track-section`;
+    const navLinks = Array.from(document.querySelectorAll('.portal-nav a[data-section]'));
+
+    function trackSection(sectionName) {
+        fetch(trackUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ section: sectionName })
+        }).catch(() => {});
+    }
+
+    trackSection({{ active_section|tojson }});
+    navLinks.forEach((link) => {
+        link.addEventListener('click', function () {
+            const section = this.getAttribute('data-section') || 'overview';
+            trackSection(section);
+        });
+    });
+
+    window.uploadFromPortal = async function uploadFromPortal() {
+        const input = document.getElementById('portalUpload');
+        const output = document.getElementById('uploadResult');
+        if (!input || !input.files || !input.files.length) {
+            if (output) output.textContent = 'Choose at least one file.';
+            return;
+        }
+        const files = Array.from(input.files);
+        if (files.length > 20) {
+            if (output) output.textContent = 'Maximum 20 files at once.';
+            return;
+        }
+        const formData = new FormData();
+        files.forEach((file) => formData.append('files', file));
+        if (output) output.textContent = 'Uploading...';
+        try {
+            const response = await fetch(`/portal/${accessToken}/upload`, {
+                method: 'POST',
+                body: formData
+            });
+            const result = await response.json();
+            if (!response.ok || !result.success) {
+                throw new Error(result.error || 'upload_failed');
+            }
+            if (output) {
+                output.textContent = `Uploaded ${result.uploaded} file(s).`;
+            }
+            input.value = '';
+            trackSection('upload');
+            window.setTimeout(() => window.location.reload(), 450);
+        } catch (error) {
+            if (output) output.textContent = 'Upload failed. Please try again.';
+        }
+    };
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,8 @@
+Hi {{ lender_name }},
+
+Please confirm appraisal has been ordered for {{ property_address }}.
+Financing deadline is {{ financing_deadline|format_date }} ({{ days_remaining }} days).
+
+Reply with status or call Margaret at {{ margaret_phone }}.
+
+- Maverick TC

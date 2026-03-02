@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Thank You From Maverick TC</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Thank You for Working With Maverick TC</h2>
+                <p style="margin:8px 0 0;">{{ property_address }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                <p style="margin:0 0 12px;">Hi {{ seller_name }},</p>
+                <p style="margin:0 0 12px;">Thank you for trusting our team through closing.</p>
+                <h3 style="margin:18px 0 8px; font-size:16px;">Quick final reminders</h3>
+                <ul style="margin:0 0 12px; padding-left:18px;">
+                    <li>Please confirm your forwarding address with your title and tax contacts.</li>
+                    <li>Submit final utility meter readings where needed.</li>
+                    <li>Keep final settlement docs in your records.</li>
+                </ul>
+                {% if final_docs_link %}
+                <p style="margin:0 0 12px;">
+                    Upload any final documents here:
+                    <a href="{{ final_docs_link }}" target="_blank" rel="noopener">{{ final_docs_link }}</a>
+                </p>
+                {% endif %}
+                <p style="margin:0 0 12px;">
+                    If you know someone who needs smooth transaction coordination, please refer us:
+                    <a href="{{ referral_link }}" target="_blank" rel="noopener">{{ referral_link }}</a>
+                </p>
+                <p style="margin:0;">Thank you again,<br>Maverick Transaction Coordination</p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

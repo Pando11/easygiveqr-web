@@ -1,0 +1,8 @@
+Hi {{ seller_agent_name }},
+
+HOA documents for {{ property_address }} are due by
+{{ due_date|format_date }} ({{ days_remaining }} days).
+
+Please share status, or call Margaret at {{ margaret_phone }} for support.
+
+- Maverick TC

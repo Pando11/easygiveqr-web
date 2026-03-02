@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check": "npm run lint && npm run typecheck",
+    "setup": "bash scripts/setup.sh"
   },
   "dependencies": {
     "@sentry/nextjs": "^10.0.0",

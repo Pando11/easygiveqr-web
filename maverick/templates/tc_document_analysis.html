@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+
+{% block title %}Document Analysis - Transaction {{ transaction.id }}{% endblock %}
+{% block subtitle %}AI Document Analysis Dashboard{% endblock %}
+
+{% block content %}
+<section class="card">
+    <a class="text-link" href="{{ url_for('tc_transaction', transaction_id=transaction.id) }}#documents">&larr; Back to Transaction</a>
+    <h2 style="margin-top:8px;">Document Analysis - {{ transaction.property_address }}</h2>
+    <p class="muted-line">Transaction #{{ transaction.id }}</p>
+</section>
+
+<section class="grid-2 analysis-summary-grid">
+    <article class="card">
+        <h3>📋 HOA Documents Analysis</h3>
+        {% if hoa_summary %}
+        {% set findings = hoa_summary.findings %}
+        <p>✅ Monthly Dues:
+            {% if findings.monthly_dues %}
+                {{ findings.monthly_dues.text }}
+            {% else %}
+                Not identified
+            {% endif %}
+        </p>
+        <p>
+            {% if findings.special_assessments %}
+            ⚠️ Special Assessment: {{ findings.special_assessments[0].text }}
+            {% else %}
+            ✅ Special Assessment: None flagged
+            {% endif %}
+        </p>
+        <p>
+            {% if findings.violations %}
+            ❌ {{ findings.violations|length }} violation(s) found - REVIEW REQUIRED
+            {% else %}
+            ✅ No violations flagged
+            {% endif %}
+        </p>
+        <p>📝 Action Items: {{ (hoa_summary.action_items or [])|length }}</p>
+        <p>Confidence: High {{ findings.confidence_summary.high or 0 }}, Medium {{ findings.confidence_summary.medium or 0 }}, Low {{ findings.confidence_summary.low or 0 }}</p>
+        {% else %}
+        <div class="empty-box">No HOA analysis results yet.</div>
+        {% endif %}
+    </article>
+
+    <article class="card">
+        <h3>🔍 Inspection Report Analysis</h3>
+        {% if inspection_summary %}
+        {% set findings = inspection_summary.findings %}
+        <p>
+            {% if findings.major_defects %}
+            ⚠️ {{ findings.major_defects|length }} major defect(s) identified
+            {% else %}
+            ✅ No major defects flagged
+            {% endif %}
+        </p>
+        <p>📝 {{ findings.repair_items|length if findings.repair_items else 0 }} total repair item(s)</p>
+        <p>💰 Estimated repair cost:
+            {% if findings.estimated_repair_cost %}
+            ${{ "{:,.0f}".format(findings.estimated_repair_cost) }}
+            {% else %}
+            Not identified
+            {% endif %}
+        </p>
+        <p>
+            {% if findings.safety_issues %}
+            ❌ SAFETY: {{ findings.safety_issues|length }} safety issue(s) found
+            {% else %}
+            ✅ No safety issues flagged
+            {% endif %}
+        </p>
+        <p>📝 Action Items: {{ (inspection_summary.action_items or [])|length }}</p>
+        <p>Confidence: High {{ findings.confidence_summary.high or 0 }}, Medium {{ findings.confidence_summary.medium or 0 }}, Low {{ findings.confidence_summary.low or 0 }}</p>
+        {% else %}
+        <div class="empty-box">No inspection analysis results yet.</div>
+        {% endif %}
+    </article>
+
+    <article class="card">
+        <h3>🏠 Appraisal Analysis</h3>
+        {% if appraisal_summary %}
+        {% set findings = appraisal_summary.findings %}
+        <p>✅ Appraised Value:
+            {% if findings.appraised_value is not none %}
+            ${{ "{:,.0f}".format(findings.appraised_value) }}
+            {% else %}
+            Not identified
+            {% endif %}
+        </p>
+        <p>📄 Contract Price:
+            {% if findings.contract_price is not none %}
+            ${{ "{:,.0f}".format(findings.contract_price) }}
+            {% else %}
+            Not identified
+            {% endif %}
+        </p>
+        <p>
+            {% if findings.matches_contract is sameas false %}
+            ❌ Under contract by ${{ "{:,.0f}".format(findings.variance or 0) }} ({{ "%.1f"|format(findings.variance_percent or 0) }}%)
+            {% elif findings.matches_contract is sameas true %}
+            ✅ Meets or exceeds contract value
+            {% else %}
+            ⚠️ Unable to confirm appraisal variance
+            {% endif %}
+        </p>
+        <p>📝 Comparable sales identified: {{ findings.comparable_sales|length if findings.comparable_sales else 0 }}</p>
+        <p>📝 Action Items: {{ (appraisal_summary.action_items or [])|length }}</p>
+        <p>Confidence: High {{ findings.confidence_summary.high or 0 }}, Medium {{ findings.confidence_summary.medium or 0 }}, Low {{ findings.confidence_summary.low or 0 }}</p>
+        {% else %}
+        <div class="empty-box">No appraisal analysis results yet.</div>
+        {% endif %}
+    </article>
+</section>
+
+<section class="card">
+    <h3>All Analysis Records</h3>
+    {% if analysis_rows %}
+    <ul class="simple-list">
+        {% for row in analysis_rows %}
+        <li class="list-row analysis-row {% if row.margaret_reviewed %}state-complete{% else %}state-today{% endif %}">
+            <div class="analysis-main">
+                <p><strong>{{ row.document_label }}</strong> • {{ row.filename or "Unknown file" }}</p>
+                <p class="muted-line">Analyzed: {{ row.analysis_date_label }}</p>
+                <p class="muted-line">Action items generated: {{ (row.action_items or [])|length }}</p>
+                {% if row.document_id %}
+                <p>
+                    <a class="text-link" href="{{ url_for('view_document', document_id=row.document_id) }}" target="_blank" rel="noopener">View Raw Document</a>
+                    |
+                    <a class="text-link" href="{{ url_for('download_document', document_id=row.document_id) }}">Download</a>
+                </p>
+                {% endif %}
+
+                {% if row.action_items %}
+                <details>
+                    <summary class="summary-btn">View Full Analysis / Action Items</summary>
+                    <div class="analysis-actions">
+                        {% for action in row.action_items %}
+                        <div class="action-item-box">
+                            <p><strong>{{ action.type or "action" }}</strong> • {{ action.priority or "n/a" }}</p>
+                            <p>{{ action.message or action.task or "No details" }}</p>
+                            {% if action.task_id %}
+                            <form method="post" action="{{ url_for('override_document_analysis_task', transaction_id=transaction.id) }}">
+                                <input type="hidden" name="task_id" value="{{ action.task_id }}">
+                                <button type="submit" class="btn btn-small btn-secondary">Override Task (Mark N/A)</button>
+                            </form>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% if row.findings %}
+                    <pre class="analysis-json">{{ row.findings | tojson(indent=2) }}</pre>
+                    {% endif %}
+                </details>
+                {% endif %}
+            </div>
+
+            <div class="analysis-side">
+                <span class="badge {{ 'badge-green' if row.margaret_reviewed else 'badge-yellow' }}">
+                    {{ "Reviewed" if row.margaret_reviewed else "Needs review" }}
+                </span>
+                <form method="post" action="{{ url_for('mark_document_analysis_reviewed', transaction_id=transaction.id, analysis_id=row.id) }}" class="stack-form">
+                    <input type="hidden" name="reviewed" value="true">
+                    <label for="notes_{{ row.id }}">Notes</label>
+                    <textarea id="notes_{{ row.id }}" name="notes" rows="3">{{ row.notes or "" }}</textarea>
+                    <button type="submit" class="btn btn-small">Mark as Reviewed</button>
+                </form>
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty-box">No analyzed documents found for this transaction yet.</div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.analysis-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+}
+
+.analysis-row {
+    align-items: flex-start;
+}
+
+.analysis-main {
+    flex: 2;
+}
+
+.analysis-side {
+    flex: 1;
+    min-width: 240px;
+}
+
+.analysis-actions {
+    margin: 8px 0;
+    display: grid;
+    gap: 8px;
+}
+
+.action-item-box {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 8px;
+    background: #f8fafc;
+}
+
+.analysis-json {
+    margin-top: 8px;
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    background: #f8fbff;
+    padding: 8px;
+    max-height: 260px;
+    overflow: auto;
+    font-size: 12px;
+}
+
+.muted-line {
+    color: #64748b;
+}
+
+@media (max-width: 1024px) {
+    .analysis-row {
+        flex-direction: column;
+    }
+
+    .analysis-side {
+        width: 100%;
+        min-width: 0;
+    }
+}
+</style>
+{% endblock %}

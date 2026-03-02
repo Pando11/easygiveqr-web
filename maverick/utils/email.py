@@ -1,0 +1,195 @@
+import os
+import re
+import smtplib
+from email.message import EmailMessage
+from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import urlopen
+
+from dotenv import load_dotenv
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+load_dotenv()
+
+
+def _html_to_text(html_body):
+    """Convert simple HTML email body to a plain-text fallback."""
+    if not html_body:
+        return ""
+    stripped = re.sub(r"<\s*br\s*/?\s*>", "\n", html_body, flags=re.IGNORECASE)
+    stripped = re.sub(r"</p\s*>", "\n\n", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"<[^>]+>", "", stripped)
+    return re.sub(r"\n{3,}", "\n\n", stripped).strip()
+
+
+def _attach_files(message, attachments):
+    """Attach in-memory payloads or local files to an EmailMessage."""
+    for attachment in attachments or []:
+        if not isinstance(attachment, dict):
+            continue
+        filename = (attachment.get("filename") or "").strip()
+        content_type = (attachment.get("content_type") or "application/octet-stream").strip()
+        data = attachment.get("data")
+        path = (attachment.get("path") or "").strip()
+        url = (attachment.get("url") or "").strip()
+
+        if data is None and path:
+            try:
+                data = Path(path).read_bytes()
+                if not filename:
+                    filename = Path(path).name
+            except Exception as exc:
+                print(f"Attachment read error ({path}): {exc}")
+                continue
+        if data is None and url:
+            try:
+                with urlopen(url, timeout=25) as response:
+                    data = response.read()
+                    header_content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+                    if header_content_type and "/" in header_content_type:
+                        content_type = header_content_type
+                if not filename:
+                    filename = Path(urlsplit(url).path).name or "attachment.bin"
+            except Exception as exc:
+                print(f"Attachment download error ({url}): {exc}")
+                continue
+
+        if data is None:
+            continue
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        if not isinstance(data, (bytes, bytearray)):
+            continue
+        if not filename:
+            filename = "attachment.bin"
+
+        maintype, subtype = "application", "octet-stream"
+        if "/" in content_type:
+            maintype, subtype = content_type.split("/", 1)
+
+        message.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+
+
+def send_html_email(to_email, subject, html_body, text_body=None, attachments=None, reply_to=None):
+    """
+    Send HTML email using SMTP settings from environment variables.
+
+    Required env vars:
+      - SMTP_HOST
+      - SMTP_PORT (defaults to 587)
+      - SMTP_FROM_EMAIL (or SMTP_USERNAME/SMTP_USER fallback)
+
+    Optional env vars:
+      - SMTP_USERNAME (or SMTP_USER alias)
+      - SMTP_PASSWORD
+      - SMTP_USE_TLS (default true)
+      - SMTP_USE_SSL (default false)
+      - SMTP_FROM_NAME
+
+    Returns:
+      - message-id string if sent
+      - None on failure/missing config
+    """
+    smtp_host = (os.getenv("SMTP_HOST") or "").strip()
+    smtp_port = int((os.getenv("SMTP_PORT") or "587").strip())
+    smtp_username = ((os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER")) or "").strip()
+    smtp_password = (os.getenv("SMTP_PASSWORD") or "").strip()
+    smtp_from_email = (os.getenv("SMTP_FROM_EMAIL") or os.getenv("SMTP_USER") or smtp_username).strip()
+    smtp_from_name = (os.getenv("SMTP_FROM_NAME") or "Maverick TC").strip()
+    use_tls = (os.getenv("SMTP_USE_TLS") or "true").strip().lower() in {"1", "true", "yes", "on"}
+    use_ssl = (os.getenv("SMTP_USE_SSL") or "false").strip().lower() in {"1", "true", "yes", "on"}
+
+    if not smtp_host:
+        print("Email send skipped: SMTP_HOST is not configured.")
+        return None
+    if not smtp_from_email:
+        print("Email send skipped: SMTP_FROM_EMAIL/SMTP_USERNAME is not configured.")
+        return None
+    if not to_email:
+        print("Email send skipped: recipient address missing.")
+        return None
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = f"{smtp_from_name} <{smtp_from_email}>"
+    message["To"] = to_email
+    if reply_to:
+        message["Reply-To"] = reply_to
+    message.set_content((text_body or _html_to_text(html_body) or "Maverick TC notification").strip())
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
+    _attach_files(message, attachments)
+
+    try:
+        smtp_client_class = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+        with smtp_client_class(smtp_host, smtp_port, timeout=25) as server:
+            if not use_ssl and use_tls:
+                server.starttls()
+            if smtp_username and smtp_password:
+                server.login(smtp_username, smtp_password)
+            server.send_message(message)
+        return message.get("Message-ID")
+    except Exception as exc:
+        print(f"Email send error to {to_email}: {exc}")
+        return None
+
+
+def send_email(to, template, data, reply_to=None, attachments=None):
+    """
+    Render a Jinja template and send an HTML email via SMTP.
+
+    Args:
+        to: recipient email address
+        template: template path relative to maverick/templates
+        data: render context dict (can include "subject")
+        reply_to: optional reply-to email
+        attachments: optional list of attachment dicts:
+            - {"filename": "...", "content_type": "...", "data": b"..."}
+            - {"filename": "...", "path": "/tmp/file.pdf"}
+            - {"filename": "...", "url": "https://..."}
+
+    Returns:
+        message-id string on success, None on failure
+    """
+    context = data or {}
+    subject = (context.get("subject") or "Maverick TC Notification").strip()
+    template_path = (template or "").strip()
+    if not template_path:
+        print("Email send skipped: template path is required.")
+        return None
+
+    templates_root = Path(__file__).resolve().parents[1] / "templates"
+    jinja_env = Environment(
+        loader=FileSystemLoader(str(templates_root)),
+        autoescape=select_autoescape(["html", "xml"]),
+    )
+    jinja_env.filters["format_date"] = lambda value: (
+        value.strftime("%b %d, %Y")
+        if hasattr(value, "strftime")
+        else str(value or "")
+    )
+    jinja_env.filters["currency"] = lambda value: (
+        f"${float(value):,.2f}"
+        if value not in (None, "")
+        else "$0.00"
+    )
+
+    try:
+        html_template = jinja_env.get_template(template_path)
+    except Exception as exc:
+        print(f"Email template load error ({template_path}): {exc}")
+        return None
+
+    try:
+        html_content = html_template.render(**context)
+    except Exception as exc:
+        print(f"Email template render error ({template_path}): {exc}")
+        return None
+
+    return send_html_email(
+        to_email=to,
+        subject=subject,
+        html_body=html_content,
+        reply_to=reply_to,
+        attachments=attachments,
+    )

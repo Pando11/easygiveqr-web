@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}Closing Checklists - Maverick TC{% endblock %}
+{% block subtitle %}Dynamic Closing Checklist Queue{% endblock %}
+
+{% block content %}
+<section class="card page-header">
+    <div>
+        <h2>Dynamic Closing Checklists</h2>
+        <p class="hint-text">3-day closing trigger + 24-hour auto-send fallback.</p>
+    </div>
+    <div class="header-actions">
+        <form method="post">
+            <input type="hidden" name="action" value="refresh_due">
+            <button type="submit" class="btn">Run 3-Day Trigger Now</button>
+        </form>
+        <form method="post">
+            <input type="hidden" name="action" value="auto_send_now">
+            <button type="submit" class="btn btn-secondary">Run Auto-Send Check</button>
+        </form>
+        <a href="/tc/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">
+    {{ notice }}
+</div>
+{% endif %}
+
+<section class="card">
+    <h3>Checklist Queue</h3>
+    {% if checklists %}
+    <div class="table-wrapper">
+        <table class="checklist-table">
+            <thead>
+                <tr>
+                    <th>Property</th>
+                    <th>Closing Date</th>
+                    <th>Status</th>
+                    <th>Items</th>
+                    <th>Generated</th>
+                    <th>Auto-Send At</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in checklists %}
+                <tr>
+                    <td>
+                        <strong>{{ row.property_address }}</strong><br>
+                        <small>Txn #{{ row.transaction_id }} · {{ row.agent_name or "Agent N/A" }}</small>
+                    </td>
+                    <td>{{ row.closing_date_label }}</td>
+                    <td>
+                        <span class="status-pill status-{{ row.status }}">
+                            {{ row.status_label }}
+                        </span>
+                    </td>
+                    <td>{{ row.item_count }}</td>
+                    <td>{{ row.generated_at_label }}</td>
+                    <td>{{ row.auto_send_after_label }}</td>
+                    <td>
+                        <div class="actions-col">
+                            <a class="btn btn-small btn-secondary" href="{{ url_for('tc_closing_checklist_detail', checklist_id=row.id) }}">
+                                Review
+                            </a>
+                            <a class="btn btn-small btn-secondary" href="{{ url_for('tc_transaction', transaction_id=row.transaction_id) }}">
+                                Transaction
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-box">No closing checklists generated yet.</div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 12px;
+}
+
+.header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.table-wrapper {
+    overflow-x: auto;
+}
+
+.checklist-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.checklist-table th,
+.checklist-table td {
+    border-bottom: 1px solid #e2e8f0;
+    padding: 10px;
+    text-align: left;
+    vertical-align: top;
+}
+
+.checklist-table th {
+    background: #f8fafc;
+    font-size: 13px;
+    color: #334155;
+}
+
+.status-pill {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.status-pending_review {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.status-approved {
+    background: #dbeafe;
+    color: #1e3a8a;
+}
+
+.status-sent {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.status-auto_sent {
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
+.actions-col {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.hint-text {
+    color: #64748b;
+}
+
+@media (max-width: 900px) {
+    .page-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+}
+</style>
+{% endblock %}
+

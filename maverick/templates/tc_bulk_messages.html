@@ -1,0 +1,391 @@
+{% extends "base.html" %}
+
+{% block title %}Bulk SMS Broadcasting - Maverick TC{% endblock %}
+{% block subtitle %}Broadcast Messages With Smart Variables{% endblock %}
+
+{% block content %}
+<section class="card top-row">
+    <div>
+        <a class="text-link" href="{{ url_for('tc_dashboard') }}">&larr; Back to Dashboard</a>
+        <h2>Bulk SMS Broadcasting</h2>
+        <p class="subtle">Queue high-volume broadcasts with preview, pacing, and delivery progress.</p>
+    </div>
+    <div class="top-actions">
+        <a class="btn btn-secondary" href="{{ url_for('tc_tasks') }}">Tasks</a>
+    </div>
+</section>
+
+{% if notice %}
+<section class="card">
+    <div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+</section>
+{% endif %}
+
+<section class="card">
+    <h3>Compose Broadcast</h3>
+    <form method="post" class="stack-form" id="bulkMessageForm">
+        <input type="hidden" name="template_name" id="templateNameField" value="{{ form_state.template_name }}">
+        <div class="grid-2">
+            <div class="form-group">
+                <label for="template_id">Template Library</label>
+                <select name="template_id" id="template_id">
+                    <option value="">Custom message...</option>
+                    {% for item in templates %}
+                    <option value="{{ item.id }}"
+                            data-template-name="{{ item.template_name }}"
+                            data-template-body="{{ item.template_body|e }}"
+                            {% if form_state.template_id == item.id|string %}selected{% endif %}>
+                        {{ item.template_name }}{% if item.is_system %} (built-in){% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="filter_scope">Send To</label>
+                <select name="filter_scope" id="filter_scope">
+                    <option value="all_active" {% if form_state.filter_scope == "all_active" %}selected{% endif %}>All active transactions</option>
+                    <option value="closing_this_week" {% if form_state.filter_scope == "closing_this_week" %}selected{% endif %}>Closing this week</option>
+                    <option value="specific_status" {% if form_state.filter_scope == "specific_status" %}selected{% endif %}>Specific status</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="grid-2">
+            <div class="form-group">
+                <label for="filter_status">Specific Status (when selected)</label>
+                <select name="filter_status" id="filter_status">
+                    {% for status in status_options %}
+                    <option value="{{ status }}" {% if form_state.filter_status == status %}selected{% endif %}>{{ status.replace("_", " ").title() }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="party_type">Party Type</label>
+                <select name="party_type" id="party_type">
+                    <option value="buyers_only" {% if form_state.party_type == "buyers_only" %}selected{% endif %}>Buyers only</option>
+                    <option value="sellers_only" {% if form_state.party_type == "sellers_only" %}selected{% endif %}>Sellers only</option>
+                    <option value="agents_only" {% if form_state.party_type == "agents_only" %}selected{% endif %}>Agents only</option>
+                    <option value="all_parties" {% if form_state.party_type == "all_parties" %}selected{% endif %}>All parties</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label for="template_body">Message Body</label>
+            <textarea id="template_body" name="template_body" rows="6" required>{{ form_state.template_body }}</textarea>
+            <small class="subtle">Use smart variables listed below.</small>
+        </div>
+
+        <div class="variable-list">
+            {% for token in smart_variables %}
+            <span class="badge badge-token">{{ "{{" ~ token ~ "}}" }}</span>
+            {% endfor %}
+        </div>
+
+        <div class="form-actions">
+            <button class="btn btn-secondary" type="submit" name="action" value="preview">Preview Recipients</button>
+            <button class="btn" type="submit" name="action" value="queue_send">Queue Broadcast (1/sec)</button>
+        </div>
+    </form>
+
+    <hr class="divider">
+
+    <form method="post" class="inline-save-form" id="saveTemplateForm">
+        <input type="hidden" name="action" value="save_template">
+        <input type="hidden" name="template_body" id="saveTemplateBody" value="{{ form_state.template_body }}">
+        <input type="text" name="new_template_name" maxlength="120" placeholder="Save current message as template..." required>
+        <button class="btn btn-secondary" type="submit">Save Template</button>
+    </form>
+</section>
+
+{% if preview_data %}
+<section class="card">
+    <h3>Preview</h3>
+    <p class="subtle">
+        Transactions matched: {{ preview_data.transactions_affected }} |
+        Recipients: {{ preview_data.total_recipients }}
+    </p>
+    {% if preview_data.preview_rows %}
+    <div class="table-wrap">
+        <table class="preview-table">
+            <thead>
+                <tr>
+                    <th>Transaction</th>
+                    <th>Party</th>
+                    <th>Phone</th>
+                    <th>Message Preview</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in preview_data.preview_rows %}
+                <tr>
+                    <td>#{{ row.transaction_id }} · {{ row.property_address }}</td>
+                    <td>{{ row.party_type.replace("_", " ").title() }}</td>
+                    <td>{{ row.recipient_phone }}</td>
+                    <td>{{ row.rendered_message }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if preview_data.preview_truncated %}
+    <p class="subtle">Preview truncated. Full recipient set will still be queued.</p>
+    {% endif %}
+    {% else %}
+    <div class="empty-box">No recipients match this filter.</div>
+    {% endif %}
+</section>
+{% endif %}
+
+{% if job_progress %}
+<section class="card" id="jobProgressCard" data-job-id="{{ job_id }}">
+    <h3>Broadcast Progress · Job #{{ job_progress.id }}</h3>
+    <p class="subtle">
+        Template: {{ job_progress.template_used }} |
+        Transactions: {{ job_progress.transactions_affected }} |
+        Recipients: {{ job_progress.total_recipients }}
+    </p>
+
+    <div class="progress-shell">
+        <div class="progress-bar" id="progressBar" style="width: {{ job_progress.progress_pct }}%;"></div>
+    </div>
+    <p id="progressText">
+        {{ job_progress.processed_count }}/{{ job_progress.total_recipients }} processed
+        (sent {{ job_progress.sent_count }}, failed {{ job_progress.failed_count }}) -
+        {{ job_progress.status|upper }}
+    </p>
+    <p class="subtle">Queued broadcasts are paced at 1 SMS per second to reduce carrier blocks.</p>
+</section>
+{% endif %}
+
+<section class="card">
+    <h3>Recent Broadcasts</h3>
+    {% if history_rows %}
+    <div class="table-wrap">
+        <table class="preview-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Template</th>
+                    <th>Recipients</th>
+                    <th>Sent</th>
+                    <th>Failed</th>
+                    <th>Status</th>
+                    <th>Sent At</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in history_rows %}
+                <tr>
+                    <td>#{{ row.id }}</td>
+                    <td>{{ row.template_used }}</td>
+                    <td>{{ row.total_recipients }}</td>
+                    <td>{{ row.sent_count }}</td>
+                    <td>{{ row.failed_count }}</td>
+                    <td>{{ row.status }}</td>
+                    <td>{{ row.sent_at.strftime("%b %d, %Y %I:%M %p") if row.sent_at else "-" }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-box">No bulk broadcasts yet.</div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.top-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.stack-form {
+    display: grid;
+    gap: 10px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+.variable-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.badge-token {
+    background: #e0e7ff;
+    color: #312e81;
+}
+
+.form-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.divider {
+    border: none;
+    border-top: 1px solid #e2e8f0;
+    margin: 14px 0;
+}
+
+.inline-save-form {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+}
+
+.table-wrap {
+    overflow-x: auto;
+}
+
+.preview-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.preview-table th,
+.preview-table td {
+    border: 1px solid #e2e8f0;
+    padding: 8px;
+    text-align: left;
+    vertical-align: top;
+    font-size: 14px;
+}
+
+.preview-table th {
+    background: #f8fafc;
+}
+
+.progress-shell {
+    width: 100%;
+    height: 16px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    overflow: hidden;
+    margin: 8px 0;
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #2563eb, #10b981);
+    transition: width 0.35s ease;
+}
+
+@media (max-width: 1024px) {
+    .grid-2,
+    .inline-save-form {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const templateSelect = document.getElementById("template_id");
+const templateBody = document.getElementById("template_body");
+const templateNameField = document.getElementById("templateNameField");
+const filterScope = document.getElementById("filter_scope");
+const filterStatus = document.getElementById("filter_status");
+const saveTemplateForm = document.getElementById("saveTemplateForm");
+const saveTemplateBody = document.getElementById("saveTemplateBody");
+
+function syncTemplateSelection() {
+    if (!templateSelect || !templateBody || !templateNameField) {
+        return;
+    }
+    const option = templateSelect.options[templateSelect.selectedIndex];
+    if (!option) {
+        return;
+    }
+    const selectedName = option.dataset.templateName || "";
+    const selectedBody = option.dataset.templateBody || "";
+    if (selectedName) {
+        templateNameField.value = selectedName;
+    }
+    if (selectedBody && (!templateBody.value || templateBody.dataset.autofill !== "off")) {
+        templateBody.value = selectedBody;
+    }
+}
+
+if (templateBody) {
+    templateBody.addEventListener("input", () => {
+        templateBody.dataset.autofill = "off";
+    });
+}
+if (templateSelect) {
+    templateSelect.addEventListener("change", syncTemplateSelection);
+}
+syncTemplateSelection();
+
+function toggleStatusFilter() {
+    if (!filterScope || !filterStatus) {
+        return;
+    }
+    filterStatus.disabled = filterScope.value !== "specific_status";
+}
+if (filterScope) {
+    filterScope.addEventListener("change", toggleStatusFilter);
+    toggleStatusFilter();
+}
+
+if (saveTemplateForm && saveTemplateBody && templateBody) {
+    saveTemplateForm.addEventListener("submit", () => {
+        saveTemplateBody.value = templateBody.value || "";
+    });
+}
+
+const progressCard = document.getElementById("jobProgressCard");
+if (progressCard) {
+    const jobId = progressCard.dataset.jobId;
+    const progressBar = document.getElementById("progressBar");
+    const progressText = document.getElementById("progressText");
+
+    async function pollProgress() {
+        if (!jobId) return;
+        try {
+            const response = await fetch(`/tc/bulk-messages/${jobId}/progress`);
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                return;
+            }
+            const job = data.job || {};
+            if (progressBar) {
+                progressBar.style.width = `${job.progress_pct || 0}%`;
+            }
+            if (progressText) {
+                progressText.textContent = `${job.processed_count || 0}/${job.total_recipients || 0} processed (sent ${job.sent_count || 0}, failed ${job.failed_count || 0}) - ${(job.status || "queued").toUpperCase()}`;
+            }
+            if (!["completed", "failed"].includes((job.status || "").toLowerCase())) {
+                window.setTimeout(pollProgress, 1200);
+            }
+        } catch (_err) {
+            window.setTimeout(pollProgress, 1800);
+        }
+    }
+    window.setTimeout(pollProgress, 1000);
+}
+</script>
+{% endblock %}

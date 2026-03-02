@@ -1,0 +1,415 @@
+{% extends "base.html" %}
+
+{% block title %}Email Drafts - Maverick TC{% endblock %}
+{% block subtitle %}AI Email Draft Assistant{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="header-row">
+        <div>
+            <h2>Email Drafts for Review</h2>
+            <p class="subtle">AI-generated responses ready for Margaret approval.</p>
+        </div>
+        <div class="header-actions">
+            <span class="badge badge-yellow">Pending: {{ pending_count }}</span>
+            <a class="btn btn-secondary" href="/tc/dashboard">Back to Dashboard</a>
+        </div>
+    </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+    <h3>Email Draft Performance</h3>
+    <ul class="performance-list">
+        <li>Drafts generated: <strong>{{ performance.drafts_generated_week }}/week</strong></li>
+        <li>Sent as-is: <strong>{{ performance.sent_as_is }}</strong> ({{ performance.sent_as_is_pct }}%)</li>
+        <li>Edited before send: <strong>{{ performance.edited_before_send }}</strong> ({{ performance.edited_before_send_pct }}%)</li>
+        <li>Rejected (manual response): <strong>{{ performance.rejected }}</strong> ({{ performance.rejected_pct }}%)</li>
+        <li>Average review time: <strong>{{ performance.avg_review_time_label }}</strong></li>
+        <li>Time saved: <strong>{{ performance.time_saved_label }}</strong></li>
+        <li>Accuracy rate: <strong>{{ performance.accuracy_rate }}%</strong></li>
+    </ul>
+</section>
+
+{% if drafts %}
+    {% for draft in drafts %}
+    <section class="card email-draft-card" id="draft-card-{{ draft.id }}">
+        <div class="draft-header">
+            <div>
+                <p><strong>From:</strong> {{ draft.from_name }} ({{ draft.from_email }})</p>
+                <p>
+                    <strong>Transaction:</strong>
+                    {% if draft.transaction_id %}
+                    <a href="/tc/transaction/{{ draft.transaction_id }}">#{{ draft.transaction_id }} - {{ draft.property_address }}</a>
+                    {% else %}
+                    <span>Not identified yet</span>
+                    {% endif %}
+                </p>
+                <p><strong>Question:</strong> {{ draft.question_detected or "General inquiry" }}</p>
+                <p class="meta">{{ draft.created_at_ago }} · {{ draft.created_at_label }}</p>
+            </div>
+            <div class="draft-badges">
+                <span class="confidence-badge confidence-{{ 'high' if draft.confidence >= 0.85 else ('medium' if draft.confidence >= 0.60 else 'low') }}">
+                    {{ draft.confidence_pct }}% confidence
+                </span>
+                <span class="urgency-badge urgency-{{ draft.urgency }}">{{ draft.urgency|upper }}</span>
+            </div>
+        </div>
+
+        <div class="thread-tools">
+            <button class="btn btn-secondary" type="button" id="summarize-btn-{{ draft.id }}" onclick="summarizeThread({{ draft.id }})">
+                Summarize Thread
+            </button>
+            <span class="cost-note">$0.02 per summary (~$1/month @ 50 emails)</span>
+        </div>
+
+        <div class="thread-summary-box" id="thread-summary-box-{{ draft.id }}" style="display:none;">
+            <h4>Thread Summary</h4>
+            <ul class="summary-list" id="thread-summary-list-{{ draft.id }}"></ul>
+            <div class="summary-actions">
+                <button class="btn btn-secondary" type="button" onclick="expandFullThread({{ draft.id }})">
+                    Expand Full Thread
+                </button>
+            </div>
+        </div>
+
+        <details id="thread-details-{{ draft.id }}">
+            <summary class="summary-btn">View Full Thread ({{ draft.thread_count }} messages)</summary>
+            <div class="email-content thread-content">
+                {% for message in draft.thread_messages %}
+                <article class="thread-item">
+                    <p class="thread-meta">
+                        <strong>{{ message.direction_label }}</strong>
+                        {% if message.at_label %}
+                        <span>· {{ message.at_label }}</span>
+                        {% endif %}
+                    </p>
+                    {% if message.subject %}
+                    <p><strong>Subject:</strong> {{ message.subject }}</p>
+                    {% endif %}
+                    <pre>{{ message.body }}</pre>
+                </article>
+                {% endfor %}
+            </div>
+        </details>
+
+        <details>
+            <summary class="summary-btn">View Original Email</summary>
+            <div class="email-content">
+                <p><strong>Subject:</strong> {{ draft.subject }}</p>
+                <pre>{{ draft.original_message }}</pre>
+            </div>
+        </details>
+
+        <div class="draft-editor">
+            <label for="subject-{{ draft.id }}"><strong>Suggested Subject</strong></label>
+            <input type="text" id="subject-{{ draft.id }}" value="{{ draft.draft_subject }}">
+
+            <label for="body-{{ draft.id }}"><strong>Suggested Response</strong></label>
+            <textarea id="body-{{ draft.id }}" rows="8">{{ draft.draft_body }}</textarea>
+
+            <details>
+                <summary class="summary-btn">Data Sources Used</summary>
+                <pre>{{ draft.draft_data_sources | tojson(indent=2) }}</pre>
+            </details>
+        </div>
+
+        <div class="draft-actions">
+            <button class="btn" onclick="sendDraft({{ draft.id }})">Send As-Is</button>
+            <button class="btn btn-secondary" onclick="sendEditedDraft({{ draft.id }})">Send with My Edits</button>
+            <button class="btn btn-secondary" onclick="rejectDraft({{ draft.id }})">Reject</button>
+            <button class="btn btn-secondary" onclick="regenerateDraft({{ draft.id }})">Regenerate</button>
+        </div>
+    </section>
+    {% endfor %}
+{% else %}
+<section class="card">
+    <div class="empty-box">No pending email drafts right now.</div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.header-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.thread-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.cost-note {
+    color: #64748b;
+    font-size: 12px;
+}
+
+.thread-summary-box {
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    background: #f8fbff;
+    padding: 10px;
+}
+
+.summary-list {
+    margin: 0;
+    padding-left: 18px;
+}
+
+.summary-list li {
+    margin: 6px 0;
+}
+
+.summary-actions {
+    margin-top: 8px;
+}
+
+.thread-content {
+    display: grid;
+    gap: 8px;
+}
+
+.thread-item {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 8px;
+    background: #ffffff;
+}
+
+.thread-meta {
+    color: #475569;
+    font-size: 12px;
+    margin: 0 0 4px;
+}
+
+.performance-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 6px;
+}
+
+.email-draft-card {
+    display: grid;
+    gap: 10px;
+}
+
+.draft-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.draft-badges {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
+.confidence-badge,
+.urgency-badge {
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.confidence-high {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.confidence-medium {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.confidence-low {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.urgency-low {
+    background: #e2e8f0;
+    color: #334155;
+}
+
+.urgency-medium {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.urgency-high {
+    background: #fed7aa;
+    color: #9a3412;
+}
+
+.urgency-critical {
+    background: #fecaca;
+    color: #991b1b;
+}
+
+.meta {
+    color: #64748b;
+    font-size: 12px;
+}
+
+.email-content pre,
+.draft-editor pre {
+    white-space: pre-wrap;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.draft-editor {
+    display: grid;
+    gap: 8px;
+}
+
+.draft-editor input,
+.draft-editor textarea {
+    width: 100%;
+}
+
+.draft-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function sendDraft(draftId) {
+    if (!window.confirm("Send this email as written?")) return;
+    const response = await fetch(`/tc/email-draft/${draftId}/send`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({action: "send_as_is"}),
+    });
+    const result = await response.json();
+    if (!response.ok || result.success === false) {
+        alert(`Error: ${result.error || "Unable to send draft"}`);
+        return;
+    }
+    alert("Email sent.");
+    window.location.reload();
+}
+
+async function sendEditedDraft(draftId) {
+    const subject = document.getElementById(`subject-${draftId}`)?.value || "";
+    const body = document.getElementById(`body-${draftId}`)?.value || "";
+    if (!subject.trim() || !body.trim()) {
+        alert("Subject and body are required.");
+        return;
+    }
+    if (!window.confirm("Send this edited email?")) return;
+    const response = await fetch(`/tc/email-draft/${draftId}/send`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({action: "send_edited", subject, body}),
+    });
+    const result = await response.json();
+    if (!response.ok || result.success === false) {
+        alert(`Error: ${result.error || "Unable to send edited draft"}`);
+        return;
+    }
+    alert("Edited email sent.");
+    window.location.reload();
+}
+
+async function rejectDraft(draftId) {
+    if (!window.confirm("Reject this draft and handle manually?")) return;
+    const response = await fetch(`/tc/email-draft/${draftId}/reject`, {method: "POST"});
+    const result = await response.json();
+    if (!response.ok || result.success === false) {
+        alert(`Error: ${result.error || "Unable to reject draft"}`);
+        return;
+    }
+    alert("Draft rejected.");
+    window.location.reload();
+}
+
+async function regenerateDraft(draftId) {
+    const response = await fetch(`/tc/email-draft/${draftId}/regenerate`, {method: "POST"});
+    const result = await response.json();
+    if (!response.ok || result.success === false) {
+        alert(`Error: ${result.error || "Unable to regenerate draft"}`);
+        return;
+    }
+    alert("Draft regenerated.");
+    window.location.reload();
+}
+
+function expandFullThread(draftId) {
+    const details = document.getElementById(`thread-details-${draftId}`);
+    if (!details) return;
+    details.open = true;
+    details.scrollIntoView({behavior: "smooth", block: "center"});
+}
+
+async function summarizeThread(draftId) {
+    const button = document.getElementById(`summarize-btn-${draftId}`);
+    const list = document.getElementById(`thread-summary-list-${draftId}`);
+    const box = document.getElementById(`thread-summary-box-${draftId}`);
+    if (!list || !box) return;
+    try {
+        if (button) button.disabled = true;
+        const response = await fetch("/tc/email/summarize", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({draft_id: draftId}),
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.success === false) {
+            throw new Error(payload.error || "Unable to summarize thread");
+        }
+        const summary = payload.summary || {};
+        const rows = [
+            ["What they want", summary.what_they_want],
+            ["Current status", summary.current_status],
+            ["Next action needed", summary.next_action_needed],
+        ];
+        list.innerHTML = "";
+        rows.forEach(([label, value]) => {
+            const li = document.createElement("li");
+            const strong = document.createElement("strong");
+            strong.textContent = `${label}:`;
+            li.appendChild(strong);
+            li.appendChild(document.createTextNode(` ${value || "—"}`));
+            list.appendChild(li);
+        });
+        box.style.display = "block";
+    } catch (error) {
+        alert(`Could not summarize thread: ${error.message}`);
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+</script>
+{% endblock %}

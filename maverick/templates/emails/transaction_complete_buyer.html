@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Congratulations on Closing</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Congratulations on Closing!</h2>
+                <p style="margin:8px 0 0;">{{ property_address }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 24px;">
+                <p style="margin:0 0 12px;">Hi {{ buyer_name }},</p>
+                <p style="margin:0 0 12px;">Congratulations on your new home! Thank you for trusting Maverick TC.</p>
+                <h3 style="margin:18px 0 8px; font-size:16px;">Move-in tips</h3>
+                <ul style="margin:0 0 12px; padding-left:18px;">
+                    <li>{{ move_in_tip_1 }}</li>
+                    <li>{{ move_in_tip_2 }}</li>
+                    <li>{{ utility_reminder }}</li>
+                </ul>
+                {% if final_docs_link %}
+                <p style="margin:0 0 12px;">
+                    Upload any final documents here:
+                    <a href="{{ final_docs_link }}" target="_blank" rel="noopener">{{ final_docs_link }}</a>
+                </p>
+                {% endif %}
+                <p style="margin:0 0 12px;">
+                    How was your experience?
+                    <a href="{{ survey_link }}" target="_blank" rel="noopener">Take our short survey</a>.
+                </p>
+                <p style="margin:0;">Warmly,<br>Maverick Transaction Coordination</p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

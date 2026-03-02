@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Document Request</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:20px 22px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">Maverick TC - Document Request</h2>
+                <p style="margin:8px 0 0; color:#334155;">Property: {{ property_address }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px 22px;">
+                <p style="margin:0 0 14px;">
+                    Hello,
+                </p>
+                <p style="margin:0 0 14px;">
+                    To keep this transaction on schedule, we need the following document from {{ requested_from }}:
+                </p>
+                <p style="margin:0 0 14px; font-size:18px; font-weight:700; color:#0f172a;">
+                    {{ document_label }}
+                </p>
+                <p style="margin:0 0 14px;">
+                    Current closing date: <strong>{{ closing_date_label }}</strong>
+                    {% if days_to_close >= 0 %}
+                    ({{ days_to_close }} day{{ "" if days_to_close == 1 else "s" }} remaining)
+                    {% endif %}
+                </p>
+                <p style="margin:0 0 14px;">
+                    Please send this as soon as possible so Margaret can finalize compliance and prevent delays.
+                </p>
+                <p style="margin:0;">
+                    Thank you,<br>
+                    Maverick TC on behalf of {{ agent_name }}
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:14px 22px; border-top:1px solid #e2e8f0; color:#64748b; font-size:13px;">
+                This is an automated request from Maverick TC.
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

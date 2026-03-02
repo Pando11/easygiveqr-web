@@ -1,0 +1,298 @@
+{% extends "base.html" %}
+
+{% block title %}Vendor Management - Maverick TC{% endblock %}
+{% block subtitle %}Preferred Vendor Directory{% endblock %}
+
+{% block content %}
+<section class="card page-header">
+    <div>
+        <h2>🤝 Vendor Management</h2>
+        <p class="subtle">Manage preferred vendors, service areas, and outreach performance.</p>
+    </div>
+    <div class="header-actions">
+        <a href="/tc/daily-checklist" class="btn btn-secondary">Daily Checklist</a>
+        <a href="/tc/dashboard" class="btn btn-secondary">Back to Dashboard</a>
+    </div>
+</section>
+
+{% if notice %}
+<div class="alert alert-{{ notice_type }}">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+    <h3>Add Vendor Contact</h3>
+    <form method="POST" class="vendor-form-grid">
+        <input type="hidden" name="action" value="add">
+        <label>
+            Vendor Type
+            <select name="vendor_type" required>
+                <option value="">Select type</option>
+                {% for vendor_type in vendor_types %}
+                <option value="{{ vendor_type }}">{{ vendor_type|replace("_", " ")|title }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Company Name
+            <input type="text" name="company_name" maxlength="200" required>
+        </label>
+        <label>
+            Contact Name
+            <input type="text" name="contact_name" maxlength="200">
+        </label>
+        <label>
+            Email
+            <input type="email" name="email" maxlength="200">
+        </label>
+        <label>
+            Phone
+            <input type="text" name="phone" maxlength="20">
+        </label>
+        <label>
+            Scheduling URL
+            <input type="url" name="scheduling_url">
+        </label>
+        <label>
+            Service Area (optional keyword)
+            <input type="text" name="service_area" maxlength="150" placeholder="Dallas, Fort Worth, etc.">
+        </label>
+        <label class="checkbox">
+            <input type="checkbox" name="preferred" value="true">
+            Preferred Vendor
+        </label>
+        <label class="checkbox">
+            <input type="checkbox" name="active" value="true" checked>
+            Active
+        </label>
+        <label class="full-width">
+            Notes
+            <textarea name="notes" rows="2" maxlength="1200"></textarea>
+        </label>
+        <div class="full-width">
+            <button type="submit" class="btn">Add Vendor</button>
+        </div>
+    </form>
+</section>
+
+{% for vendor_type in vendor_types %}
+<section class="card">
+    <div class="section-title-row">
+        <h3>{{ vendor_type|replace("_", " ")|title }} Vendors</h3>
+        <span class="count-pill">{{ grouped_vendors.get(vendor_type, [])|length }}</span>
+    </div>
+
+    {% if grouped_vendors.get(vendor_type) %}
+    <div class="vendor-list">
+        {% for vendor in grouped_vendors.get(vendor_type, []) %}
+        <article class="vendor-card {% if not vendor.active %}vendor-inactive{% endif %}">
+            <form method="POST" class="vendor-form-grid">
+                <input type="hidden" name="action" value="update">
+                <input type="hidden" name="vendor_id" value="{{ vendor.id }}">
+
+                <label>
+                    Type
+                    <select name="vendor_type" required>
+                        {% for type_option in vendor_types %}
+                        <option value="{{ type_option }}" {% if type_option == vendor.vendor_type %}selected{% endif %}>
+                            {{ type_option|replace("_", " ")|title }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label>
+                    Company
+                    <input type="text" name="company_name" value="{{ vendor.company_name or '' }}" maxlength="200">
+                </label>
+                <label>
+                    Contact
+                    <input type="text" name="contact_name" value="{{ vendor.contact_name or '' }}" maxlength="200">
+                </label>
+                <label>
+                    Email
+                    <input type="email" name="email" value="{{ vendor.email or '' }}" maxlength="200">
+                </label>
+                <label>
+                    Phone
+                    <input type="text" name="phone" value="{{ vendor.phone or '' }}" maxlength="20">
+                </label>
+                <label>
+                    Scheduling URL
+                    <input type="url" name="scheduling_url" value="{{ vendor.scheduling_url or '' }}">
+                </label>
+                <label>
+                    Service Area
+                    <input type="text" name="service_area" value="{{ vendor.service_area or '' }}" maxlength="150">
+                </label>
+                <label class="checkbox">
+                    <input type="checkbox" name="preferred" value="true" {% if vendor.preferred %}checked{% endif %}>
+                    Preferred
+                </label>
+                <label class="checkbox">
+                    <input type="checkbox" name="active" value="true" {% if vendor.active %}checked{% endif %}>
+                    Active
+                </label>
+                <label class="full-width">
+                    Notes
+                    <textarea name="notes" rows="2" maxlength="1200">{{ vendor.notes or '' }}</textarea>
+                </label>
+                <div class="performance-row full-width">
+                    <span><strong>Requests:</strong> {{ vendor.sent_count }}</span>
+                    <span><strong>Responded:</strong> {{ vendor.responded_count }}</span>
+                    <span><strong>Scheduled:</strong> {{ vendor.scheduled_count }}</span>
+                    <span><strong>Response Rate:</strong> {{ vendor.response_rate }}%</span>
+                    <span><strong>Avg Response:</strong> {{ vendor.avg_response_hours }}h</span>
+                </div>
+                <div class="action-row full-width">
+                    <button type="submit" class="btn">Save Changes</button>
+                </div>
+            </form>
+
+            <form method="POST" class="inline-form">
+                <input type="hidden" name="action" value="toggle_active">
+                <input type="hidden" name="vendor_id" value="{{ vendor.id }}">
+                <input type="hidden" name="active" value="{{ 'false' if vendor.active else 'true' }}">
+                <button type="submit" class="btn btn-secondary">
+                    {{ "Mark Inactive" if vendor.active else "Mark Active" }}
+                </button>
+            </form>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">No {{ vendor_type|replace("_", " ")|title|lower }} vendors added yet.</div>
+    {% endif %}
+</section>
+{% endfor %}
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+}
+
+.subtle {
+    color: #64748b;
+}
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.section-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.count-pill {
+    background: #e2e8f0;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+.vendor-form-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.vendor-form-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 14px;
+    color: #334155;
+}
+
+.vendor-form-grid .checkbox {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    margin-top: 26px;
+}
+
+.vendor-form-grid .checkbox input {
+    width: auto;
+}
+
+.full-width {
+    grid-column: 1 / -1;
+}
+
+.vendor-list {
+    display: grid;
+    gap: 12px;
+}
+
+.vendor-card {
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    padding: 12px;
+    background: #f8fafc;
+}
+
+.vendor-inactive {
+    opacity: 0.7;
+    border-color: #cbd5e1;
+    background: #f1f5f9;
+}
+
+.performance-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    font-size: 13px;
+    color: #334155;
+}
+
+.action-row {
+    margin-top: 4px;
+}
+
+.inline-form {
+    margin-top: 10px;
+}
+
+.empty-state {
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    padding: 12px;
+    color: #64748b;
+    background: #f8fafc;
+}
+
+@media (max-width: 1024px) {
+    .vendor-form-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 768px) {
+    .page-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .vendor-form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .header-actions {
+        width: 100%;
+    }
+
+    .header-actions .btn {
+        width: 100%;
+    }
+}
+</style>
+{% endblock %}

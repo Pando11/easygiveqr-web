@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maverick Payment</title>
+    <script src="https://js.stripe.com/v3/"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            background: radial-gradient(circle at top, #dbeafe 0%, #eff6ff 35%, #f8fafc 100%);
+            color: #0f172a;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 24px;
+        }
+
+        .shell {
+            width: 100%;
+            max-width: 620px;
+            background: #ffffff;
+            border: 1px solid #dbeafe;
+            border-radius: 16px;
+            box-shadow: 0 16px 34px rgba(15, 23, 42, 0.12);
+            overflow: hidden;
+        }
+
+        .brand {
+            padding: 24px;
+            background: linear-gradient(135deg, #1e3a8a, #0ea5e9);
+            color: #ffffff;
+        }
+
+        .brand h1 {
+            font-size: 24px;
+            margin-bottom: 6px;
+        }
+
+        .brand p {
+            opacity: 0.92;
+        }
+
+        .content {
+            padding: 24px;
+        }
+
+        .details-card {
+            border: 1px solid #dbeafe;
+            border-radius: 12px;
+            background: #f8fbff;
+            padding: 16px;
+            margin-bottom: 18px;
+        }
+
+        .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid #e2e8f0;
+            align-items: center;
+        }
+
+        .row:last-child {
+            border-bottom: 0;
+            margin-top: 6px;
+            padding-top: 12px;
+            border-top: 2px solid #bfdbfe;
+            font-weight: 700;
+            font-size: 19px;
+        }
+
+        .label-muted {
+            color: #475569;
+            font-size: 14px;
+        }
+
+        .credit {
+            color: #15803d;
+            font-weight: 700;
+        }
+
+        .section-title {
+            font-size: 18px;
+            margin-bottom: 10px;
+            color: #1e293b;
+        }
+
+        .form-group {
+            margin-bottom: 14px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 600;
+            color: #334155;
+        }
+
+        .text-input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+
+        #card-element {
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            padding: 12px;
+            background: #ffffff;
+        }
+
+        .error {
+            color: #b91c1c;
+            font-size: 14px;
+            min-height: 22px;
+            margin-top: 8px;
+        }
+
+        .pay-button {
+            width: 100%;
+            border: 0;
+            border-radius: 10px;
+            padding: 14px 16px;
+            background: linear-gradient(135deg, #16a34a, #10b981);
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 700;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .pay-button:disabled {
+            background: #94a3b8;
+            cursor: not-allowed;
+        }
+
+        .spinner {
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(255, 255, 255, 0.45);
+            border-top-color: #ffffff;
+            border-radius: 999px;
+            animation: spin 1s linear infinite;
+            display: none;
+        }
+
+        .pay-button.loading .spinner {
+            display: inline-block;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .alt-payments {
+            margin-top: 22px;
+            padding-top: 18px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .alt-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .alt-link {
+            text-decoration: none;
+            padding: 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: 700;
+            color: #1e3a8a;
+            background: #f8fafc;
+        }
+
+        .note {
+            color: #64748b;
+            font-size: 13px;
+            margin-top: 10px;
+        }
+
+        .success {
+            display: none;
+            text-align: center;
+            padding: 28px 24px;
+        }
+
+        .success h2 {
+            color: #15803d;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .success p {
+            color: #475569;
+            margin-bottom: 8px;
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: 12px;
+            }
+
+            .content {
+                padding: 18px;
+            }
+
+            .row {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .alt-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main class="shell">
+        <section class="brand">
+            <h1>Maverick Payment</h1>
+            <p>Secure payment portal for your transaction coordination service.</p>
+        </section>
+
+        <section class="content" id="payment-content">
+            <article class="details-card">
+                <div class="row">
+                    <span class="label-muted">Property</span>
+                    <strong>{{ payment.property_address }}</strong>
+                </div>
+                <div class="row">
+                    <span class="label-muted">Payment Type</span>
+                    <strong>{{ payment.payment_type_label }} (${{ payment.original_amount }})</strong>
+                </div>
+                {% if payment.has_referral_credit %}
+                <div class="row">
+                    <span class="label-muted">Referral Credit Applied</span>
+                    <span class="credit">-${{ payment.referral_credit }}</span>
+                </div>
+                {% endif %}
+                <div class="row">
+                    <span>Total Due</span>
+                    <strong>${{ payment.amount }}</strong>
+                </div>
+            </article>
+
+            <h2 class="section-title">Pay by Card</h2>
+            <form id="payment-form" novalidate>
+                <div class="form-group">
+                    <label for="cardholder-name">Cardholder Name</label>
+                    <input id="cardholder-name" class="text-input" type="text" required autocomplete="cc-name">
+                </div>
+
+                <div class="form-group">
+                    <label for="card-element">Card Information</label>
+                    <div id="card-element"></div>
+                    <div id="card-errors" class="error" role="alert"></div>
+                </div>
+
+                <button id="submit-button" type="submit" class="pay-button">
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span id="button-text">Pay ${{ payment.amount }}</span>
+                </button>
+            </form>
+
+            <section class="alt-payments">
+                <h2 class="section-title">Alternative Payment</h2>
+                <div class="alt-grid">
+                    <a class="alt-link" href="https://venmo.com/{{ venmo_handle }}" target="_blank" rel="noopener noreferrer">
+                        Pay with Venmo
+                    </a>
+                    <a class="alt-link" href="https://paypal.me/{{ paypal_handle }}" target="_blank" rel="noopener noreferrer">
+                        Pay with PayPal
+                    </a>
+                </div>
+                <p class="note">If paying via Venmo/PayPal, text Margaret to confirm payment.</p>
+            </section>
+        </section>
+
+        <section class="success" id="success-state">
+            <h2>&#9989; Payment Successful!</h2>
+            <p>Thank you for your payment of ${{ payment.amount }}.</p>
+            <p>Margaret has been notified and will continue coordinating your file.</p>
+            <p>You can close this page.</p>
+        </section>
+    </main>
+
+    <script>
+        const publishableKey = {{ stripe_publishable_key|tojson }};
+        const paymentAmount = {{ payment.amount_number }};
+        const form = document.getElementById("payment-form");
+        const submitButton = document.getElementById("submit-button");
+        const buttonText = document.getElementById("button-text");
+        const errorBox = document.getElementById("card-errors");
+
+        function setLoading(loading) {
+            submitButton.disabled = loading;
+            submitButton.classList.toggle("loading", loading);
+            buttonText.textContent = loading ? "Processing..." : `Pay ${{ payment.amount }}`;
+        }
+
+        if (!publishableKey) {
+            errorBox.textContent = "Payment service is temporarily unavailable. Please contact Margaret.";
+            submitButton.disabled = true;
+        }
+
+        const stripe = publishableKey ? Stripe(publishableKey) : null;
+        const elements = stripe ? stripe.elements() : null;
+        const cardElement = elements ? elements.create("card", {
+            style: {
+                base: {
+                    fontSize: "16px",
+                    color: "#0f172a",
+                    "::placeholder": { color: "#94a3b8" }
+                }
+            }
+        }) : null;
+
+        if (cardElement) {
+            cardElement.mount("#card-element");
+            cardElement.on("change", (event) => {
+                errorBox.textContent = event.error ? event.error.message : "";
+            });
+        }
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            errorBox.textContent = "";
+
+            if (!stripe || !cardElement) {
+                errorBox.textContent = "Payment service is unavailable.";
+                return;
+            }
+
+            const cardholderName = document.getElementById("cardholder-name").value.trim();
+            if (!cardholderName) {
+                errorBox.textContent = "Please enter the cardholder name.";
+                return;
+            }
+
+            setLoading(true);
+            try {
+                const createResult = await stripe.createPaymentMethod({
+                    type: "card",
+                    card: cardElement,
+                    billing_details: { name: cardholderName }
+                });
+
+                if (createResult.error) {
+                    throw new Error(createResult.error.message || "Unable to validate card details.");
+                }
+
+                const response = await fetch("/pay/{{ payment.transaction_id }}/{{ payment.payment_type }}/process", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        payment_method_id: createResult.paymentMethod.id,
+                        amount: paymentAmount
+                    })
+                });
+
+                const payload = await response.json();
+                if (!response.ok || !payload.success) {
+                    throw new Error(payload.error || "Payment failed. Please try again.");
+                }
+
+                document.getElementById("payment-content").style.display = "none";
+                document.getElementById("success-state").style.display = "block";
+            } catch (error) {
+                errorBox.textContent = error.message || "Unable to process payment.";
+                setLoading(false);
+                return;
+            }
+            setLoading(false);
+        });
+    </script>
+</body>
+</html>
