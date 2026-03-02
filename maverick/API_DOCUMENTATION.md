@@ -658,29 +658,45 @@ Form `action` options:
   - max 20 files per batch
   - allowed: `pdf`, `jpg`, `jpeg`, `png`
 - Output JSON:
-  - `results[]` with `stage_id`, `filename`, inferred `document_type`, optional `transaction_id`, confidence (`high|low`), and review hints
+  - `batch_id`
+  - `items[]` with `batch_item_id`, `filename`, inferred `document_type`, optional `transaction_id`,
+    confidence (`high|medium|low`), `confidence_score`, extracted data, and review hints
+  - backward-compatible alias: `results[]`
   - `pending_count`
 - Notes:
-  - stages temp files in `batch_upload_staging`
+  - creates a `batch_uploads` header row (`analyzing` → `ready_for_review`)
+  - stages each file in `batch_upload_items` with temp-path + inferred assignment
   - uses Claude (when configured) + heuristics for doc typing and transaction identifiers
 
 ### Commit route (TC)
 - `POST /tc/batch-upload/commit`
 - JSON body:
-  - `uploads`: array of `{stage_id, transaction_id, document_type}`
+  - preferred: `{batch_id, items: [{batch_item_id, transaction_id, document_type}]}`
+  - backward-compatible: `{uploads: [{stage_id, transaction_id, document_type}]}`
 - Output JSON:
-  - `successful`, `failed`, `tasks_completed`, `pending_count`
+  - `batch_id`, `successful`, `failed`, `tasks_completed`, `pending_count`
 - Behavior:
-  - uploads each staged file to S3
+  - marks batch `processing` then `completed`
+  - uploads each approved staged file to S3
   - inserts `documents` records
   - runs `apply_document_post_upload_actions` and transaction field updates from extracted values
   - updates matching `document_requests` as received
   - starts async deep document analysis
 
+### Cancel route (TC)
+- `POST /tc/batch-upload/cancel`
+- JSON body:
+  - optional `batch_id` (if omitted, clears all open pending batches for current user)
+- Behavior:
+  - removes staged temp files for open batch rows
+  - deletes open batch header/items
+  - returns updated `pending_count`
+
 ### Data model
-- Table: `batch_upload_staging`
-  - staged temp-path records and AI analysis payload before commit
-  - cleaned automatically for stale records
+- `batch_uploads`
+  - batch header (`uploaded_by`, `upload_count`, `successful_count`, `failed_count`, `status`)
+- `batch_upload_items`
+  - per-file staging row (`temp_path`, assignment, confidence, extracted data, item status)
 
 ## Automatic Cascade Date Updates
 

@@ -495,9 +495,17 @@ Margaret can now upload many docs in one pass for AI-assisted assignment:
 Behavior:
 - drag/drop up to 20 files (`pdf`, `jpg`, `jpeg`, `png`)
 - each file is analyzed for likely document type + transaction match
-- high-confidence matches are prefilled, low-confidence rows require manual review
-- one-click commit uploads all approved docs, runs post-upload task automation, and launches async document analysis
-- dashboard shows pending staged count and supports shortcut `Ctrl+U`
+- confidence tiers: `high`, `medium`, `low` with manual override controls
+- one-click commit uploads all approved docs, runs post-upload task automation, updates extracted transaction values, and launches async document analysis
+- review cancel action calls `POST /tc/batch-upload/cancel` to clear open staged rows + temp files
+- temp files are staged under `/tmp/batch_uploads` and cleaned on stale/cancel/commit flows
+- dashboard shows pending review count and supports shortcut `Ctrl+U`
+
+Data model:
+- `batch_uploads`
+  - one row per uploaded batch (`status`: `analyzing|ready_for_review|processing|completed`)
+- `batch_upload_items`
+  - one row per file with inferred assignment, confidence score, extracted data, and upload outcome
 
 ## Automatic Cascade Date Updates + Undo
 

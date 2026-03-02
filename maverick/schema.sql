@@ -1052,21 +1052,28 @@ CREATE TABLE message_templates (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE batch_upload_staging (
+CREATE TABLE batch_uploads (
     id SERIAL PRIMARY KEY,
-    batch_token VARCHAR(64) NOT NULL,
-    uploaded_by VARCHAR(100) NOT NULL,
-    original_filename VARCHAR(255) NOT NULL,
-    temp_path TEXT NOT NULL,
-    extension VARCHAR(10),
-    file_size INT DEFAULT 0,
-    suggested_transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
-    suggested_document_type VARCHAR(100),
-    confidence_score DECIMAL(5,2) DEFAULT 0,
-    analysis_payload JSONB DEFAULT '{}'::jsonb,
-    status VARCHAR(20) DEFAULT 'pending',
-    error_text TEXT,
-    committed_document_id INT REFERENCES documents(id) ON DELETE SET NULL,
+    uploaded_by VARCHAR(50),
+    upload_count INT,
+    successful_count INT DEFAULT 0,
+    failed_count INT DEFAULT 0,
+    status VARCHAR(20),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE batch_upload_items (
+    id SERIAL PRIMARY KEY,
+    batch_id INT REFERENCES batch_uploads(id) ON DELETE CASCADE,
+    filename VARCHAR(500),
+    temp_path TEXT,
+    transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+    document_type VARCHAR(100),
+    confidence VARCHAR(20),
+    confidence_score FLOAT,
+    extracted_data JSONB DEFAULT '{}'::jsonb,
+    status VARCHAR(20),
+    error_message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1358,8 +1365,9 @@ CREATE INDEX idx_bulk_messages_log_sent_at ON bulk_messages_log(sent_at DESC);
 CREATE INDEX idx_bulk_message_recipients_bulk ON bulk_message_recipients(bulk_message_id, status, id);
 CREATE INDEX idx_message_templates_category ON message_templates(category);
 CREATE INDEX idx_message_templates_usage ON message_templates(usage_count DESC, shortcode);
-CREATE INDEX idx_batch_upload_staging_user_status ON batch_upload_staging(uploaded_by, status, created_at DESC);
-CREATE INDEX idx_batch_upload_staging_batch ON batch_upload_staging(batch_token, status, created_at DESC);
+CREATE INDEX idx_batch_uploads_uploaded_by_status ON batch_uploads(uploaded_by, status, created_at DESC);
+CREATE INDEX idx_batch_upload_items_batch_status ON batch_upload_items(batch_id, status, id);
+CREATE INDEX idx_batch_upload_items_transaction ON batch_upload_items(transaction_id, created_at DESC);
 CREATE INDEX idx_transaction_date_cascade_txn ON transaction_date_cascade_log(transaction_id, created_at DESC);
 CREATE INDEX idx_transaction_date_cascade_open ON transaction_date_cascade_log(transaction_id, undone_at, expires_at DESC);
 CREATE UNIQUE INDEX idx_task_completion_rules_unique ON task_completion_rules(task_description_pattern, completion_trigger_type);

@@ -8558,38 +8558,54 @@ def file_extension(filename):
 
 
 def ensure_batch_upload_staging_table():
-    """Track temporary batch upload files before final commit."""
+    """Ensure batch upload tables exist (batch + per-file item records)."""
     execute_query(
         """
-        CREATE TABLE IF NOT EXISTS batch_upload_staging (
+        CREATE TABLE IF NOT EXISTS batch_uploads (
             id SERIAL PRIMARY KEY,
-            batch_token VARCHAR(64) NOT NULL,
-            uploaded_by VARCHAR(100) NOT NULL,
-            original_filename VARCHAR(255) NOT NULL,
-            temp_path TEXT NOT NULL,
-            extension VARCHAR(10),
-            file_size INT DEFAULT 0,
-            suggested_transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
-            suggested_document_type VARCHAR(100),
-            confidence_score DECIMAL(5,2) DEFAULT 0,
-            analysis_payload JSONB DEFAULT '{}'::jsonb,
-            status VARCHAR(20) DEFAULT 'pending',
-            error_text TEXT,
-            committed_document_id INT REFERENCES documents(id) ON DELETE SET NULL,
+            uploaded_by VARCHAR(50),
+            upload_count INT,
+            successful_count INT DEFAULT 0,
+            failed_count INT DEFAULT 0,
+            status VARCHAR(20),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
     execute_query(
         """
-        CREATE INDEX IF NOT EXISTS idx_batch_upload_staging_user_status
-        ON batch_upload_staging(uploaded_by, status, created_at DESC)
+        CREATE TABLE IF NOT EXISTS batch_upload_items (
+            id SERIAL PRIMARY KEY,
+            batch_id INT REFERENCES batch_uploads(id) ON DELETE CASCADE,
+            filename VARCHAR(500),
+            temp_path TEXT,
+            transaction_id INT REFERENCES transactions(id) ON DELETE SET NULL,
+            document_type VARCHAR(100),
+            confidence VARCHAR(20),
+            confidence_score FLOAT,
+            extracted_data JSONB DEFAULT '{}'::jsonb,
+            status VARCHAR(20),
+            error_message TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
         """
     )
     execute_query(
         """
-        CREATE INDEX IF NOT EXISTS idx_batch_upload_staging_batch
-        ON batch_upload_staging(batch_token, status, created_at DESC)
+        CREATE INDEX IF NOT EXISTS idx_batch_uploads_uploaded_by_status
+        ON batch_uploads(uploaded_by, status, created_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_batch_upload_items_batch_status
+        ON batch_upload_items(batch_id, status, id)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_batch_upload_items_transaction
+        ON batch_upload_items(transaction_id, created_at DESC)
         """
     )
 
@@ -8606,7 +8622,7 @@ def _cleanup_temp_file(path_value):
 
 
 def fetch_batch_upload_pending_count(uploaded_by):
-    """Return pending staged uploads for one TC user."""
+    """Return pending upload-item count for one TC user."""
     ensure_batch_upload_staging_table()
     username = (uploaded_by or "").strip().lower()
     if not username:
@@ -8614,9 +8630,11 @@ def fetch_batch_upload_pending_count(uploaded_by):
     rows = execute_query(
         """
         SELECT COUNT(*) AS pending_count
-        FROM batch_upload_staging
-        WHERE uploaded_by = %s
-          AND status = 'pending'
+        FROM batch_upload_items bi
+        JOIN batch_uploads b ON b.id = bi.batch_id
+        WHERE b.uploaded_by = %s
+          AND COALESCE(b.status, '') IN ('analyzing', 'ready_for_review', 'processing')
+          AND COALESCE(bi.status, '') IN ('pending_review', 'approved')
         """,
         (username,),
         fetch=True,
@@ -8625,44 +8643,71 @@ def fetch_batch_upload_pending_count(uploaded_by):
 
 
 def cleanup_stale_batch_upload_staging(max_age_hours=16):
-    """Remove stale staged files + rows to avoid temp buildup."""
+    """Remove stale open batch uploads + temp files to avoid buildup."""
     ensure_batch_upload_staging_table()
     cutoff = datetime.now() - timedelta(hours=max(1, int(max_age_hours or 16)))
-    rows = execute_query(
+    stale_batches = execute_query(
         """
-        SELECT id, temp_path
-        FROM batch_upload_staging
+        SELECT id
+        FROM batch_uploads
         WHERE created_at < %s
+          AND COALESCE(status, '') <> 'completed'
         ORDER BY id ASC
-        LIMIT 500
+        LIMIT 200
         """,
         (cutoff,),
         fetch=True,
     ) or []
-    for row in rows:
-        _cleanup_temp_file(row.get("temp_path"))
-        execute_query("DELETE FROM batch_upload_staging WHERE id = %s", (row["id"],))
+    for batch in stale_batches:
+        batch_id = int(batch.get("id") or 0)
+        if not batch_id:
+            continue
+        item_rows = execute_query(
+            """
+            SELECT temp_path
+            FROM batch_upload_items
+            WHERE batch_id = %s
+            """,
+            (batch_id,),
+            fetch=True,
+        ) or []
+        for row in item_rows:
+            _cleanup_temp_file(row.get("temp_path"))
+        execute_query("DELETE FROM batch_uploads WHERE id = %s", (batch_id,))
 
 
 def clear_pending_batch_upload_staging(uploaded_by):
-    """Clear pending staged files for one user before creating a new batch."""
+    """Clear open batch uploads for one user before creating a new batch."""
     ensure_batch_upload_staging_table()
     username = (uploaded_by or "").strip().lower()
     if not username:
         return
-    rows = execute_query(
+    batch_rows = execute_query(
         """
-        SELECT id, temp_path
-        FROM batch_upload_staging
+        SELECT id
+        FROM batch_uploads
         WHERE uploaded_by = %s
-          AND status = 'pending'
+          AND COALESCE(status, '') IN ('analyzing', 'ready_for_review', 'processing')
         """,
         (username,),
         fetch=True,
     ) or []
-    for row in rows:
-        _cleanup_temp_file(row.get("temp_path"))
-        execute_query("DELETE FROM batch_upload_staging WHERE id = %s", (row["id"],))
+    for row in batch_rows:
+        batch_id = int(row.get("id") or 0)
+        if not batch_id:
+            continue
+        item_rows = execute_query(
+            """
+            SELECT temp_path
+            FROM batch_upload_items
+            WHERE batch_id = %s
+            """,
+            (batch_id,),
+            fetch=True,
+        ) or []
+        for item_row in item_rows:
+            _cleanup_temp_file(item_row.get("temp_path"))
+        execute_query("DELETE FROM batch_uploads WHERE id = %s", (batch_id,))
 
 
 def _batch_text_similarity(first, second):
@@ -9090,100 +9135,147 @@ def update_transaction_from_batch_extracted_data(transaction_id, document_type, 
     return applied_updates
 
 
-def stage_batch_upload_record(
-    batch_token,
-    uploaded_by,
-    original_filename,
-    temp_path,
-    extension,
-    file_size,
-    suggested_transaction_id,
-    suggested_document_type,
-    confidence_score,
-    analysis_payload,
-):
-    """Persist one staged batch upload row."""
+def create_batch_upload_record(uploaded_by, upload_count, status="analyzing"):
+    """Create one batch upload header row."""
     ensure_batch_upload_staging_table()
     return execute_insert(
         """
-        INSERT INTO batch_upload_staging (
-            batch_token,
+        INSERT INTO batch_uploads (
             uploaded_by,
-            original_filename,
-            temp_path,
-            extension,
-            file_size,
-            suggested_transaction_id,
-            suggested_document_type,
-            confidence_score,
-            analysis_payload,
+            upload_count,
+            successful_count,
+            failed_count,
             status,
             created_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 'pending', CURRENT_TIMESTAMP)
+        VALUES (%s, %s, 0, 0, %s, CURRENT_TIMESTAMP)
         RETURNING id
         """,
         (
-            (batch_token or "").strip(),
-            (uploaded_by or "").strip().lower()[:100],
-            (original_filename or "")[:255],
-            temp_path,
-            (extension or "")[:10],
-            int(file_size or 0),
-            int(suggested_transaction_id) if suggested_transaction_id else None,
-            (suggested_document_type or "other")[:100],
-            float(confidence_score or 0),
-            json.dumps(analysis_payload or {}, default=str),
+            (uploaded_by or "").strip().lower()[:50] or "margaret",
+            max(0, int(upload_count or 0)),
+            (status or "analyzing")[:20],
         ),
     )
 
 
-def fetch_staged_batch_upload_row(stage_id, uploaded_by):
-    """Fetch one pending staged row for current user."""
+def stage_batch_upload_record(
+    batch_id,
+    filename,
+    temp_path,
+    transaction_id,
+    document_type,
+    confidence,
+    confidence_score,
+    extracted_data,
+    status="pending_review",
+    error_message="",
+):
+    """Persist one batch upload item row."""
+    ensure_batch_upload_staging_table()
+    return execute_insert(
+        """
+        INSERT INTO batch_upload_items (
+            batch_id,
+            filename,
+            temp_path,
+            transaction_id,
+            document_type,
+            confidence,
+            confidence_score,
+            extracted_data,
+            status,
+            error_message,
+            created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING id
+        """,
+        (
+            int(batch_id),
+            (filename or "")[:500],
+            temp_path or "",
+            int(transaction_id) if transaction_id else None,
+            (document_type or "other")[:100],
+            (confidence or "low")[:20],
+            float(confidence_score or 0),
+            json.dumps(extracted_data if isinstance(extracted_data, dict) else {}, default=str),
+            (status or "pending_review")[:20],
+            (error_message or "")[:2000] or None,
+        ),
+    )
+
+
+def fetch_staged_batch_upload_row(item_id, batch_id, uploaded_by):
+    """Fetch one pending/approved batch item row for the current user."""
     ensure_batch_upload_staging_table()
     rows = execute_query(
         """
         SELECT
-            id,
-            batch_token,
-            uploaded_by,
-            original_filename,
-            temp_path,
-            extension,
-            file_size,
-            suggested_transaction_id,
-            suggested_document_type,
-            confidence_score,
-            analysis_payload,
-            status
-        FROM batch_upload_staging
-        WHERE id = %s
-          AND uploaded_by = %s
-          AND status = 'pending'
+            bi.id,
+            bi.batch_id,
+            bi.filename,
+            bi.temp_path,
+            bi.transaction_id,
+            bi.document_type,
+            bi.confidence,
+            bi.confidence_score,
+            bi.extracted_data,
+            bi.status,
+            bi.error_message,
+            b.uploaded_by
+        FROM batch_upload_items bi
+        JOIN batch_uploads b ON b.id = bi.batch_id
+        WHERE bi.id = %s
+          AND bi.batch_id = %s
+          AND b.uploaded_by = %s
+          AND COALESCE(bi.status, '') IN ('pending_review', 'approved')
         LIMIT 1
         """,
-        (int(stage_id), (uploaded_by or "").strip().lower()),
+        (
+            int(item_id),
+            int(batch_id),
+            (uploaded_by or "").strip().lower(),
+        ),
         fetch=True,
     ) or []
     return rows[0] if rows else None
 
 
-def mark_batch_upload_stage_result(stage_id, status, error_text="", committed_document_id=None):
-    """Mark staged record as completed/failed."""
+def update_batch_upload_status(batch_id, status, successful_count=None, failed_count=None):
+    """Update batch header status and optional counters."""
     ensure_batch_upload_staging_table()
     execute_query(
         """
-        UPDATE batch_upload_staging
+        UPDATE batch_uploads
         SET status = %s,
-            error_text = %s,
-            committed_document_id = %s
+            successful_count = COALESCE(%s, successful_count),
+            failed_count = COALESCE(%s, failed_count)
         WHERE id = %s
         """,
         (
-            (status or "failed")[:20],
-            (error_text or "")[:1000] or None,
-            int(committed_document_id) if committed_document_id else None,
-            int(stage_id),
+            (status or "ready_for_review")[:20],
+            int(successful_count) if successful_count is not None else None,
+            int(failed_count) if failed_count is not None else None,
+            int(batch_id),
+        ),
+    )
+
+
+def mark_batch_upload_stage_result(item_id, status, error_text=""):
+    """Mark batch item record as uploaded/rejected/approved."""
+    ensure_batch_upload_staging_table()
+    execute_query(
+        """
+        UPDATE batch_upload_items
+        SET status = %s,
+            error_message = %s
+        WHERE id = %s
+        """,
+        (
+            (status or "rejected")[:20],
+            (error_text or "")[:2000] or None,
+            int(item_id),
         ),
     )
 
@@ -13041,7 +13133,7 @@ def tc_batch_upload():
 @login_required
 def analyze_batch_upload():
     """
-    Analyze multiple uploaded documents and stage assignment suggestions.
+    Analyze uploaded documents and prepare review assignments.
     """
     cleanup_stale_batch_upload_staging()
     uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
@@ -13052,8 +13144,12 @@ def analyze_batch_upload():
         return jsonify({"success": False, "error": f"Maximum {BATCH_UPLOAD_MAX_FILES} files per batch."}), 400
 
     clear_pending_batch_upload_staging(uploaded_by)
-    batch_token = str(uuid4())
+    batch_id = create_batch_upload_record(uploaded_by=uploaded_by, upload_count=len(files), status="analyzing")
+    if not batch_id:
+        return jsonify({"success": False, "error": "Could not create batch upload record."}), 500
     candidate_transactions = fetch_batch_upload_candidate_transactions(limit=600)
+    temp_dir = "/tmp/batch_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
     results = []
 
     for file in files:
@@ -13102,9 +13198,10 @@ def analyze_batch_upload():
 
         temp_path = ""
         try:
-            with tempfile.NamedTemporaryFile(suffix=f".{extension}", delete=False) as tmp:
-                tmp.write(file_bytes)
-                temp_path = tmp.name
+            temp_basename = f"{batch_id}_{uuid4().hex}_{safe_filename}"
+            temp_path = os.path.join(temp_dir, temp_basename)
+            with open(temp_path, "wb") as tmp_file:
+                tmp_file.write(file_bytes)
 
             first_page_text = extract_text_from_first_page(file_bytes, extension)
             analysis = analyze_document_with_claude(first_page_text, safe_filename)
@@ -13112,23 +13209,31 @@ def analyze_batch_upload():
             suggested_transaction_id = parse_optional_int(transaction_match.get("transaction_id"))
             suggested_document_type = normalize_document_type(analysis.get("document_type"), fallback="other")
             match_confidence = float(transaction_match.get("confidence") or 0)
-            confidence_label = "high" if suggested_transaction_id and match_confidence >= 0.85 else "low"
-            analysis_payload = {
-                "analysis": analysis,
-                "matching": transaction_match,
-                "first_page_text": (first_page_text or "")[:12000],
-            }
+            if match_confidence >= 0.85 and suggested_transaction_id:
+                confidence_label = "high"
+            elif match_confidence >= 0.6:
+                confidence_label = "medium"
+            else:
+                confidence_label = "low"
+
+            extracted_data = analysis.get("extracted_data")
+            if not isinstance(extracted_data, dict):
+                extracted_data = {}
+            staged_extracted_data = dict(extracted_data)
+            if first_page_text:
+                staged_extracted_data["__first_page_text"] = (first_page_text or "")[:12000]
+
             stage_id = stage_batch_upload_record(
-                batch_token=batch_token,
-                uploaded_by=uploaded_by,
-                original_filename=safe_filename,
+                batch_id=batch_id,
+                filename=safe_filename,
                 temp_path=temp_path,
-                extension=extension,
-                file_size=file_size,
-                suggested_transaction_id=suggested_transaction_id,
-                suggested_document_type=suggested_document_type,
+                transaction_id=suggested_transaction_id,
+                document_type=suggested_document_type,
+                confidence=confidence_label,
                 confidence_score=match_confidence,
-                analysis_payload=analysis_payload,
+                extracted_data=staged_extracted_data,
+                status="pending_review",
+                error_message="",
             )
             if not stage_id:
                 _cleanup_temp_file(temp_path)
@@ -13141,30 +13246,22 @@ def analyze_batch_upload():
                 )
                 continue
 
-            if confidence_label == "high":
-                results.append(
-                    {
-                        "stage_id": stage_id,
-                        "filename": safe_filename,
-                        "transaction_id": suggested_transaction_id,
-                        "property_address": transaction_match.get("property_address") or "",
-                        "document_type": suggested_document_type,
-                        "confidence": "high",
-                        "method": transaction_match.get("method") or "auto_match",
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "stage_id": stage_id,
-                        "filename": safe_filename,
-                        "transaction_id": suggested_transaction_id,
-                        "document_type": suggested_document_type,
-                        "confidence": "low",
-                        "reason": transaction_match.get("reason") or "Needs review",
-                        "suggestions": transaction_match.get("possible_matches") or [],
-                    }
-                )
+            results.append(
+                {
+                    "batch_item_id": stage_id,
+                    "stage_id": stage_id,  # backward compatibility for existing frontend helpers
+                    "filename": safe_filename,
+                    "transaction_id": suggested_transaction_id,
+                    "property_address": transaction_match.get("property_address") or "",
+                    "document_type": suggested_document_type,
+                    "confidence": confidence_label,
+                    "confidence_score": round(match_confidence, 4),
+                    "method": transaction_match.get("method") or "",
+                    "extracted_data": extracted_data,
+                    "reason": transaction_match.get("reason") or "",
+                    "suggestions": transaction_match.get("possible_matches") or [],
+                }
+            )
         except Exception as exc:
             _cleanup_temp_file(temp_path)
             log_system_error("batch_upload_analyze", str(exc))
@@ -13176,14 +13273,16 @@ def analyze_batch_upload():
                 }
             )
 
+    update_batch_upload_status(batch_id=batch_id, status="ready_for_review")
     pending_count = fetch_batch_upload_pending_count(uploaded_by)
     session["batch_upload_pending_count"] = pending_count
-    session["batch_upload_batch_token"] = batch_token
+    session["batch_upload_batch_id"] = batch_id
     return jsonify(
         {
             "success": True,
-            "results": results,
-            "batch_token": batch_token,
+            "batch_id": batch_id,
+            "items": results,
+            "results": results,  # backward compatibility
             "pending_count": pending_count,
         }
     )
@@ -13199,64 +13298,125 @@ def commit_batch_upload():
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         payload = {}
-    uploads = payload.get("uploads")
-    if not isinstance(uploads, list) or not uploads:
-        return jsonify({"success": False, "error": "No uploads provided."}), 400
 
     uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
+    batch_id = parse_optional_int(payload.get("batch_id"))
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        uploads = payload.get("uploads")
+        if isinstance(uploads, list) and uploads:
+            items = []
+            for row in uploads:
+                if not isinstance(row, dict):
+                    continue
+                items.append(
+                    {
+                        "batch_item_id": row.get("batch_item_id") or row.get("stage_id") or row.get("id"),
+                        "transaction_id": row.get("transaction_id"),
+                        "document_type": row.get("document_type"),
+                    }
+                )
+        else:
+            return jsonify({"success": False, "error": "No batch items provided."}), 400
+
+    if not batch_id:
+        first_item = items[0] if items and isinstance(items[0], dict) else {}
+        probe_item_id = parse_optional_int(first_item.get("batch_item_id") or first_item.get("stage_id") or first_item.get("id"))
+        if probe_item_id:
+            probe_rows = execute_query(
+                """
+                SELECT bi.batch_id
+                FROM batch_upload_items bi
+                JOIN batch_uploads b ON b.id = bi.batch_id
+                WHERE bi.id = %s
+                  AND b.uploaded_by = %s
+                LIMIT 1
+                """,
+                (probe_item_id, uploaded_by),
+                fetch=True,
+            ) or []
+            if probe_rows:
+                batch_id = int(probe_rows[0].get("batch_id") or 0)
+    if not batch_id:
+        return jsonify({"success": False, "error": "batch_id is required"}), 400
+
+    batch_rows = execute_query(
+        """
+        SELECT id, status
+        FROM batch_uploads
+        WHERE id = %s
+          AND uploaded_by = %s
+        LIMIT 1
+        """,
+        (int(batch_id), uploaded_by),
+        fetch=True,
+    ) or []
+    if not batch_rows:
+        return jsonify({"success": False, "error": "Batch not found"}), 404
+
+    update_batch_upload_status(batch_id=batch_id, status="processing")
     successful = 0
     failed = 0
     tasks_completed = 0
-    touched_stage_ids = set()
+    touched_item_ids = set()
 
-    for upload in uploads[: BATCH_UPLOAD_MAX_FILES * 3]:
+    for upload in items[: BATCH_UPLOAD_MAX_FILES * 4]:
         if not isinstance(upload, dict):
             failed += 1
             continue
 
-        stage_id = parse_optional_int(upload.get("stage_id"))
-        if not stage_id or stage_id in touched_stage_ids:
+        item_id = parse_optional_int(upload.get("batch_item_id") or upload.get("stage_id") or upload.get("id"))
+        if not item_id or item_id in touched_item_ids:
             failed += 1
             continue
-        touched_stage_ids.add(stage_id)
+        touched_item_ids.add(item_id)
 
-        stage_row = fetch_staged_batch_upload_row(stage_id, uploaded_by)
+        stage_row = fetch_staged_batch_upload_row(item_id, batch_id, uploaded_by)
         if not stage_row:
             failed += 1
             continue
 
-        transaction_id = parse_optional_int(upload.get("transaction_id")) or parse_optional_int(stage_row.get("suggested_transaction_id"))
+        transaction_id = parse_optional_int(upload.get("transaction_id")) or parse_optional_int(stage_row.get("transaction_id"))
         document_type = normalize_document_type(
-            upload.get("document_type") or stage_row.get("suggested_document_type"),
+            upload.get("document_type") or stage_row.get("document_type"),
             fallback="other",
         )
 
         transaction = get_transaction_or_none(transaction_id) if transaction_id else None
         if not transaction:
-            mark_batch_upload_stage_result(stage_id, "failed", error_text="Transaction not found")
+            _cleanup_temp_file(stage_row.get("temp_path"))
+            mark_batch_upload_stage_result(item_id, "rejected", error_text="Transaction not found")
             failed += 1
             continue
 
+        execute_query(
+            """
+            UPDATE batch_upload_items
+            SET transaction_id = %s,
+                document_type = %s,
+                status = 'approved',
+                error_message = NULL
+            WHERE id = %s
+            """,
+            (transaction_id, document_type, int(item_id)),
+        )
+
         temp_path = (stage_row.get("temp_path") or "").strip()
         if not temp_path or not os.path.exists(temp_path):
-            mark_batch_upload_stage_result(stage_id, "failed", error_text="Staged file missing")
+            mark_batch_upload_stage_result(item_id, "rejected", error_text="Staged file missing")
             failed += 1
             continue
 
         try:
             with open(temp_path, "rb") as staged_file:
                 file_bytes = staged_file.read()
-            extension = (stage_row.get("extension") or file_extension(stage_row.get("original_filename") or "") or "pdf").lower()
-            generated_filename = build_smart_filename(
-                document_type=document_type,
-                property_address=transaction.get("property_address") or "",
-                extension=extension,
-            )
+            original_filename = secure_filename(stage_row.get("filename") or f"document_{item_id}.pdf")
+            extension = (file_extension(original_filename) or "pdf").lower()
             s3_key = upload_document(
                 file=io.BytesIO(file_bytes),
                 transaction_id=transaction_id,
                 document_type=document_type,
-                filename=generated_filename,
+                filename=original_filename,
             )
             if not s3_key:
                 raise ValueError("S3 upload failed")
@@ -13272,7 +13432,7 @@ def commit_batch_upload():
                 (
                     transaction_id,
                     document_type,
-                    generated_filename,
+                    original_filename,
                     s3_key,
                     file_size,
                     uploaded_by,
@@ -13281,22 +13441,10 @@ def commit_batch_upload():
             if not document_id:
                 raise ValueError("Document record save failed")
 
-            analysis_payload = stage_row.get("analysis_payload")
-            if isinstance(analysis_payload, str):
-                try:
-                    analysis_payload = json.loads(analysis_payload)
-                except Exception:
-                    analysis_payload = {}
-            if not isinstance(analysis_payload, dict):
-                analysis_payload = {}
-
-            analysis = analysis_payload.get("analysis")
-            if not isinstance(analysis, dict):
-                analysis = {}
-            extracted_data = analysis.get("extracted_data")
+            extracted_data = parse_json_field(stage_row.get("extracted_data"), {})
             if not isinstance(extracted_data, dict):
                 extracted_data = {}
-            first_page_text = (analysis_payload.get("first_page_text") or "")[:12000]
+            first_page_text = (extracted_data.pop("__first_page_text", "") or "")[:12000]
 
             post_actions = apply_document_post_upload_actions(
                 transaction_id=transaction_id,
@@ -13330,7 +13478,7 @@ def commit_batch_upload():
                     transaction_id,
                     "Batch upload committed",
                     (
-                        f"stage_id={stage_id} doc_id={document_id} "
+                        f"batch_item_id={item_id} doc_id={document_id} "
                         f"type={document_type} actions={post_actions.get('summary') or 'none'}"
                     )[:1800],
                 ),
@@ -13351,33 +13499,98 @@ def commit_batch_upload():
                 extension=extension,
             )
 
-            mark_batch_upload_stage_result(stage_id, "completed", committed_document_id=document_id)
+            mark_batch_upload_stage_result(item_id, "uploaded")
             _cleanup_temp_file(temp_path)
             successful += 1
         except Exception as exc:
-            mark_batch_upload_stage_result(stage_id, "failed", error_text=str(exc))
+            _cleanup_temp_file(temp_path)
+            mark_batch_upload_stage_result(item_id, "rejected", error_text=str(exc))
             log_system_error("batch_upload_commit", str(exc), transaction_id=transaction_id)
             failed += 1
 
-    execute_query(
-        """
-        DELETE FROM batch_upload_staging
-        WHERE uploaded_by = %s
-          AND status IN ('completed', 'failed')
-        """,
-        (uploaded_by,),
+    if touched_item_ids:
+        remaining_rows = execute_query(
+            """
+            SELECT id
+            FROM batch_upload_items
+            WHERE batch_id = %s
+              AND COALESCE(status, '') IN ('pending_review', 'approved')
+            """,
+            (int(batch_id),),
+            fetch=True,
+        ) or []
+        for remaining in remaining_rows:
+            remaining_id = int(remaining.get("id") or 0)
+            if not remaining_id or remaining_id in touched_item_ids:
+                continue
+            mark_batch_upload_stage_result(
+                remaining_id,
+                "rejected",
+                error_text="Not included in approve request",
+            )
+
+    update_batch_upload_status(
+        batch_id=batch_id,
+        status="completed",
+        successful_count=successful,
+        failed_count=failed,
     )
     pending_count = fetch_batch_upload_pending_count(uploaded_by)
     session["batch_upload_pending_count"] = pending_count
     return jsonify(
         {
             "success": True,
+            "batch_id": batch_id,
             "successful": successful,
             "failed": failed,
             "tasks_completed": tasks_completed,
             "pending_count": pending_count,
         }
     )
+
+
+@app.route("/tc/batch-upload/cancel", methods=["POST"])
+@login_required
+def cancel_batch_upload():
+    """Cancel an open batch upload and remove staged temp files."""
+    ensure_batch_upload_staging_table()
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
+    batch_id = parse_optional_int(payload.get("batch_id"))
+    if not batch_id:
+        clear_pending_batch_upload_staging(uploaded_by)
+        pending_count = fetch_batch_upload_pending_count(uploaded_by)
+        session["batch_upload_pending_count"] = pending_count
+        return jsonify({"success": True, "pending_count": pending_count})
+
+    rows = execute_query(
+        """
+        SELECT bi.temp_path
+        FROM batch_upload_items bi
+        JOIN batch_uploads b ON b.id = bi.batch_id
+        WHERE bi.batch_id = %s
+          AND b.uploaded_by = %s
+          AND COALESCE(b.status, '') IN ('analyzing', 'ready_for_review', 'processing')
+        """,
+        (int(batch_id), uploaded_by),
+        fetch=True,
+    ) or []
+    for row in rows:
+        _cleanup_temp_file(row.get("temp_path"))
+    execute_query(
+        """
+        DELETE FROM batch_uploads
+        WHERE id = %s
+          AND uploaded_by = %s
+          AND COALESCE(status, '') IN ('analyzing', 'ready_for_review', 'processing')
+        """,
+        (int(batch_id), uploaded_by),
+    )
+    pending_count = fetch_batch_upload_pending_count(uploaded_by)
+    session["batch_upload_pending_count"] = pending_count
+    return jsonify({"success": True, "pending_count": pending_count})
 
 
 @app.route("/tc/status-updates", methods=["GET", "POST"])
