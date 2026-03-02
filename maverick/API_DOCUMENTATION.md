@@ -424,11 +424,24 @@ Form `action` options:
   - reorders pending queue by current urgency
   - updates estimated end-time projection
 
+### Manual calendar export API
+- `POST /tc/daily-plan/export-calendar`
+- JSON body:
+  - `plan_id` (optional; falls back to selected/today plan)
+  - `date` (optional fallback date)
+- Behavior:
+  - re-syncs all daily-plan blocks to Google Calendar (`daily_plan_block`)
+  - removes stale prior block events for the same plan
+  - returns synced/failed counts
+
 ### Automation script
 - `python3 automation/generate_daily_plan.py`
   - `--force`
   - `--dry-run`
   - `--skip-calendar`
+  - `--update-estimates` (refresh learned time estimates from completion durations)
+  - `--estimate-days 30` (learning lookback window)
+  - `--estimates-only` (run estimate learning without generating today's schedule)
 
 ### Google Calendar integration
 - Each generated block is synced as event type: `daily_plan_block`
@@ -444,6 +457,12 @@ Form `action` options:
   - task rows inside blocks with status, estimate, and actual timing
 - `daily_plan_learning_events`
   - reorder/replan/status signals used for estimate-learning analytics
+- `daily_schedules`
+  - compatibility snapshot table storing full day JSON payload by date
+- `task_time_estimates`
+  - baseline + learned estimate table (`task_pattern`, category, estimated/actual averages)
+- `task_completion_times`
+  - historical estimate vs actual completion samples for weekly learning updates
 
 ## Automation Analytics Dashboard
 

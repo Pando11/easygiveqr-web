@@ -68,6 +68,7 @@ from automation.generate_daily_plan import (
     generate_daily_plan,
     reorder_daily_plan_items,
     reorganize_remaining_day,
+    sync_daily_plan_to_calendar,
     update_daily_plan_item,
 )
 from config import Config
@@ -16956,6 +16957,10 @@ def tc_daily_plan():
         )
 
     plan = fetch_daily_plan_by_date(selected_date)
+    if not plan and selected_date == date.today():
+        generated = generate_daily_plan(force=True, send_messages=False, sync_calendar=False)
+        if generated.get("success"):
+            plan = fetch_daily_plan_by_date(selected_date)
     if not plan:
         plan = fetch_latest_daily_plan(days_back=30)
     if plan and plan.get("plan_date"):
@@ -17118,6 +17123,54 @@ def reorganize_daily_plan_route():
     if not result.get("success"):
         return jsonify({"success": False, "error": result.get("error") or "reorganize_failed"}), 400
     return jsonify(result)
+
+
+@app.route("/tc/daily-plan/export-calendar", methods=["POST"])
+@login_required
+def export_daily_plan_calendar_route():
+    """Manually export/sync today's plan blocks to Google Calendar."""
+    payload = request.get_json(silent=True) or {}
+    plan_id = payload.get("plan_id")
+    plan = None
+    try:
+        if plan_id not in (None, ""):
+            plan_id = int(plan_id)
+    except (TypeError, ValueError):
+        plan_id = None
+
+    if plan_id:
+        plan_rows = execute_query(
+            """
+            SELECT id
+            FROM daily_plans
+            WHERE id = %s
+            LIMIT 1
+            """,
+            (int(plan_id),),
+            fetch=True,
+        ) or []
+        if plan_rows:
+            plan = {"id": int(plan_rows[0].get("id"))}
+
+    if not plan:
+        selected_date = _daily_plan_target_date(payload.get("date") or request.args.get("date"))
+        plan = fetch_daily_plan_by_date(selected_date) or fetch_latest_daily_plan(days_back=14)
+    if not plan:
+        return jsonify({"success": False, "error": "plan_not_found"}), 404
+
+    result = sync_daily_plan_to_calendar(int(plan["id"]))
+    success = bool(result.get("success")) or int(result.get("synced") or 0) > 0
+    response_payload = {
+        "success": success,
+        "synced": int(result.get("synced") or 0),
+        "failed": int(result.get("failed") or 0),
+        "deleted_previous": int(result.get("deleted_previous") or 0),
+        "delete_failed": int(result.get("delete_failed") or 0),
+    }
+    if not success:
+        response_payload["error"] = "calendar_sync_failed"
+        return jsonify(response_payload), 400
+    return jsonify(response_payload)
 
 
 @app.route("/tc/daily-checklist")

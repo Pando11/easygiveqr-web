@@ -80,6 +80,7 @@
     <div class="top-gap">
         <button type="button" class="btn btn-secondary" id="runningBehindBtn">I'm running behind</button>
         <button type="button" class="btn btn-secondary" id="urgentPromptBtn">New urgent task added</button>
+        <button type="button" class="btn btn-secondary" id="exportCalendarBtn">Export to Google Calendar</button>
         <span class="hint-text" id="liveStatusMessage"></span>
     </div>
 </section>
@@ -327,6 +328,7 @@
     const estimatedEndLabel = document.getElementById('estimatedEndLabel');
     const runningBehindBtn = document.getElementById('runningBehindBtn');
     const urgentPromptBtn = document.getElementById('urgentPromptBtn');
+    const exportCalendarBtn = document.getElementById('exportCalendarBtn');
     if (!timeline) return;
 
     const setStatusMessage = (text, tone = 'info') => {
@@ -417,6 +419,28 @@
         }
     };
 
+    const exportCalendar = async () => {
+        try {
+            if (exportCalendarBtn) exportCalendarBtn.disabled = true;
+            setStatusMessage('Syncing plan to Google Calendar...', 'info');
+            const response = await fetch('/tc/daily-plan/export-calendar', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plan_id: planId }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.success) {
+                throw new Error(payload.error || 'calendar_export_failed');
+            }
+            setStatusMessage(`Calendar sync complete (${payload.synced || 0} blocks).`, 'success');
+        } catch (error) {
+            console.error(error);
+            setStatusMessage('Could not export to calendar.', 'error');
+        } finally {
+            if (exportCalendarBtn) exportCalendarBtn.disabled = false;
+        }
+    };
+
     timeline.addEventListener('change', (event) => {
         const target = event.target;
         if (!(target instanceof HTMLInputElement) || !target.classList.contains('item-status-toggle')) return;
@@ -473,6 +497,9 @@
                 setStatusMessage('Keeping current plan order.', 'info');
             }
         });
+    }
+    if (exportCalendarBtn) {
+        exportCalendarBtn.addEventListener('click', exportCalendar);
     }
 })();
 </script>

@@ -364,10 +364,14 @@ Maverick now supports a dedicated pre-briefing scheduler that builds Margaret’
 - Task update API: `POST /tc/daily-plan/item/<item_id>/update`
 - Drag/drop reorder API: `POST /tc/daily-plan/reorder`
 - Adaptive reshuffle API: `POST /tc/daily-plan/reorganize`
+- Manual calendar export API: `POST /tc/daily-plan/export-calendar`
 - Automation script: `python3 automation/generate_daily_plan.py`
   - `--force` regenerate even if today already exists
   - `--dry-run` skip SMS/email sends
   - `--skip-calendar` skip Google Calendar block sync
+  - `--update-estimates` refresh estimate learning from recent completions
+  - `--estimate-days 30` learning lookback window
+  - `--estimates-only` update learned estimates without generating a day plan
 
 Daily-plan behavior:
 - pulls open tasks + transaction signals (closings today/week, urgent issues, new contracts)
@@ -393,6 +397,10 @@ Daily-plan behavior:
   - reorder frequency
   - replan frequency
   - categories that consistently run long
+- persists compatibility learning tables:
+  - `daily_schedules`
+  - `task_time_estimates` (seeded baseline + learned updates)
+  - `task_completion_times`
 
 ## Automation Analytics Dashboard
 

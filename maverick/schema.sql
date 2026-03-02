@@ -391,6 +391,58 @@ CREATE TABLE daily_plan_learning_events (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE daily_schedules (
+    id SERIAL PRIMARY KEY,
+    date DATE UNIQUE,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    total_tasks INT,
+    estimated_work_hours FLOAT,
+    estimated_end_time TIME,
+    schedule_data JSONB,
+    margaret_reviewed BOOLEAN DEFAULT FALSE,
+    reviewed_at TIMESTAMP
+);
+
+CREATE TABLE task_time_estimates (
+    id SERIAL PRIMARY KEY,
+    task_pattern VARCHAR(200) UNIQUE,
+    category VARCHAR(100),
+    estimated_minutes INT,
+    actual_minutes_avg INT,
+    sample_count INT DEFAULT 0,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE task_completion_times (
+    id SERIAL PRIMARY KEY,
+    task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+    task_description VARCHAR(500),
+    task_category VARCHAR(100),
+    estimated_minutes INT,
+    actual_minutes INT,
+    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO task_time_estimates (task_pattern, category, estimated_minutes)
+VALUES
+    ('Review new contract', 'contract_review', 20),
+    ('Approve transaction', 'contract_review', 15),
+    ('Schedule inspection', 'scheduling', 8),
+    ('Schedule appraisal', 'scheduling', 8),
+    ('Schedule survey', 'scheduling', 6),
+    ('Schedule final walk-through', 'scheduling', 5),
+    ('Call lender', 'phone_calls', 10),
+    ('Call agent', 'phone_calls', 8),
+    ('Call buyer', 'phone_calls', 12),
+    ('Call seller', 'phone_calls', 12),
+    ('Upload document', 'admin', 3),
+    ('Log communication', 'admin', 2),
+    ('Send status update', 'communication', 5),
+    ('Review inspection report', 'document_review', 15),
+    ('Handle urgent issue', 'problem_solving', 30),
+    ('Coordinate repairs', 'problem_solving', 20)
+ON CONFLICT (task_pattern) DO NOTHING;
+
 CREATE TABLE document_classification_corrections (
     id SERIAL PRIMARY KEY,
     document_id INT REFERENCES documents(id) ON DELETE SET NULL,
@@ -1422,3 +1474,6 @@ CREATE INDEX idx_daily_plans_plan_date ON daily_plans(plan_date DESC, generated_
 CREATE INDEX idx_daily_plan_blocks_plan ON daily_plan_blocks(plan_id, display_order, id);
 CREATE INDEX idx_daily_plan_items_plan ON daily_plan_items(plan_id, status, display_order, id);
 CREATE INDEX idx_daily_plan_learning_events_plan ON daily_plan_learning_events(plan_id, event_type, created_at DESC);
+CREATE INDEX idx_daily_schedules_date ON daily_schedules(date DESC, generated_at DESC);
+CREATE INDEX idx_task_time_estimates_category ON task_time_estimates(category, last_updated DESC);
+CREATE INDEX idx_task_completion_times_category ON task_completion_times(task_category, completed_at DESC);

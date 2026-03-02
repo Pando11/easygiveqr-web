@@ -28,6 +28,30 @@ from utils.db import execute_query  # noqa: E402
 from utils.email import send_email  # noqa: E402
 from utils.sms import send_sms  # noqa: E402
 
+BASELINE_TASK_TIME_ESTIMATES: list[tuple[str, str, int]] = [
+    ("Review new contract", "contract_review", 20),
+    ("Approve transaction", "contract_review", 15),
+    ("Schedule inspection", "scheduling", 8),
+    ("Schedule appraisal", "scheduling", 8),
+    ("Schedule survey", "scheduling", 6),
+    ("Schedule final walk-through", "scheduling", 5),
+    ("Call lender", "phone_calls", 10),
+    ("Call agent", "phone_calls", 8),
+    ("Call buyer", "phone_calls", 12),
+    ("Call seller", "phone_calls", 12),
+    ("Upload document", "admin", 3),
+    ("Log communication", "admin", 2),
+    ("Send status update", "communication", 5),
+    ("Review inspection report", "document_review", 15),
+    ("Handle urgent issue", "problem_solving", 30),
+    ("Coordinate repairs", "problem_solving", 20),
+]
+
+TASK_ESTIMATE_CACHE: dict[str, Any] = {
+    "loaded_at": None,
+    "rows": [],
+}
+
 
 def log(message: str) -> None:
     print(f"[daily-plan {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}")
@@ -120,6 +144,78 @@ def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
         return payload if isinstance(payload, dict) else None
     except Exception:
         return None
+
+
+def ensure_daily_schedule_management_tables() -> None:
+    """Compatibility tables requested for schedule management + estimate learning."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS daily_schedules (
+            id SERIAL PRIMARY KEY,
+            date DATE UNIQUE,
+            generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            total_tasks INT,
+            estimated_work_hours FLOAT,
+            estimated_end_time TIME,
+            schedule_data JSONB,
+            margaret_reviewed BOOLEAN DEFAULT FALSE,
+            reviewed_at TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS task_time_estimates (
+            id SERIAL PRIMARY KEY,
+            task_pattern VARCHAR(200) UNIQUE,
+            category VARCHAR(100),
+            estimated_minutes INT,
+            actual_minutes_avg INT,
+            sample_count INT DEFAULT 0,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS task_completion_times (
+            id SERIAL PRIMARY KEY,
+            task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+            task_description VARCHAR(500),
+            task_category VARCHAR(100),
+            estimated_minutes INT,
+            actual_minutes INT,
+            completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_daily_schedules_date
+        ON daily_schedules(date DESC, generated_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_time_estimates_category
+        ON task_time_estimates(category, last_updated DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_completion_times_category
+        ON task_completion_times(task_category, completed_at DESC)
+        """
+    )
+    for task_pattern, category, estimated_minutes in BASELINE_TASK_TIME_ESTIMATES:
+        execute_query(
+            """
+            INSERT INTO task_time_estimates (task_pattern, category, estimated_minutes, sample_count)
+            VALUES (%s, %s, %s, 0)
+            ON CONFLICT (task_pattern) DO NOTHING
+            """,
+            (task_pattern, category, int(estimated_minutes)),
+        )
 
 
 def ensure_daily_plan_tables() -> None:
@@ -231,6 +327,7 @@ def ensure_daily_plan_tables() -> None:
         ON daily_plan_learning_events(plan_id, event_type, created_at DESC)
         """
     )
+    ensure_daily_schedule_management_tables()
 
 
 def get_all_open_tasks(limit: int = 500) -> list[dict[str, Any]]:
@@ -385,7 +482,75 @@ def serialize_task(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _load_task_time_estimates(force_refresh: bool = False) -> list[dict[str, Any]]:
+    cached_rows = TASK_ESTIMATE_CACHE.get("rows") or []
+    cached_at = TASK_ESTIMATE_CACHE.get("loaded_at")
+    if (
+        not force_refresh
+        and cached_rows
+        and isinstance(cached_at, datetime)
+        and (datetime.now() - cached_at).total_seconds() < 900
+    ):
+        return cached_rows
+    rows = execute_query(
+        """
+        SELECT task_pattern, category, estimated_minutes, actual_minutes_avg, sample_count
+        FROM task_time_estimates
+        ORDER BY sample_count DESC, last_updated DESC, id DESC
+        """,
+        fetch=True,
+    ) or []
+    TASK_ESTIMATE_CACHE["rows"] = rows
+    TASK_ESTIMATE_CACHE["loaded_at"] = datetime.now()
+    return rows
+
+
+def _estimate_minutes_from_table(serialized_task: dict[str, Any]) -> int | None:
+    description = _safe_text(serialized_task.get("task_description")).lower()
+    category = _safe_text(serialized_task.get("task_category")).lower()
+    if not description and not category:
+        return None
+
+    best_score = 0
+    best_minutes = None
+    for row in _load_task_time_estimates():
+        pattern = _safe_text(row.get("task_pattern")).lower()
+        row_category = _safe_text(row.get("category")).lower()
+        score = 0
+        if category and row_category and category == row_category:
+            score += 4
+        if pattern and description:
+            if pattern in description:
+                score += 8
+            elif description in pattern:
+                score += 4
+            else:
+                tokens = [token for token in re.split(r"[^a-z0-9]+", pattern) if len(token) >= 4]
+                overlap = sum(1 for token in tokens if token in description)
+                score += min(overlap, 3)
+
+        if score <= best_score:
+            continue
+        raw_minutes = row.get("actual_minutes_avg")
+        if raw_minutes in (None, "", 0):
+            raw_minutes = row.get("estimated_minutes")
+        try:
+            minutes = int(raw_minutes)
+        except (TypeError, ValueError):
+            continue
+        best_score = score
+        best_minutes = minutes
+
+    if best_score < 4 or best_minutes is None:
+        return None
+    return max(3, min(int(best_minutes), 120))
+
+
 def _estimated_minutes_for_task(serialized_task: dict[str, Any]) -> int:
+    learned_estimate = _estimate_minutes_from_table(serialized_task)
+    if learned_estimate is not None:
+        return learned_estimate
+
     category = _safe_text(serialized_task.get("task_category")).lower()
     description = _safe_text(serialized_task.get("task_description")).lower()
     base = 10
@@ -1086,6 +1251,56 @@ def _upsert_plan_row(
     return _hydrate_plan_row(rows[0]) or {}
 
 
+def _upsert_daily_schedule_row(plan_date: date, schedule: dict[str, Any]) -> None:
+    """Persist schedule JSON into requested daily_schedules compatibility table."""
+    ensure_daily_schedule_management_tables()
+    estimated_end_time = schedule.get("estimated_end_time")
+    estimated_end_clock = estimated_end_time.time() if isinstance(estimated_end_time, datetime) else None
+    payload = dict(schedule or {})
+    payload["date"] = plan_date.isoformat()
+    execute_query(
+        """
+        INSERT INTO daily_schedules (
+            date,
+            generated_at,
+            total_tasks,
+            estimated_work_hours,
+            estimated_end_time,
+            schedule_data
+        )
+        VALUES (
+            %s,
+            CURRENT_TIMESTAMP,
+            %s,
+            %s,
+            %s,
+            %s::jsonb
+        )
+        ON CONFLICT (date)
+        DO UPDATE SET
+            generated_at = CURRENT_TIMESTAMP,
+            total_tasks = EXCLUDED.total_tasks,
+            estimated_work_hours = EXCLUDED.estimated_work_hours,
+            estimated_end_time = EXCLUDED.estimated_end_time,
+            schedule_data = EXCLUDED.schedule_data
+        """,
+        (
+            plan_date,
+            int(schedule.get("total_tasks") or 0),
+            float(schedule.get("total_work_hours") or 0.0),
+            estimated_end_clock,
+            _json_dumps(payload),
+        ),
+    )
+
+
+def save_daily_schedule(schedule: dict[str, Any], plan_date: date | None = None) -> bool:
+    """Public helper to save schedule snapshots (requested interface)."""
+    target_date = plan_date or date.today()
+    _upsert_daily_schedule_row(target_date, schedule or {})
+    return True
+
+
 def _replace_plan_blocks(plan_id: int, schedule: dict[str, Any]) -> None:
     execute_query("DELETE FROM daily_plan_items WHERE plan_id = %s", (int(plan_id),))
     execute_query("DELETE FROM daily_plan_blocks WHERE plan_id = %s", (int(plan_id),))
@@ -1348,6 +1563,7 @@ def generate_daily_plan(force: bool = False, send_messages: bool = True, sync_ca
     schedule = create_time_blocks(categorized)
     plan_row = _upsert_plan_row(target_date, schedule, transactions)
     _replace_plan_blocks(plan_row["id"], schedule)
+    save_daily_schedule(schedule, plan_date=target_date)
 
     calendar_summary = {"success": False, "synced": 0, "failed": 0}
     if sync_calendar:
@@ -1410,6 +1626,36 @@ def _record_learning_event(plan_id: int, item_id: int | None, event_type: str, e
     )
 
 
+def _record_task_completion_time(item: dict[str, Any], actual_minutes: int | None) -> None:
+    ensure_daily_schedule_management_tables()
+    estimated = int(item.get("estimated_minutes") or 0)
+    measured = int(actual_minutes or 0)
+    if measured <= 0:
+        measured = estimated
+    if measured <= 0:
+        return
+    execute_query(
+        """
+        INSERT INTO task_completion_times (
+            task_id,
+            task_description,
+            task_category,
+            estimated_minutes,
+            actual_minutes,
+            completed_at
+        )
+        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        """,
+        (
+            int(item.get("task_id")) if item.get("task_id") else None,
+            _safe_text(item.get("title"), "Task")[:500],
+            _safe_text(item.get("category"), "general")[:100],
+            estimated if estimated > 0 else None,
+            measured,
+        ),
+    )
+
+
 def update_daily_plan_item(
     item_id: int,
     status: str | None = None,
@@ -1433,6 +1679,7 @@ def update_daily_plan_item(
     if not rows:
         return None
     item = rows[0]
+    was_completed = _safe_text(item.get("status")).lower() == "completed"
     next_status = _safe_text(status, item.get("status") or "pending").lower()
     if next_status not in {"pending", "completed", "deferred", "skipped"}:
         next_status = "pending"
@@ -1476,6 +1723,11 @@ def update_daily_plan_item(
         },
         created_by=updated_by,
     )
+    just_completed = next_status == "completed" and not was_completed
+    if just_completed:
+        measured = int(next_actual or item.get("actual_minutes") or 0)
+        _record_task_completion_time(item, measured)
+
     refreshed = execute_query(
         """
         SELECT *
@@ -1778,10 +2030,111 @@ def fetch_daily_plan_learning_metrics(days: int = 30) -> dict[str, Any]:
     }
 
 
+def update_task_estimates(days_window: int = 30, buffer_ratio: float = 1.1) -> dict[str, Any]:
+    """
+    Refresh task time estimates from measured completion durations.
+    Intended for weekly cron execution.
+    """
+    ensure_daily_schedule_management_tables()
+    safe_days = max(7, min(int(days_window or 30), 120))
+    safe_ratio = max(1.0, min(float(buffer_ratio or 1.1), 1.5))
+    rows = execute_query(
+        """
+        SELECT
+            task_category,
+            AVG(actual_minutes)::float AS avg_actual,
+            COUNT(*)::int AS sample_count
+        FROM task_completion_times
+        WHERE completed_at >= CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')
+          AND actual_minutes IS NOT NULL
+          AND actual_minutes > 0
+        GROUP BY task_category
+        ORDER BY sample_count DESC, task_category ASC
+        """,
+        (safe_days,),
+        fetch=True,
+    ) or []
+
+    updated_categories = 0
+    inserted_categories = 0
+    for row in rows:
+        category = _safe_text(row.get("task_category"), "general")[:100]
+        avg_actual = int(round(float(row.get("avg_actual") or 0)))
+        sample_count = max(1, int(row.get("sample_count") or 1))
+        if avg_actual <= 0:
+            continue
+        buffered_estimate = max(2, int(round(avg_actual * safe_ratio)))
+        existing = execute_query(
+            """
+            SELECT id
+            FROM task_time_estimates
+            WHERE category = %s
+            LIMIT 1
+            """,
+            (category,),
+            fetch=True,
+        ) or []
+        if existing:
+            execute_query(
+                """
+                UPDATE task_time_estimates
+                SET actual_minutes_avg = %s,
+                    estimated_minutes = %s,
+                    sample_count = sample_count + %s,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE category = %s
+                """,
+                (avg_actual, buffered_estimate, sample_count, category),
+            )
+            updated_categories += 1
+        else:
+            execute_query(
+                """
+                INSERT INTO task_time_estimates (
+                    task_pattern,
+                    category,
+                    estimated_minutes,
+                    actual_minutes_avg,
+                    sample_count,
+                    last_updated
+                )
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (task_pattern) DO NOTHING
+                """,
+                (f"Auto-learned {category}", category, buffered_estimate, avg_actual, sample_count),
+            )
+            inserted_categories += 1
+
+    _load_task_time_estimates(force_refresh=True)
+    return {
+        "success": True,
+        "days_window": safe_days,
+        "rows_considered": len(rows),
+        "updated_categories": updated_categories,
+        "inserted_categories": inserted_categories,
+    }
+
+
 def _cli() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate daily plan for Margaret.")
     parser.add_argument("--force", action="store_true", help="Force regenerate today's plan.")
     parser.add_argument("--dry-run", action="store_true", help="Generate plan without sending SMS/email.")
+    parser.add_argument(
+        "--update-estimates",
+        action="store_true",
+        help="Refresh learned task time estimates from recent completion data.",
+    )
+    parser.add_argument(
+        "--estimate-days",
+        type=int,
+        default=30,
+        help="Lookback window (days) for estimate learning updates.",
+    )
+    parser.add_argument(
+        "--estimates-only",
+        action="store_true",
+        help="Only refresh estimates and skip daily plan generation.",
+    )
     parser.add_argument(
         "--skip-calendar",
         action="store_true",
@@ -1792,7 +2145,16 @@ def _cli() -> argparse.Namespace:
 
 def main() -> None:
     args = _cli()
-    log(f"Starting daily plan generation (force={args.force}, dry_run={args.dry_run}, skip_calendar={args.skip_calendar})")
+    log(
+        "Starting daily plan generation "
+        f"(force={args.force}, dry_run={args.dry_run}, skip_calendar={args.skip_calendar}, "
+        f"update_estimates={args.update_estimates}, estimates_only={args.estimates_only})"
+    )
+    if args.update_estimates:
+        learning_summary = update_task_estimates(days_window=args.estimate_days)
+        log(f"Estimate learning summary: {json.dumps(learning_summary, default=str)}")
+        if args.estimates_only:
+            return
     result = generate_daily_plan(
         force=args.force,
         send_messages=not args.dry_run,

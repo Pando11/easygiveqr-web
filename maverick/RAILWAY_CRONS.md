@@ -75,6 +75,13 @@ Use these schedules and commands in Railway Cron.
   - SMS/email daily plan delivery
   - Google Calendar block sync
 
+## Daily Plan Estimate Learning (weekly)
+- Schedule: `0 6 * * 1`
+- Command: `cd maverick && python3 automation/generate_daily_plan.py --update-estimates --estimates-only --estimate-days 30`
+- Includes:
+  - refreshes `task_time_estimates` from `task_completion_times`
+  - applies 10% buffer to learned averages for planning realism
+
 ## Intelligent Morning Briefing
 - Schedule: `30 7 * * *`
 - Command: `cd maverick && python3 automation/morning_briefing.py --mode morning`
