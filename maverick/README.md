@@ -421,6 +421,33 @@ Highlights:
 - supports custom create/edit workflows
 - smart suggestions identify repeated phrases from communication history
 
+## Scenario-Based Script Library
+
+Maverick now includes a scenario script assistant for common transaction communications.
+
+- Suggest scripts route (TC): `POST /tc/transaction/<transaction_id>/suggest-scripts`
+- Track usage route (TC): `POST /tc/transaction/<transaction_id>/track-script-usage`
+- Record outcome route (TC): `POST /tc/script-usage/<usage_id>/outcome`
+- UI entry: `📝 Use Script` button on transaction detail page
+
+Data model:
+- `communication_scenarios`
+  - scenario library rows (`scenario_name`, `category`, `trigger_conditions`, `scripts`, `usage_count`, `success_rate`)
+- `communication_script_usage`
+  - tracks scenario/approach usage, recipient role, outcome success, and resolution time
+
+Seed behavior:
+- On first use, Maverick seeds 50 common scenarios (negotiation/problem/coordination/update), including:
+  - appraisal gap approaches
+  - inspection negotiation approaches
+  - extension/lender/title/termination/rush-closing cases
+
+What it does:
+- detects matching scenarios from situation type + payload details
+- personalizes scripts with transaction variables (buyer/seller/agent/property/price/timeline)
+- lets Margaret copy and load selected script text directly into communication logging form
+- tracks effectiveness and surfaces top-performing approach summary
+
 ## Self-Service Party Portals (Buyer / Seller / Agent)
 
 Maverick now supports secure role-based party portals with tokenized links and analytics.

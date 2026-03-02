@@ -191,6 +191,36 @@ CREATE TABLE communications (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE communication_scenarios (
+    id SERIAL PRIMARY KEY,
+    scenario_name VARCHAR(200) NOT NULL,
+    category VARCHAR(50) NOT NULL,
+    trigger_conditions JSONB DEFAULT '{}'::jsonb,
+    scripts JSONB DEFAULT '[]'::jsonb,
+    usage_count INT DEFAULT 0,
+    success_rate FLOAT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE communication_script_usage (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    scenario_id INT REFERENCES communication_scenarios(id) ON DELETE SET NULL,
+    scenario_name VARCHAR(200),
+    situation_type VARCHAR(80),
+    approach_name VARCHAR(200),
+    recipient_role VARCHAR(40),
+    message_text TEXT,
+    usage_context JSONB DEFAULT '{}'::jsonb,
+    used_by VARCHAR(100),
+    used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    outcome_success BOOLEAN,
+    resolution_minutes INT,
+    resolved_at TIMESTAMP,
+    outcome_notes TEXT
+);
+
 CREATE TABLE agent_review_requests (
     id SERIAL PRIMARY KEY,
     transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
@@ -1254,6 +1284,10 @@ CREATE INDEX idx_tasks_due_date ON tasks(due_date);
 CREATE INDEX idx_documents_transaction ON documents(transaction_id);
 CREATE INDEX idx_documents_type ON documents(document_type);
 CREATE INDEX idx_communications_transaction ON communications(transaction_id);
+CREATE UNIQUE INDEX idx_communication_scenarios_name ON communication_scenarios(scenario_name);
+CREATE INDEX idx_communication_scenarios_category ON communication_scenarios(category, success_rate DESC, usage_count DESC);
+CREATE INDEX idx_communication_script_usage_scenario ON communication_script_usage(scenario_id, used_at DESC);
+CREATE INDEX idx_communication_script_usage_transaction ON communication_script_usage(transaction_id, used_at DESC);
 CREATE INDEX idx_doc_classification_corrections_doc ON document_classification_corrections(document_id, created_at DESC);
 CREATE INDEX idx_doc_classification_corrections_type_map ON document_classification_corrections(original_document_type, corrected_document_type, created_at DESC);
 CREATE INDEX idx_doc_classification_corrections_txn ON document_classification_corrections(transaction_id, created_at DESC);

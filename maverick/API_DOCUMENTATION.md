@@ -515,6 +515,66 @@ Form `action` options:
   - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - Includes seed set of 30 common templates on first-use table initialization.
 
+## Scenario-Based Script Library
+
+### Suggest scripts endpoint (TC)
+- `POST /tc/transaction/<transaction_id>/suggest-scripts`
+- Auth: TC login required
+- JSON body:
+  - `situation_type` (required; e.g. `appraisal_gap`, `inspection_negotiate`, `lender_delay`)
+  - optional situation context fields:
+    - `appraisal_value`
+    - `inspection_items_count`
+    - `estimated_cost`
+    - `requested_credit`
+    - `extension_days`
+- Response:
+  - `scenarios[]`
+    - `scenario_id`
+    - `scenario_name`
+    - `category`
+    - `usage_count`
+    - `success_rate`
+    - `approaches[]` with personalized `messages`
+  - `stats`
+    - `best_line` (top-performing approach summary)
+    - `scenario_stats[]`
+    - `approach_stats[]`
+
+### Track usage endpoint (TC)
+- `POST /tc/transaction/<transaction_id>/track-script-usage`
+- Auth: TC login required
+- JSON body:
+  - `scenario_id` (required)
+  - `approach_name` (required)
+  - `recipient_role` (optional)
+  - `message_text` (optional)
+  - `situation_type` (optional)
+  - `context` (optional object)
+- Response:
+  - `usage_id`
+  - `used_at`
+
+### Record script outcome endpoint (TC)
+- `POST /tc/script-usage/<usage_id>/outcome`
+- Auth: TC login required
+- JSON body:
+  - `outcome_success` (required boolean)
+  - `resolution_minutes` (optional int)
+  - `outcome_notes` (optional text)
+- Behavior:
+  - updates usage row with resolution outcome
+  - recalculates scenario success rate
+
+### Data model
+- `communication_scenarios`
+  - library scenarios with trigger JSON and script approaches JSON
+- `communication_script_usage`
+  - scenario/approach usage telemetry + success/time-to-resolution outcomes
+
+### Seed behavior
+- `ensure_communication_scenarios_table()` seeds 50 default scenarios on first use.
+
 ## Self-Service Party Portals
 
 ### Generate portal links (TC)

@@ -958,6 +958,7 @@
             <form method="post" action="{{ url_for('generate_party_portals', transaction_id=transaction.id) }}">
                 <button type="submit" class="btn btn-secondary action-btn">Generate Party Portals</button>
             </form>
+            <button type="button" class="btn btn-secondary action-btn" id="openScriptLibraryBtn">📝 Use Script</button>
             <form method="post" action="{{ url_for('generate_client_portal_link', transaction_id=transaction.id) }}">
                 <button type="submit" class="btn btn-secondary action-btn">Generate Client Portal Link</button>
             </form>
@@ -1010,6 +1011,11 @@
                 </p>
                 <p><small>Views: {{ party_portal_analytics.views }} · Docs Downloaded: {{ party_portal_analytics.document_downloads }} · Text Questions: {{ party_portal_analytics.text_questions_after_portal }}</small></p>
             </div>
+            {% if script_effectiveness.best_line %}
+            <div class="portal-links-box">
+                <p><strong>Script Effectiveness:</strong> {{ script_effectiveness.best_line }}</p>
+            </div>
+            {% endif %}
             <form method="post" action="{{ url_for('mark_transaction_complete', transaction_id=transaction.id) }}">
                 <button type="submit" class="btn action-btn">Mark Complete</button>
             </form>
@@ -1019,6 +1025,31 @@
         </article>
     </div>
 </section>
+
+<div class="cascade-modal-backdrop" id="scriptModalBackdrop">
+    <div class="cascade-modal script-modal" role="dialog" aria-modal="true" aria-labelledby="scriptModalTitle">
+        <h3 id="scriptModalTitle">Scenario Script Library</h3>
+        <p class="hint-text">Choose a situation to load personalized script approaches.</p>
+        <label for="situationType"><strong>Select Situation</strong></label>
+        <select id="situationType">
+            <option value="">Choose situation...</option>
+            <option value="appraisal_gap">Appraisal Gap</option>
+            <option value="inspection_negotiate">Inspection Negotiations</option>
+            <option value="seller_wont_repair">Seller Won't Repair</option>
+            <option value="buyer_cold_feet">Buyer Cold Feet</option>
+            <option value="lender_delay">Lender Delays</option>
+            <option value="title_issue">Title Issues</option>
+            <option value="extension_request">Extension Request</option>
+            <option value="termination">Termination Notice</option>
+            <option value="rush_closing">Rush Closing</option>
+        </select>
+        <p class="hint-text" id="scriptStatsLine">{{ script_effectiveness.best_line or '' }}</p>
+        <div id="scriptsContainer" class="script-container"></div>
+        <div class="actions-inline">
+            <button type="button" class="btn btn-secondary" id="closeScriptModalBtn">Close</button>
+        </div>
+    </div>
+</div>
 
 <div class="cascade-modal-backdrop" id="cascadeModalBackdrop">
     <div class="cascade-modal" role="dialog" aria-modal="true" aria-labelledby="cascadeModalTitle">
@@ -1847,6 +1878,49 @@
     font-weight: 600;
 }
 
+.script-modal {
+    max-width: 900px;
+}
+
+.script-container {
+    max-height: 52vh;
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px;
+    background: #f8fafc;
+    margin-top: 8px;
+}
+
+.script-scenario-card {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.script-approach {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 8px;
+    background: #f8fafc;
+}
+
+.script-message {
+    border: 1px solid #dbeafe;
+    border-radius: 8px;
+    padding: 8px;
+    margin-top: 8px;
+    background: #ffffff;
+}
+
+.script-message p {
+    margin: 6px 0 8px;
+    white-space: pre-wrap;
+}
+
 .btn-small {
     padding: 8px 12px;
     font-size: 13px;
@@ -1885,6 +1959,223 @@ const effectiveInput = document.getElementById("effective_date");
 const earnestInput = document.getElementById("earnest_due_date");
 const optionEndInput = document.getElementById("option_period_end_date");
 const financingInput = document.getElementById("financing_approval_date");
+const openScriptLibraryBtn = document.getElementById("openScriptLibraryBtn");
+const scriptModalBackdrop = document.getElementById("scriptModalBackdrop");
+const closeScriptModalBtn = document.getElementById("closeScriptModalBtn");
+const situationTypeSelect = document.getElementById("situationType");
+const scriptsContainer = document.getElementById("scriptsContainer");
+const scriptStatsLine = document.getElementById("scriptStatsLine");
+let lastScriptUsageId = null;
+
+function openScriptLibrary() {
+    if (!scriptModalBackdrop) return;
+    scriptModalBackdrop.classList.add("open");
+}
+
+function closeScriptLibrary() {
+    if (!scriptModalBackdrop) return;
+    scriptModalBackdrop.classList.remove("open");
+}
+
+function recipientKeyToRole(recipientKey) {
+    const normalized = String(recipientKey || "").replace("_message", "").trim().toLowerCase();
+    if (normalized === "title") return "title_company";
+    if (normalized === "lender") return "lender";
+    if (normalized === "buyer") return "buyer";
+    if (normalized === "seller") return "seller";
+    return "agent";
+}
+
+function copyTextToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+    }
+    const temp = document.createElement("textarea");
+    temp.value = text;
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand("copy");
+    document.body.removeChild(temp);
+    return Promise.resolve();
+}
+
+function prefillCommunicationForm(recipientRole, messageText) {
+    const form = document.querySelector('form[action*="/log-communication"]');
+    if (!form) {
+        return;
+    }
+    const partySelect = form.querySelector('select[name="contact_party"]');
+    const summaryField = form.querySelector('textarea[name="summary"]');
+    if (partySelect) {
+        const option = Array.from(partySelect.options).find((opt) => opt.value === recipientRole);
+        if (option) {
+            partySelect.value = recipientRole;
+        }
+    }
+    if (summaryField) {
+        summaryField.value = messageText;
+    }
+    const detailsParent = form.closest("details");
+    if (detailsParent) {
+        detailsParent.open = true;
+    }
+    form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function trackScriptUsage(scenarioId, approachName, recipientRole, messageText, situationType, context = {}) {
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/track-script-usage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                scenario_id: Number(scenarioId),
+                approach_name: approachName,
+                recipient_role: recipientRole,
+                message_text: messageText,
+                situation_type: situationType,
+                context,
+            }),
+        });
+        const payload = await response.json();
+        if (response.ok && payload.success) {
+            lastScriptUsageId = payload.usage_id || null;
+        }
+    } catch (error) {
+        console.error("Script usage tracking failed", error);
+    }
+}
+
+function displayScripts(scenarios, stats, situationType) {
+    if (!scriptsContainer) return;
+    scriptsContainer.innerHTML = "";
+    if (scriptStatsLine) {
+        scriptStatsLine.textContent = stats && stats.best_line ? stats.best_line : "";
+    }
+    if (!Array.isArray(scenarios) || !scenarios.length) {
+        const emptyBox = document.createElement("div");
+        emptyBox.className = "empty-box";
+        emptyBox.textContent = "No matching scripts found for this situation.";
+        scriptsContainer.appendChild(emptyBox);
+        return;
+    }
+
+    scenarios.forEach((scenario) => {
+        const scenarioDiv = document.createElement("div");
+        scenarioDiv.className = "script-scenario-card";
+
+        const title = document.createElement("h3");
+        title.textContent = `${scenario.scenario_name} (${(scenario.category || "general").replace("_", " ")})`;
+        scenarioDiv.appendChild(title);
+
+        const stat = document.createElement("p");
+        const successRatePct = Number(scenario.success_rate || 0) * 100;
+        stat.className = "hint-text";
+        stat.textContent = `Usage: ${Number(scenario.usage_count || 0)} · Success: ${successRatePct.toFixed(1)}%`;
+        scenarioDiv.appendChild(stat);
+
+        (scenario.approaches || []).forEach((approach) => {
+            const approachDiv = document.createElement("div");
+            approachDiv.className = "script-approach";
+
+            const approachTitle = document.createElement("h4");
+            approachTitle.textContent = approach.approach || "Approach";
+            approachDiv.appendChild(approachTitle);
+
+            const messages = approach.messages || {};
+            Object.entries(messages).forEach(([recipientKey, messageText]) => {
+                const messageDiv = document.createElement("div");
+                messageDiv.className = "script-message";
+
+                const label = document.createElement("strong");
+                label.textContent = `To ${recipientKey.replace("_message", "").replace("_", " ")}:`;
+                messageDiv.appendChild(label);
+
+                const messageP = document.createElement("p");
+                messageP.textContent = messageText;
+                messageDiv.appendChild(messageP);
+
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "btn btn-small btn-secondary";
+                button.textContent = "Use This Script";
+                button.addEventListener("click", async () => {
+                    const recipientRole = recipientKeyToRole(recipientKey);
+                    await copyTextToClipboard(messageText);
+                    prefillCommunicationForm(recipientRole, messageText);
+                    await trackScriptUsage(
+                        scenario.scenario_id,
+                        approach.approach || "Approach",
+                        recipientRole,
+                        messageText,
+                        situationType,
+                        { scenario_name: scenario.scenario_name }
+                    );
+                    alert("Script copied and loaded into communication form.");
+                    closeScriptLibrary();
+                });
+                messageDiv.appendChild(button);
+
+                approachDiv.appendChild(messageDiv);
+            });
+            scenarioDiv.appendChild(approachDiv);
+        });
+
+        scriptsContainer.appendChild(scenarioDiv);
+    });
+}
+
+async function loadScriptsForSituation() {
+    if (!situationTypeSelect || !situationTypeSelect.value) {
+        return;
+    }
+    const situationType = situationTypeSelect.value;
+    const payload = { situation_type: situationType };
+
+    if (situationType === "appraisal_gap") {
+        const value = window.prompt("Appraised value? (numbers only)");
+        if (!value) return;
+        payload.appraisal_value = Number(String(value).replace(/[^\d.]/g, "")) || 0;
+    } else if (situationType === "inspection_negotiate") {
+        const count = window.prompt("Number of inspection items?");
+        if (!count) return;
+        payload.inspection_items_count = Number(String(count).replace(/[^\d]/g, "")) || 0;
+        const cost = window.prompt("Estimated repair cost?");
+        if (cost) {
+            payload.estimated_cost = Number(String(cost).replace(/[^\d.]/g, "")) || 0;
+        }
+        const credit = window.prompt("Requested credit amount?");
+        if (credit) {
+            payload.requested_credit = Number(String(credit).replace(/[^\d.]/g, "")) || 0;
+        }
+    } else if (situationType === "extension_request") {
+        const extensionDays = window.prompt("How many extension days are needed?");
+        if (extensionDays) {
+            payload.extension_days = Number(String(extensionDays).replace(/[^\d]/g, "")) || 0;
+        }
+    }
+
+    if (scriptsContainer) {
+        scriptsContainer.innerHTML = "<p class='hint-text'>Loading scripts...</p>";
+    }
+
+    try {
+        const response = await fetch(`/tc/transaction/{{ transaction.id }}/suggest-scripts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+            throw new Error(result.error || "Unable to load scripts");
+        }
+        displayScripts(result.scenarios || [], result.stats || {}, situationType);
+    } catch (error) {
+        if (scriptsContainer) {
+            scriptsContainer.innerHTML = "";
+        }
+        alert(`Could not load scripts: ${error.message}`);
+    }
+}
 
 function addDays(baseDate, days) {
     const dateValue = new Date(baseDate + "T00:00:00");
@@ -2176,6 +2467,23 @@ if (cascadeFieldSelect && previewCascadeBtn) {
             undoCascadeChange(button.dataset.cascadeLogId);
         });
     });
+}
+
+if (openScriptLibraryBtn) {
+    openScriptLibraryBtn.addEventListener("click", openScriptLibrary);
+}
+if (closeScriptModalBtn) {
+    closeScriptModalBtn.addEventListener("click", closeScriptLibrary);
+}
+if (scriptModalBackdrop) {
+    scriptModalBackdrop.addEventListener("click", (event) => {
+        if (event.target === scriptModalBackdrop) {
+            closeScriptLibrary();
+        }
+    });
+}
+if (situationTypeSelect) {
+    situationTypeSelect.addEventListener("change", loadScriptsForSituation);
 }
 </script>
 {% endblock %}

@@ -183,6 +183,7 @@ from utils.inbound_email import (
     parse_transaction_alias,
     split_recipient_addresses,
 )
+from utils.scenario_library import default_communication_scenarios
 from utils.s3 import download_file, get_presigned_url, log_document_access, upload_contract, upload_document, upload_local_file
 from utils.sms import send_payment_link, send_reminder, send_sms, send_timeline_approved
 from utils.timeline_generator import (
@@ -445,6 +446,7 @@ MESSAGE_TEMPLATE_SEEDS = [
     ),
 ]
 MESSAGE_TEMPLATE_SEEDS_APPLIED = False
+COMMUNICATION_SCENARIO_SEEDS_APPLIED = False
 
 CLIENT_TYPES = {"buyer", "seller"}
 PARTY_PORTAL_TYPES = {"buyer", "seller", "agent"}
@@ -4084,6 +4086,394 @@ def send_walkthrough_portal_reminders(limit=50):
         )
         sent += int(result.get("sent_sms") or 0) + int(result.get("sent_email") or 0)
     return sent
+
+
+def ensure_communication_scenarios_table():
+    """Ensure scenario script library tables exist and default seeds are loaded."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS communication_scenarios (
+            id SERIAL PRIMARY KEY,
+            scenario_name VARCHAR(200) NOT NULL,
+            category VARCHAR(50) NOT NULL,
+            trigger_conditions JSONB DEFAULT '{}'::jsonb,
+            scripts JSONB DEFAULT '[]'::jsonb,
+            usage_count INT DEFAULT 0,
+            success_rate FLOAT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_communication_scenarios_name
+        ON communication_scenarios(scenario_name)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_communication_scenarios_category
+        ON communication_scenarios(category, success_rate DESC, usage_count DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS communication_script_usage (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            scenario_id INT REFERENCES communication_scenarios(id) ON DELETE SET NULL,
+            scenario_name VARCHAR(200),
+            situation_type VARCHAR(80),
+            approach_name VARCHAR(200),
+            recipient_role VARCHAR(40),
+            message_text TEXT,
+            usage_context JSONB DEFAULT '{}'::jsonb,
+            used_by VARCHAR(100),
+            used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            outcome_success BOOLEAN,
+            resolution_minutes INT,
+            resolved_at TIMESTAMP,
+            outcome_notes TEXT
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_communication_script_usage_scenario
+        ON communication_script_usage(scenario_id, used_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_communication_script_usage_transaction
+        ON communication_script_usage(transaction_id, used_at DESC)
+        """
+    )
+    seed_communication_scenarios()
+
+
+def seed_communication_scenarios():
+    """Insert/update default communication scenarios (50 common situations)."""
+    global COMMUNICATION_SCENARIO_SEEDS_APPLIED
+    if COMMUNICATION_SCENARIO_SEEDS_APPLIED:
+        return
+    scenarios = default_communication_scenarios()
+    for scenario in scenarios:
+        execute_query(
+            """
+            INSERT INTO communication_scenarios (
+                scenario_name, category, trigger_conditions, scripts, usage_count, success_rate, created_at, updated_at
+            )
+            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (scenario_name)
+            DO UPDATE SET
+                category = EXCLUDED.category,
+                trigger_conditions = EXCLUDED.trigger_conditions,
+                scripts = EXCLUDED.scripts,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                (scenario.get("scenario_name") or "").strip()[:200],
+                (scenario.get("category") or "update").strip()[:50],
+                json.dumps(scenario.get("trigger_conditions") or {}, default=str),
+                json.dumps(scenario.get("scripts") or [], default=str),
+                int(scenario.get("usage_count") or 0),
+                float(scenario.get("success_rate") or 0.5),
+            ),
+        )
+    COMMUNICATION_SCENARIO_SEEDS_APPLIED = True
+
+
+def _parse_currency_number(raw_value, default_value=0.0):
+    if raw_value in (None, ""):
+        return float(default_value)
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+    cleaned = re.sub(r"[^\d.\-]", "", str(raw_value))
+    try:
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return float(default_value)
+
+
+def _parse_int_number(raw_value, default_value=0):
+    if raw_value in (None, ""):
+        return int(default_value)
+    try:
+        return int(float(str(raw_value).replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return int(default_value)
+
+
+def _parse_threshold_number(rule_text):
+    text = (rule_text or "").strip()
+    match = re.search(r"(-?\d+(?:\.\d+)?)", text)
+    return float(match.group(1)) if match else None
+
+
+def _scenario_trigger_matches(trigger_conditions, transaction, situation_type, situation_data):
+    trigger_conditions = parse_json_field(trigger_conditions, {})
+    if not isinstance(trigger_conditions, dict):
+        return False, 0.0
+
+    desired_type = (trigger_conditions.get("situation_type") or "").strip().lower()
+    provided_type = (situation_type or "").strip().lower()
+    if desired_type and provided_type and desired_type != provided_type:
+        return False, 0.0
+
+    score = 20.0
+    if desired_type and desired_type == provided_type:
+        score += 45.0
+
+    trigger_expression = (trigger_conditions.get("trigger") or "").strip().lower()
+    contract_price = _parse_currency_number(transaction.get("contract_price"), 0.0)
+    appraisal_value = _parse_currency_number(situation_data.get("appraisal_value"), 0.0)
+    inspection_count = _parse_int_number(situation_data.get("inspection_items_count"), 0)
+    estimated_cost = _parse_currency_number(situation_data.get("estimated_cost"), 0.0)
+
+    if trigger_expression == "appraisal_value < contract_price":
+        if contract_price <= 0 or appraisal_value <= 0 or appraisal_value >= contract_price:
+            return False, 0.0
+        gap = contract_price - appraisal_value
+        threshold_text = (trigger_conditions.get("difference") or "").strip()
+        threshold_value = _parse_threshold_number(threshold_text)
+        if threshold_value is not None and gap < threshold_value:
+            return False, 0.0
+        score += 35.0
+    elif trigger_expression == "inspection_items_count > 15":
+        threshold_value = _parse_threshold_number(trigger_expression) or 15
+        if inspection_count <= threshold_value:
+            return False, 0.0
+        score += 35.0
+    elif trigger_expression == "manual_or_ai_detection":
+        score += 18.0
+    elif trigger_expression:
+        # Unknown trigger expression: allow manual selection and keep moderate rank.
+        score += 8.0
+
+    if estimated_cost >= 10000:
+        score += 6.0
+    return True, score
+
+
+def _format_currency_short(amount):
+    return f"${_parse_currency_number(amount, 0):,.0f}"
+
+
+def _build_script_replacements(transaction, situation_data):
+    contract_price = _parse_currency_number(transaction.get("contract_price"), 0.0)
+    appraisal_value = _parse_currency_number(situation_data.get("appraisal_value"), 0.0)
+    gap_amount = max(0.0, contract_price - appraisal_value) if appraisal_value > 0 else 0.0
+    half_gap = gap_amount / 2.0
+    down_payment = _parse_currency_number(situation_data.get("down_payment"), 0.0)
+    inspection_count = _parse_int_number(situation_data.get("inspection_items_count"), 0)
+    estimated_repair_cost = _parse_currency_number(situation_data.get("estimated_cost"), 5000.0)
+    requested_credit = _parse_currency_number(situation_data.get("requested_credit"), 3000.0)
+    extension_days = _parse_int_number(situation_data.get("extension_days"), 0)
+
+    closing_date = transaction.get("closing_date")
+    closing_label = closing_date.strftime("%B %d") if closing_date else "TBD"
+    extension_date = (closing_date + timedelta(days=extension_days)).strftime("%B %d") if closing_date and extension_days else "TBD"
+
+    replacements = {
+        "BUYER_NAME": transaction.get("buyer_name") or "Buyer",
+        "SELLER_NAME": transaction.get("seller_name") or "Seller",
+        "AGENT_NAME": transaction.get("agent_name") or "Agent",
+        "PROPERTY_ADDRESS": transaction.get("property_address") or "the property",
+        "CONTRACT_PRICE": _format_currency_short(contract_price),
+        "CLOSING_DATE": closing_label,
+        "PROPERTY_AGE": str(situation_data.get("property_age") or "N/A"),
+        "APPRAISAL_VALUE": _format_currency_short(appraisal_value) if appraisal_value > 0 else "____",
+        "GAP_AMOUNT": _format_currency_short(gap_amount) if gap_amount > 0 else "____",
+        "HALF_GAP": _format_currency_short(half_gap) if half_gap > 0 else "____",
+        "NEW_DOWN_PAYMENT": _format_currency_short(down_payment + gap_amount),
+        "INSPECTION_COUNT": str(inspection_count) if inspection_count > 0 else "____",
+        "ESTIMATED_REPAIR_COST": _format_currency_short(estimated_repair_cost),
+        "CREDIT_AMOUNT": _format_currency_short(requested_credit),
+        "EXTENSION_DAYS": str(extension_days) if extension_days > 0 else "____",
+        "EXTENSION_DATE": extension_date,
+        "LENDER_NAME": transaction.get("lender_name") or "lender",
+        "TITLE_COMPANY": transaction.get("title_company") or "title company",
+        "MARGARET_PHONE": normalize_phone(os.getenv("MARGARET_PHONE") or ""),
+        "MARGARET_EMAIL": normalize_email(os.getenv("MARGARET_EMAIL") or ""),
+    }
+    return replacements
+
+
+def personalize_scripts(scripts, transaction, situation_data):
+    """
+    Replace {{VARIABLES}} with actual transaction/situation values.
+    """
+    replacements = _build_script_replacements(transaction, situation_data or {})
+    personalized_approaches = []
+    for script in scripts or []:
+        if not isinstance(script, dict):
+            continue
+        approach_name = (script.get("approach") or "Recommended Approach").strip()
+        personalized = {"approach": approach_name, "messages": {}, "unfilled_vars": []}
+        unfilled_vars = set()
+        for key, template in script.items():
+            if key == "approach":
+                continue
+            raw_text = str(template or "")
+            rendered_text = raw_text
+            for var_name, value in replacements.items():
+                rendered_text = rendered_text.replace(f"{{{{{var_name}}}}}", str(value))
+            leftovers = re.findall(r"\{\{([A-Z0-9_]+)\}\}", rendered_text)
+            for leftover in leftovers:
+                unfilled_vars.add(leftover)
+            rendered_text = re.sub(r"\{\{[A-Z0-9_]+\}\}", "____", rendered_text)
+            personalized["messages"][key] = rendered_text
+        personalized["unfilled_vars"] = sorted(unfilled_vars)
+        personalized_approaches.append(personalized)
+    return personalized_approaches
+
+
+def find_matching_scenarios(transaction, situation_type, situation_data, limit=5):
+    """Return ranked scenarios for this transaction + situation."""
+    ensure_communication_scenarios_table()
+    rows = execute_query(
+        """
+        SELECT id, scenario_name, category, trigger_conditions, scripts, usage_count, success_rate
+        FROM communication_scenarios
+        ORDER BY COALESCE(success_rate, 0) DESC, usage_count DESC, id ASC
+        """,
+        fetch=True,
+    ) or []
+    ranked = []
+    for row in rows:
+        trigger_conditions = parse_json_field(row.get("trigger_conditions"), {})
+        matched, score = _scenario_trigger_matches(
+            trigger_conditions=trigger_conditions,
+            transaction=transaction,
+            situation_type=situation_type,
+            situation_data=situation_data or {},
+        )
+        if not matched:
+            continue
+        success_rate = float(row.get("success_rate") or 0.0)
+        usage_count = int(row.get("usage_count") or 0)
+        total_score = score + (success_rate * 35.0) + min(usage_count, 200) * 0.2
+        row["trigger_conditions"] = trigger_conditions
+        row["scripts"] = parse_json_field(row.get("scripts"), [])
+        row["match_score"] = round(total_score, 3)
+        ranked.append(row)
+    ranked.sort(key=lambda item: item.get("match_score", 0), reverse=True)
+    return ranked[: max(1, min(int(limit or 5), 12))]
+
+
+def fetch_script_effectiveness_stats(situation_type="", limit=8):
+    """Build scenario and approach effectiveness stats."""
+    ensure_communication_scenarios_table()
+    situation_type = (situation_type or "").strip().lower()
+    params = []
+    where_clause = ""
+    if situation_type:
+        where_clause = "WHERE COALESCE(trigger_conditions->>'situation_type', '') = %s"
+        params = [situation_type]
+    scenario_rows = execute_query(
+        f"""
+        SELECT id, scenario_name, category, usage_count, COALESCE(success_rate, 0) AS success_rate, scripts
+        FROM communication_scenarios
+        {where_clause}
+        ORDER BY COALESCE(success_rate, 0) DESC, usage_count DESC, id ASC
+        LIMIT %s
+        """,
+        tuple(params + [max(1, min(int(limit or 8), 20))]),
+        fetch=True,
+    ) or []
+
+    approach_rows = execute_query(
+        """
+        SELECT
+            cs.id AS scenario_id,
+            cs.scenario_name,
+            su.approach_name,
+            COUNT(*) AS total_uses,
+            COUNT(*) FILTER (WHERE su.outcome_success = TRUE) AS success_uses
+        FROM communication_script_usage su
+        JOIN communication_scenarios cs ON cs.id = su.scenario_id
+        WHERE su.approach_name IS NOT NULL
+          AND (%s = '' OR COALESCE(cs.trigger_conditions->>'situation_type', '') = %s)
+        GROUP BY cs.id, cs.scenario_name, su.approach_name
+        HAVING COUNT(*) >= 1
+        ORDER BY COUNT(*) DESC, success_uses DESC
+        LIMIT 20
+        """,
+        (situation_type, situation_type),
+        fetch=True,
+    ) or []
+
+    best_line = ""
+    if approach_rows:
+        best_row = None
+        best_rate = -1.0
+        for row in approach_rows:
+            total_uses = int(row.get("total_uses") or 0)
+            success_uses = int(row.get("success_uses") or 0)
+            rate = (success_uses / total_uses) if total_uses > 0 else 0.0
+            row["success_rate"] = round(rate * 100.0, 1)
+            if total_uses >= 2 and rate > best_rate:
+                best_rate = rate
+                best_row = row
+        if best_row:
+            best_line = (
+                f"{best_row['approach_name']} approach has "
+                f"{best_row['success_rate']:.1f}% success rate for {best_row['scenario_name']}"
+            )
+    if not best_line and scenario_rows:
+        top_scenario = scenario_rows[0]
+        top_scripts = parse_json_field(top_scenario.get("scripts"), [])
+        top_approach = ""
+        if isinstance(top_scripts, list) and top_scripts and isinstance(top_scripts[0], dict):
+            top_approach = (top_scripts[0].get("approach") or "").strip()
+        if top_approach:
+            best_line = (
+                f"{top_approach} approach has "
+                f"{float(top_scenario.get('success_rate') or 0) * 100:.1f}% success rate for "
+                f"{top_scenario.get('scenario_name')}"
+            )
+    for row in scenario_rows:
+        row.pop("scripts", None)
+
+    return {
+        "best_line": best_line,
+        "scenario_stats": scenario_rows,
+        "approach_stats": approach_rows,
+    }
+
+
+def refresh_scenario_success_rate(scenario_id):
+    """Recompute scenario-level success rate from usage outcomes."""
+    rows = execute_query(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE outcome_success IS NOT NULL) AS resolved_count,
+            COUNT(*) FILTER (WHERE outcome_success = TRUE) AS success_count
+        FROM communication_script_usage
+        WHERE scenario_id = %s
+        """,
+        (int(scenario_id),),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    resolved_count = int(rows[0].get("resolved_count") or 0)
+    success_count = int(rows[0].get("success_count") or 0)
+    if resolved_count <= 0:
+        return None
+    success_rate = round(success_count / resolved_count, 4)
+    execute_query(
+        """
+        UPDATE communication_scenarios
+        SET success_rate = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (success_rate, int(scenario_id)),
+    )
+    return success_rate
 
 
 def ensure_timeline_packets_table():
@@ -15114,6 +15504,7 @@ def tc_transaction(transaction_id):
         }
     party_portal_links = fetch_party_portal_link_map(transaction_id)
     party_portal_analytics = fetch_party_portal_analytics(transaction_id)
+    script_effectiveness = fetch_script_effectiveness_stats(limit=6)
 
     transaction["has_contract_pdf"] = bool(transaction.get("contract_s3_key"))
     transaction["upload_time_ago"] = format_time_ago(transaction.get("created_at"))
@@ -15508,6 +15899,7 @@ def tc_transaction(transaction_id):
         date_cascade_history=date_cascade_history,
         document_classification_types=DOCUMENT_CLASSIFICATION_OVERRIDE_TYPES,
         common_qa_categories=COMMON_QA_CATEGORY_OPTIONS,
+        script_effectiveness=script_effectiveness,
     )
 
 
@@ -16981,6 +17373,180 @@ def tc_transaction_portal_analytics(transaction_id):
     if not transaction:
         return jsonify({"success": False, "error": "transaction_not_found"}), 404
     return jsonify({"success": True, "analytics": fetch_party_portal_analytics(transaction_id)})
+
+
+@app.route("/tc/transaction/<int:transaction_id>/suggest-scripts", methods=["POST"])
+@login_required
+def suggest_scripts(transaction_id):
+    """
+    Analyze situation details and suggest personalized communication scripts.
+    """
+    ensure_communication_scenarios_table()
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return jsonify({"success": False, "error": "transaction_not_found"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    situation_type = (payload.get("situation_type") or "").strip().lower()
+    if not situation_type:
+        return jsonify({"success": False, "error": "situation_type_required"}), 400
+
+    scenario_rows = find_matching_scenarios(
+        transaction=transaction,
+        situation_type=situation_type,
+        situation_data=payload,
+        limit=6,
+    )
+    personalized_scenarios = []
+    for scenario in scenario_rows:
+        scripts = parse_json_field(scenario.get("scripts"), [])
+        personalized_scenarios.append(
+            {
+                "scenario_id": scenario.get("id"),
+                "scenario_name": scenario.get("scenario_name"),
+                "category": scenario.get("category"),
+                "success_rate": float(scenario.get("success_rate") or 0.0),
+                "usage_count": int(scenario.get("usage_count") or 0),
+                "approaches": personalize_scripts(scripts, transaction, payload),
+            }
+        )
+    stats = fetch_script_effectiveness_stats(situation_type=situation_type, limit=6)
+    return jsonify({"success": True, "scenarios": personalized_scenarios, "stats": stats})
+
+
+@app.route("/tc/transaction/<int:transaction_id>/track-script-usage", methods=["POST"])
+@login_required
+def track_script_usage(transaction_id):
+    """Track which scenario + approach Margaret used."""
+    ensure_communication_scenarios_table()
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return jsonify({"success": False, "error": "transaction_not_found"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    scenario_id = parse_optional_int(payload.get("scenario_id"))
+    approach_name = (payload.get("approach_name") or "").strip()
+    recipient_role = (payload.get("recipient_role") or "").strip().lower()
+    message_text = (payload.get("message_text") or "").strip()
+    situation_type = (payload.get("situation_type") or "").strip().lower()
+    usage_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+
+    if not scenario_id or not approach_name:
+        return jsonify({"success": False, "error": "scenario_id_and_approach_required"}), 400
+    scenario_rows = execute_query(
+        """
+        SELECT id, scenario_name
+        FROM communication_scenarios
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (int(scenario_id),),
+        fetch=True,
+    ) or []
+    if not scenario_rows:
+        return jsonify({"success": False, "error": "scenario_not_found"}), 404
+    scenario_name = scenario_rows[0]["scenario_name"]
+
+    usage_rows = execute_query(
+        """
+        INSERT INTO communication_script_usage (
+            transaction_id, scenario_id, scenario_name, situation_type, approach_name, recipient_role,
+            message_text, usage_context, used_by, used_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, CURRENT_TIMESTAMP)
+        RETURNING id, used_at
+        """,
+        (
+            int(transaction_id),
+            int(scenario_id),
+            scenario_name,
+            situation_type or None,
+            approach_name[:200],
+            recipient_role[:40] or None,
+            message_text[:4000] or None,
+            json.dumps(usage_context, default=str),
+            session.get("tc_username", "margaret"),
+        ),
+        fetch=True,
+    ) or []
+    if not usage_rows:
+        return jsonify({"success": False, "error": "usage_not_saved"}), 500
+
+    execute_query(
+        """
+        UPDATE communication_scenarios
+        SET usage_count = COALESCE(usage_count, 0) + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (int(scenario_id),),
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', %s, %s, %s)
+        """,
+        (
+            int(transaction_id),
+            session.get("tc_username", "margaret"),
+            "Scenario script used",
+            f"scenario_id={scenario_id} approach={approach_name[:80]} recipient={recipient_role or 'n/a'}",
+        ),
+    )
+    return jsonify({"success": True, "usage_id": usage_rows[0]["id"], "used_at": json_date_value(usage_rows[0].get("used_at"))})
+
+
+@app.route("/tc/script-usage/<int:usage_id>/outcome", methods=["POST"])
+@login_required
+def update_script_usage_outcome(usage_id):
+    """Record script outcome to improve scenario success-rate tracking."""
+    ensure_communication_scenarios_table()
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    outcome_success = payload.get("outcome_success")
+    if outcome_success is None:
+        return jsonify({"success": False, "error": "outcome_success_required"}), 400
+    outcome_success = parse_bool_value(outcome_success, default=False)
+    resolution_minutes = parse_optional_int(payload.get("resolution_minutes"))
+    outcome_notes = (payload.get("outcome_notes") or "").strip()
+
+    usage_rows = execute_query(
+        """
+        UPDATE communication_script_usage
+        SET outcome_success = %s,
+            resolution_minutes = %s,
+            outcome_notes = %s,
+            resolved_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        RETURNING id, scenario_id, transaction_id, outcome_success, resolution_minutes, resolved_at
+        """,
+        (
+            outcome_success,
+            resolution_minutes,
+            outcome_notes[:1200] or None,
+            int(usage_id),
+        ),
+        fetch=True,
+    ) or []
+    if not usage_rows:
+        return jsonify({"success": False, "error": "usage_not_found"}), 404
+
+    usage_row = usage_rows[0]
+    scenario_id = usage_row.get("scenario_id")
+    updated_success_rate = refresh_scenario_success_rate(scenario_id) if scenario_id else None
+    return jsonify(
+        {
+            "success": True,
+            "usage_id": usage_row["id"],
+            "scenario_id": scenario_id,
+            "updated_success_rate": updated_success_rate,
+        }
+    )
 
 
 def _render_client_portal_page(access_token, active_tab):
