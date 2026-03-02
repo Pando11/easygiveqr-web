@@ -308,6 +308,7 @@ CRITICAL_COMPLETION_DOCUMENT_TYPES = {
 }
 
 POSITIVE_REVIEW_THRESHOLD = 4
+NEGATIVE_REVIEW_ALERT_THRESHOLD = 3
 
 MESSAGE_TEMPLATE_SEEDS = [
     (
@@ -21402,14 +21403,15 @@ def submit_agent_review(access_token):
         ),
     )
 
-    if int(rating) >= POSITIVE_REVIEW_THRESHOLD:
-        auto_post_positive_review(review_id)
-    else:
+    rating_value = int(rating)
+    if rating_value <= NEGATIVE_REVIEW_ALERT_THRESHOLD:
         alert_margaret_negative_review(
             transaction_id=review_request["transaction_id"],
-            rating=int(rating),
+            rating=rating_value,
             feedback=feedback,
         )
+    elif rating_value >= POSITIVE_REVIEW_THRESHOLD:
+        auto_post_positive_review(review_id)
 
     return render_template("review_form.html", review_request=review_request, submitted=True, error="")
 
