@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>How did we do?</title>
+</head>
+<body style="font-family: Arial, sans-serif; background:#f8fafc; color:#0f172a; margin:0; padding:20px;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:700px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:10px;">
+        <tr>
+            <td style="padding:22px 24px; border-bottom:1px solid #e2e8f0;">
+                <h2 style="margin:0; color:#1d4ed8;">How did we do?</h2>
+                <p style="margin:8px 0 0;">{{ property_address }}</p>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:22px 24px;">
+                <p style="margin:0 0 12px;">Hi {{ agent_name }},</p>
+                <p style="margin:0 0 16px;">
+                    Thanks again for partnering with Maverick TC. If we helped make this closing smoother,
+                    would you leave a quick Google review?
+                </p>
+
+                {% if google_review_link %}
+                <p style="margin:0 0 8px;">
+                    <a href="{{ google_review_link }}" target="_blank" rel="noopener" style="display:inline-block; background:#16a34a; color:#ffffff; text-decoration:none; padding:10px 14px; border-radius:6px;">
+                        Leave a Google review
+                    </a>
+                </p>
+                <p style="margin:0 0 18px; font-size:13px; color:#475569;">
+                    Direct link: <a href="{{ google_review_link }}" target="_blank" rel="noopener">{{ google_review_link }}</a>
+                </p>
+                {% endif %}
+
+                <p style="margin:0 0 12px;">
+                    Prefer to share direct feedback with us instead? You can rate us here:
+                </p>
+                <p style="margin:0 0 20px;">
+                    <a href="{{ review_link }}" target="_blank" rel="noopener" style="display:inline-block; background:#1d4ed8; color:#ffffff; text-decoration:none; padding:10px 14px; border-radius:6px;">
+                        Rate Maverick TC
+                    </a>
+                </p>
+
+                {% if include_referral_offer and referral_offer_link %}
+                <div style="background:#f8fafc; border:1px solid #dbeafe; border-radius:8px; padding:14px; margin:0 0 16px;">
+                    <p style="margin:0 0 10px;"><strong>Referral Offer</strong></p>
+                    <p style="margin:0 0 10px;">Refer another agent, they get $50 off, and you get a $50 credit.</p>
+                    <a href="{{ referral_offer_link }}" target="_blank" rel="noopener" style="display:inline-block; background:#0f766e; color:#ffffff; text-decoration:none; padding:10px 14px; border-radius:6px;">
+                        Share referral offer
+                    </a>
+                </div>
+                {% endif %}
+
+                <p style="margin:0;">Thank you for your partnership.</p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

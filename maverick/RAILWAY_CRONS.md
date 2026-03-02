@@ -98,6 +98,14 @@ Use these schedules and commands in Railway Cron.
   - rollover-to-tomorrow view
   - completion celebration highlights
 
+## Post-Close Review + Referral Follow-up
+- Schedule: `15 9 * * *`
+- Command: `cd maverick && python3 automation/review_referral_followup.py --days-after-close 7 --limit 200`
+- Includes:
+  - sends "How did we do?" email 7 days after closing
+  - includes direct Google review link + tracked referral offer link
+  - tracks internal review responses, star ratings, referral clicks, and conversions
+
 ## Database Backup
 - Schedule: `0 2 * * *`
 - Command: `bash backup_db.sh`

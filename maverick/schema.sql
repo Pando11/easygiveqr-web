@@ -253,6 +253,25 @@ CREATE TABLE website_reviews (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE review_requests (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+    review_request_id INT REFERENCES agent_review_requests(id) ON DELETE SET NULL,
+    agent_email VARCHAR(255),
+    agent_name VARCHAR(255),
+    responder_email VARCHAR(255),
+    referral_token UUID UNIQUE,
+    sent_at TIMESTAMP,
+    review_received BOOLEAN DEFAULT FALSE,
+    star_rating INT CHECK (star_rating IS NULL OR (star_rating >= 1 AND star_rating <= 5)),
+    referral_sent BOOLEAN DEFAULT FALSE,
+    referral_clicks INT DEFAULT 0,
+    last_referral_click_at TIMESTAMP,
+    referrals_converted INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE morning_briefing_settings (
     id SERIAL PRIMARY KEY,
     enabled BOOLEAN DEFAULT TRUE,
@@ -1477,3 +1496,5 @@ CREATE INDEX idx_daily_plan_learning_events_plan ON daily_plan_learning_events(p
 CREATE INDEX idx_daily_schedules_date ON daily_schedules(date DESC, generated_at DESC);
 CREATE INDEX idx_task_time_estimates_category ON task_time_estimates(category, last_updated DESC);
 CREATE INDEX idx_task_completion_times_category ON task_completion_times(task_category, completed_at DESC);
+CREATE INDEX idx_review_requests_sent ON review_requests(sent_at DESC, review_received, referral_sent);
+CREATE INDEX idx_review_requests_agent ON review_requests(agent_email, agent_name, sent_at DESC);

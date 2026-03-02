@@ -11898,6 +11898,149 @@ def ensure_review_system_tables():
         ON website_reviews(created_at DESC)
         """
     )
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS review_requests (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+            review_request_id INT REFERENCES agent_review_requests(id) ON DELETE SET NULL,
+            agent_email VARCHAR(255),
+            agent_name VARCHAR(255),
+            responder_email VARCHAR(255),
+            referral_token UUID UNIQUE,
+            sent_at TIMESTAMP,
+            review_received BOOLEAN DEFAULT FALSE,
+            star_rating INT CHECK (star_rating IS NULL OR (star_rating >= 1 AND star_rating <= 5)),
+            referral_sent BOOLEAN DEFAULT FALSE,
+            referral_clicks INT DEFAULT 0,
+            last_referral_click_at TIMESTAMP,
+            referrals_converted INT DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_review_requests_sent
+        ON review_requests(sent_at DESC, review_received, referral_sent)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_review_requests_agent
+        ON review_requests(agent_email, agent_name, sent_at DESC)
+        """
+    )
+
+
+def fetch_review_request_tracking(transaction_id):
+    """Fetch one review_requests tracking row for a transaction."""
+    ensure_review_system_tables()
+    rows = execute_query(
+        """
+        SELECT *
+        FROM review_requests
+        WHERE transaction_id = %s
+        LIMIT 1
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def ensure_review_request_tracking_row(transaction_id, agent_email="", agent_name="", review_request_id=None):
+    """Upsert tracking row for post-close review/referral automation."""
+    ensure_review_system_tables()
+    execute_query(
+        """
+        INSERT INTO review_requests (
+            transaction_id,
+            review_request_id,
+            agent_email,
+            agent_name,
+            created_at,
+            updated_at
+        )
+        VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT (transaction_id)
+        DO UPDATE SET
+            review_request_id = COALESCE(EXCLUDED.review_request_id, review_requests.review_request_id),
+            agent_email = COALESCE(NULLIF(EXCLUDED.agent_email, ''), review_requests.agent_email),
+            agent_name = COALESCE(NULLIF(EXCLUDED.agent_name, ''), review_requests.agent_name),
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            int(transaction_id),
+            int(review_request_id) if review_request_id else None,
+            normalize_email(agent_email) if agent_email else None,
+            (agent_name or "").strip()[:255] or None,
+        ),
+    )
+    return fetch_review_request_tracking(transaction_id)
+
+
+def mark_review_request_referral_clicked(referral_token):
+    """Increment referral click counters for a review request token."""
+    ensure_review_system_tables()
+    rows = execute_query(
+        """
+        UPDATE review_requests
+        SET referral_clicks = COALESCE(referral_clicks, 0) + 1,
+            last_referral_click_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE referral_token = %s
+        RETURNING id, transaction_id, agent_email, agent_name, referral_clicks
+        """,
+        (str(referral_token),),
+        fetch=True,
+    ) or []
+    return rows[0] if rows else None
+
+
+def record_referral_conversion_if_applicable(referred_by_agent, new_transaction_id):
+    """Increment conversions for the latest matching review referral tracking row."""
+    referrer_name = (referred_by_agent or "").strip()
+    if not referrer_name:
+        return None
+    ensure_review_system_tables()
+    rows = execute_query(
+        """
+        SELECT rr.id, rr.transaction_id, rr.referrals_converted
+        FROM review_requests rr
+        WHERE LOWER(COALESCE(rr.agent_name, '')) = LOWER(%s)
+          AND rr.sent_at IS NOT NULL
+        ORDER BY rr.sent_at DESC, rr.id DESC
+        LIMIT 1
+        """,
+        (referrer_name,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    execute_query(
+        """
+        UPDATE review_requests
+        SET referrals_converted = COALESCE(referrals_converted, 0) + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (int(row["id"]),),
+    )
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'referral_offer', %s, %s)
+        """,
+        (
+            int(row["transaction_id"]),
+            "Referral conversion tracked",
+            f"new_transaction_id={int(new_transaction_id)} referred_by={referrer_name}",
+        ),
+    )
+    return int(row["id"])
 
 
 def update_transaction(transaction_id, **fields):
@@ -12527,8 +12670,15 @@ def send_congratulations_emails(transaction):
     return results
 
 
-def send_review_request(agent_email, transaction_id):
-    """Create review request token and email the review link to agent."""
+def send_review_request(
+    agent_email,
+    transaction_id,
+    template_path="emails/review_request_agent.html",
+    include_google_review_link=False,
+    include_referral_offer=False,
+    request_reason="completion_workflow",
+):
+    """Create review request token, send email, and update review/referral tracking."""
     ensure_review_system_tables()
     safe_email = normalize_email(agent_email)
     if not safe_email or not is_email_valid(safe_email):
@@ -12562,16 +12712,53 @@ def send_review_request(agent_email, transaction_id):
             (transaction_id, safe_email, access_token),
         )
 
-    review_link = f"{app_base_url()}/review/{access_token}"
     transaction = get_transaction_or_none(transaction_id) or {}
+    review_link = f"{app_base_url()}/review/{access_token}"
+    tracking_row = ensure_review_request_tracking_row(
+        transaction_id=transaction_id,
+        agent_email=safe_email,
+        agent_name=transaction.get("agent_name") or "",
+        review_request_id=request_id,
+    ) or {}
+    referral_token = tracking_row.get("referral_token")
+    if include_referral_offer and not referral_token:
+        referral_token = str(uuid4())
+        execute_query(
+            """
+            UPDATE review_requests
+            SET referral_token = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE transaction_id = %s
+            """,
+            (str(referral_token), int(transaction_id)),
+        )
+    referral_offer_link = (
+        f"{app_base_url()}/referral/offer/{str(referral_token)}"
+        if include_referral_offer and referral_token
+        else ""
+    )
+    google_review_link = (os.getenv("GOOGLE_REVIEW_URL") or "").strip()
+    if include_google_review_link and not google_review_link:
+        google_review_link = review_link
+
     message_id = send_email(
         to=safe_email,
-        template="emails/review_request_agent.html",
+        template=(template_path or "emails/review_request_agent.html"),
         data={
-            "subject": f"Quick favor: review your Maverick TC experience ({transaction.get('property_address')})",
+            "subject": (
+                f"How did we do? Leave a Google review ({transaction.get('property_address')})"
+                if include_google_review_link
+                else f"Quick favor: review your Maverick TC experience ({transaction.get('property_address')})"
+            ),
             "agent_name": transaction.get("agent_name") or "Agent",
             "property_address": transaction.get("property_address") or "your transaction",
             "review_link": review_link,
+            "google_review_link": google_review_link,
+            "include_google_review_link": bool(include_google_review_link),
+            "include_referral_offer": bool(include_referral_offer),
+            "referral_offer_link": referral_offer_link,
+            "referral_offer_text": "Refer another agent: they get $50 off, and you get a $50 credit.",
+            "request_reason": (request_reason or "").strip(),
         },
     )
     update_transaction(
@@ -12579,6 +12766,25 @@ def send_review_request(agent_email, transaction_id):
         review_requested=True,
         review_requested_date=datetime.now(),
     )
+    is_post_close_followup = (request_reason or "").strip().lower().startswith("post_close")
+    if message_id:
+        execute_query(
+            """
+            UPDATE review_requests
+            SET sent_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE sent_at END,
+                referral_sent = CASE WHEN %s THEN %s ELSE referral_sent END,
+                review_request_id = COALESCE(review_request_id, %s),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE transaction_id = %s
+            """,
+            (
+                bool(is_post_close_followup),
+                bool(is_post_close_followup),
+                bool(include_referral_offer),
+                int(request_id) if request_id else None,
+                int(transaction_id),
+            ),
+        )
     execute_query(
         """
         INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
@@ -12588,15 +12794,127 @@ def send_review_request(agent_email, transaction_id):
             transaction_id,
             transaction.get("agent_name") or "Agent",
             "Review request email sent" if message_id else "Review request email failed",
-            f"to={safe_email} request_id={request_id or 'n/a'} message_id={message_id or 'failed'}",
+            (
+                f"to={safe_email} request_id={request_id or 'n/a'} message_id={message_id or 'failed'} "
+                f"reason={(request_reason or 'n/a')[:80]} referral_offer={'yes' if include_referral_offer else 'no'}"
+            ),
         ),
     )
     return {
         "success": bool(message_id),
         "request_id": request_id,
         "review_link": review_link,
+        "google_review_link": google_review_link if include_google_review_link else "",
+        "referral_offer_link": referral_offer_link,
         "message_id": message_id,
     }
+
+
+def run_post_close_review_referral_automation(days_after_close=7, limit=100):
+    """Send review + referral offer emails for transactions closed N days ago."""
+    ensure_review_system_tables()
+    safe_days = max(1, min(int(days_after_close or 7), 90))
+    safe_limit = max(1, min(int(limit or 100), 500))
+    rows = execute_query(
+        """
+        SELECT
+            t.id,
+            t.agent_email,
+            t.agent_name,
+            t.property_address,
+            COALESCE(t.completed_at, t.updated_at, t.created_at) AS completed_at,
+            rr.sent_at AS tracking_sent_at,
+            rr.review_received AS tracking_review_received,
+            rr.star_rating AS tracking_star_rating,
+            EXISTS (
+                SELECT 1
+                FROM agent_reviews ar
+                WHERE ar.transaction_id = t.id
+                LIMIT 1
+            ) AS has_review
+        FROM transactions t
+        LEFT JOIN review_requests rr ON rr.transaction_id = t.id
+        WHERE t.status = 'COMPLETED'
+          AND COALESCE(t.completed_at, t.updated_at, t.created_at) <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')
+          AND COALESCE(t.agent_email, '') <> ''
+        ORDER BY COALESCE(t.completed_at, t.updated_at, t.created_at) ASC, t.id ASC
+        LIMIT %s
+        """,
+        (safe_days, safe_limit),
+        fetch=True,
+    ) or []
+
+    summary = {
+        "success": True,
+        "days_after_close": safe_days,
+        "evaluated": len(rows),
+        "sent": 0,
+        "failed": 0,
+        "skipped_already_sent": 0,
+        "skipped_already_reviewed": 0,
+    }
+    for row in rows:
+        transaction_id = int(row["id"])
+        agent_email = normalize_email(row.get("agent_email"))
+        if not agent_email or not is_email_valid(agent_email):
+            continue
+
+        ensure_review_request_tracking_row(
+            transaction_id=transaction_id,
+            agent_email=agent_email,
+            agent_name=row.get("agent_name") or "",
+        )
+
+        if bool(row.get("has_review")) or bool(row.get("tracking_review_received")) or row.get("tracking_star_rating") is not None:
+            latest_review_rows = execute_query(
+                """
+                SELECT agent_email, rating
+                FROM agent_reviews
+                WHERE transaction_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (transaction_id,),
+                fetch=True,
+            ) or []
+            latest_rating = int((latest_review_rows[0] or {}).get("rating") or row.get("tracking_star_rating") or 0)
+            responder_email = normalize_email((latest_review_rows[0] or {}).get("agent_email") or agent_email)
+            execute_query(
+                """
+                UPDATE review_requests
+                SET review_received = TRUE,
+                    star_rating = CASE WHEN %s > 0 THEN %s ELSE star_rating END,
+                    responder_email = COALESCE(NULLIF(%s, ''), responder_email),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE transaction_id = %s
+                """,
+                (
+                    latest_rating,
+                    latest_rating,
+                    responder_email,
+                    transaction_id,
+                ),
+            )
+            summary["skipped_already_reviewed"] += 1
+            continue
+
+        if row.get("tracking_sent_at"):
+            summary["skipped_already_sent"] += 1
+            continue
+
+        result = send_review_request(
+            agent_email=agent_email,
+            transaction_id=transaction_id,
+            template_path="emails/review_request_followup_agent.html",
+            include_google_review_link=True,
+            include_referral_offer=True,
+            request_reason=f"post_close_day_{safe_days}",
+        )
+        if result.get("success"):
+            summary["sent"] += 1
+        else:
+            summary["failed"] += 1
+    return summary
 
 
 def auto_post_positive_review(review_id):
@@ -12803,7 +13121,29 @@ def execute_transaction_completion_workflow(transaction_id, force_complete=False
     )
 
     congratulation_result = send_congratulations_emails(transaction)
-    review_result = send_review_request(transaction.get("agent_email"), transaction_id)
+    ensure_review_request_tracking_row(
+        transaction_id=transaction_id,
+        agent_email=transaction.get("agent_email") or "",
+        agent_name=transaction.get("agent_name") or "",
+    )
+    review_delay_days = parse_optional_int(os.getenv("POST_CLOSE_REVIEW_DELAY_DAYS"))
+    review_delay_days = review_delay_days if review_delay_days and review_delay_days > 0 else 7
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', 'reviews', %s, %s)
+        """,
+        (
+            transaction_id,
+            "Post-close review follow-up scheduled",
+            f"delay_days={review_delay_days}",
+        ),
+    )
+    review_result = {
+        "success": True,
+        "scheduled": True,
+        "days_after_close": review_delay_days,
+    }
     referral_result = process_referral_credit(transaction_id)
     commission_result = finalize_commission_record(transaction_id)
 
@@ -12831,7 +13171,7 @@ def execute_transaction_completion_workflow(transaction_id, force_complete=False
                 f"by={initiated_by} completed_deadlines={len(completed_deadline_ids)} "
                 f"completed_tasks={len(completed_task_ids)} archive_key={archive_s3_key or 'none'} "
                 f"summary_key={summary_pdf.get('s3_key') or 'none'} "
-                f"review_request={'sent' if review_result.get('success') else 'failed/skipped'} "
+                f"review_request={'scheduled' if review_result.get('scheduled') else ('sent' if review_result.get('success') else 'failed/skipped')} "
                 f"celebration_sid={celebration_sid or 'none'}"
             ),
         ),
@@ -21028,6 +21368,27 @@ def submit_agent_review(access_token):
         """,
         (review_request["id"],),
     )
+    ensure_review_request_tracking_row(
+        transaction_id=review_request["transaction_id"],
+        agent_email=review_request.get("agent_email") or "",
+        agent_name=review_request.get("agent_name") or "",
+        review_request_id=review_request["id"],
+    )
+    execute_query(
+        """
+        UPDATE review_requests
+        SET review_received = TRUE,
+            star_rating = %s,
+            responder_email = COALESCE(NULLIF(%s, ''), responder_email),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE transaction_id = %s
+        """,
+        (
+            int(rating),
+            normalize_email(review_request.get("agent_email") or ""),
+            int(review_request["transaction_id"]),
+        ),
+    )
     execute_query(
         """
         INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
@@ -21051,6 +21412,30 @@ def submit_agent_review(access_token):
         )
 
     return render_template("review_form.html", review_request=review_request, submitted=True, error="")
+
+
+@app.route("/referral/offer/<referral_token>")
+def review_referral_offer_redirect(referral_token):
+    """Track referral offer link clicks from review follow-up emails, then redirect."""
+    ensure_review_system_tables()
+    tracked = mark_review_request_referral_clicked(referral_token)
+    target_url = (os.getenv("REFERRAL_PROGRAM_URL") or "").strip() or "https://www.getmaverick.com"
+    if tracked:
+        execute_query(
+            """
+            INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+            VALUES (%s, 'note', 'agent', %s, %s, %s)
+            """,
+            (
+                tracked.get("transaction_id"),
+                tracked.get("agent_name") or tracked.get("agent_email") or "Agent",
+                "Referral offer link clicked",
+                f"token={str(referral_token)[:12]}... clicks={int(tracked.get('referral_clicks') or 0)}",
+            ),
+        )
+        separator = "&" if "?" in target_url else "?"
+        target_url = f"{target_url}{separator}source=maverick_review_offer&token={referral_token}"
+    return redirect(target_url)
 
 
 @app.route("/upload", methods=["POST"])
@@ -21130,6 +21515,8 @@ def upload_contract_route():
             (transaction_id,),
         )
         upsert_commission_tracking(transaction_id, referral_credit_override=0)
+        if referred_by:
+            record_referral_conversion_if_applicable(referred_by, transaction_id)
         run_contract_extraction_async(transaction_id, s3_key, property_address)
 
         confirmation_message = f"""Contract received for {property_address}!
