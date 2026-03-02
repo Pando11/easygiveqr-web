@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}Portal Link Invalid - Maverick TC{% endblock %}
+{% block subtitle %}Secure Portal Access{% endblock %}
+
+{% block content %}
+<section class="card">
+    <h2>Portal link unavailable</h2>
+    <p>{{ reason or "This portal link is invalid, expired, or no longer active." }}</p>
+    <p class="hint-text">Please contact Margaret if you need a fresh secure portal link.</p>
+</section>
+{% endblock %}

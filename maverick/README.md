@@ -421,6 +421,42 @@ Highlights:
 - supports custom create/edit workflows
 - smart suggestions identify repeated phrases from communication history
 
+## Self-Service Party Portals (Buyer / Seller / Agent)
+
+Maverick now supports secure role-based party portals with tokenized links and analytics.
+
+- Generate route (TC): `POST /tc/transaction/<transaction_id>/generate-portals`
+- Portal route (public): `GET /portal/<access_token>`
+- Portal section tracking: `POST /portal/<access_token>/track-section`
+- Portal document download: `GET /portal/document/<document_id>?token=...`
+- Agent portal upload: `POST /portal/<access_token>/upload`
+- Portal analytics (TC JSON): `GET /tc/transaction/<transaction_id>/portal-analytics`
+
+Behavior:
+- generates unique buyer/seller/agent UUID tokens and stores them in `party_portal_access`
+- sends portal links by SMS/email when contact channels are available
+- renders role-specific portal views:
+  - buyer: contract/inspection/appraisal/title and buyer-focused action items
+  - seller: contract/disclosures/amendments and seller-focused action items
+  - agent: broader visibility + upload access
+- tracks analytics:
+  - views per transaction
+  - most viewed sections
+  - documents downloaded
+  - uploads
+  - text-question residual signal + estimated support time saved
+- security:
+  - token expiry defaults to closing + 30 days (`PORTAL_TOKEN_GRACE_DAYS`)
+  - all access/download/upload events logged
+  - DB-backed rate limit checks (`PORTAL_RATE_LIMIT_WINDOW_MINUTES`, `PORTAL_RATE_LIMIT_MAX_REQUESTS`)
+  - excludes sensitive financial document types from buyer/seller portal views
+
+Milestone notifications:
+- inspection report upload triggers:
+  - `✅ Inspection complete! View report in your portal: [link]`
+- walkthrough-due-tomorrow reminders trigger from dashboard sweep:
+  - `⏰ Reminder: Final walk-through tomorrow. Check portal for details: [link]`
+
 ## Batch Document Upload + Auto Assignment
 
 Margaret can now upload many docs in one pass for AI-assisted assignment:

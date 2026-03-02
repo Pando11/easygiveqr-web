@@ -955,6 +955,9 @@
 
         <article class="card actions-card">
             <h3>Actions</h3>
+            <form method="post" action="{{ url_for('generate_party_portals', transaction_id=transaction.id) }}">
+                <button type="submit" class="btn btn-secondary action-btn">Generate Party Portals</button>
+            </form>
             <form method="post" action="{{ url_for('generate_client_portal_link', transaction_id=transaction.id) }}">
                 <button type="submit" class="btn btn-secondary action-btn">Generate Client Portal Link</button>
             </form>
@@ -982,6 +985,30 @@
                 {% if client_portal_links.seller.last_accessed_label %}
                 <p><small>Last seller access: {{ client_portal_links.seller.last_accessed_label }}</small></p>
                 {% endif %}
+            </div>
+            <div class="portal-links-box">
+                <p><strong>Buyer Party Portal:</strong>
+                    {% if party_portal_links.buyer.exists %}
+                    <a href="{{ party_portal_links.buyer.link }}" target="_blank" rel="noopener">{{ party_portal_links.buyer.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                <p><strong>Seller Party Portal:</strong>
+                    {% if party_portal_links.seller.exists %}
+                    <a href="{{ party_portal_links.seller.link }}" target="_blank" rel="noopener">{{ party_portal_links.seller.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                <p><strong>Agent Party Portal:</strong>
+                    {% if party_portal_links.agent.exists %}
+                    <a href="{{ party_portal_links.agent.link }}" target="_blank" rel="noopener">{{ party_portal_links.agent.link }}</a>
+                    {% else %}
+                    Not generated yet
+                    {% endif %}
+                </p>
+                <p><small>Views: {{ party_portal_analytics.views }} · Docs Downloaded: {{ party_portal_analytics.document_downloads }} · Text Questions: {{ party_portal_analytics.text_questions_after_portal }}</small></p>
             </div>
             <form method="post" action="{{ url_for('mark_transaction_complete', transaction_id=transaction.id) }}">
                 <button type="submit" class="btn action-btn">Mark Complete</button>

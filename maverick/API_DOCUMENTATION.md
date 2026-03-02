@@ -515,6 +515,76 @@ Form `action` options:
   - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
 - Includes seed set of 30 common templates on first-use table initialization.
 
+## Self-Service Party Portals
+
+### Generate portal links (TC)
+- `POST /tc/transaction/<transaction_id>/generate-portals`
+- Auth: TC login required
+- Optional inputs:
+  - `buyer_email`
+  - `seller_email`
+  - `agent_email`
+- Output (JSON mode):
+  - `success`
+  - `portals.buyer|seller|agent`
+  - `sent_sms`
+  - `sent_email`
+
+### Public portal route
+- `GET /portal/<access_token>`
+- Behavior:
+  - validates token and expiration
+  - logs portal view analytics
+  - enforces DB-backed rate limit
+  - renders role-specific portal data (timeline, docs, to-do, updates)
+  - enables upload section only for `agent` party type
+
+### Section analytics tracking
+- `POST /portal/<access_token>/track-section`
+- Body:
+  - `section` (`overview|timeline|documents|action_items|recent_activity|upload`)
+- Logs section-view telemetry per transaction/party.
+
+### Portal document download
+- `GET /portal/document/<document_id>?token=<access_token>`
+- Behavior:
+  - validates portal token (or session token)
+  - confirms document access is allowed for party role
+  - logs download event + document access
+  - redirects to S3 presigned URL
+
+### Agent upload endpoint
+- `POST /portal/<access_token>/upload`
+- Auth: token-based portal access (`agent` only)
+- Input: multipart files (max 20; `pdf|jpg|jpeg|png`)
+- Output:
+  - `success`, `uploaded`, `failed`, `document_ids[]`
+
+### Portal analytics endpoint (TC)
+- `GET /tc/transaction/<transaction_id>/portal-analytics`
+- Returns:
+  - `views`
+  - `document_downloads`
+  - `uploads`
+  - `most_viewed_sections`
+  - `text_questions_after_portal`
+  - `estimated_support_minutes_saved`
+  - `estimated_support_hours_saved`
+
+### Security model
+- Tokens expire at closing + grace window (`PORTAL_TOKEN_GRACE_DAYS`, default 30)
+- All access events are logged in `party_portal_access_log`
+- Rate limiting uses recent access-log counts by token hash + IP
+- Buyer/seller portal views exclude sensitive financial document classes
+
+### Data model
+- `party_portal_access`
+  - one active token row per transaction + party (`buyer|seller|agent`)
+- `party_portal_access_log`
+  - event telemetry (`view`, `section_view`, `document_download`, `upload`, `notification_sent`, etc.)
+- `party_portal_notifications_log`
+  - dedupe guard for milestone notifications
+
 ## Batch Document Upload
 
 ### Workspace route (TC)

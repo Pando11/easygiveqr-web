@@ -447,6 +447,33 @@ MESSAGE_TEMPLATE_SEEDS = [
 MESSAGE_TEMPLATE_SEEDS_APPLIED = False
 
 CLIENT_TYPES = {"buyer", "seller"}
+PARTY_PORTAL_TYPES = {"buyer", "seller", "agent"}
+PARTY_PORTAL_DOCUMENTS_BY_TYPE = {
+    "buyer": {
+        "contract",
+        "inspection_report",
+        "appraisal",
+        "title_commitment",
+        "hoa_docs",
+        "survey",
+        "insurance_binder",
+    },
+    "seller": {
+        "contract",
+        "seller_disclosure",
+        "signed_amendment",
+        "signed_addendum",
+        "amendment",
+        "survey",
+    },
+}
+PORTAL_SENSITIVE_DOCUMENT_TYPES = {
+    "loan_approval",
+    "settlement_statement",
+    "earnest_receipt",
+    "option_receipt",
+}
+PORTAL_SECTION_NAMES = {"overview", "timeline", "documents", "action_items", "recent_activity", "upload"}
 
 CLIENT_UPLOAD_DOCUMENT_TYPES = {
     "signed_amendment",
@@ -2550,6 +2577,20 @@ def apply_document_post_upload_actions(
             completed_by=actor,
         )
         summary_bits.append(f"inspection_tasks_completed={len(completed_task_ids)}")
+        try:
+            notify_result = notify_portal_users_milestone(
+                transaction_id=transaction_id,
+                milestone_key=f"inspection_complete_{date.today().isoformat()}",
+                message_template="✅ Inspection complete! View report in your portal: {link}",
+            )
+            if notify_result.get("sent_sms") or notify_result.get("sent_email"):
+                summary_bits.append(
+                    "inspection_portal_notifications="
+                    f"{int(notify_result.get('sent_sms') or 0)}sms/"
+                    f"{int(notify_result.get('sent_email') or 0)}email"
+                )
+        except Exception as exc:
+            print(f"Portal milestone notify error (inspection report): {exc}")
 
     elif normalized_type == "earnest_receipt":
         amount = extract_earnest_amount(first_page_text, key_info_extracted=key_info_extracted)
@@ -3060,6 +3101,989 @@ def provision_client_portal_access(transaction, buyer_email=None, seller_email=N
             "seller": seller_access.get("email") or "",
         },
     }
+
+
+def ensure_party_portal_tables():
+    """Ensure self-service party portal access + analytics tables exist."""
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS party_portal_access (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            party_type VARCHAR(20) NOT NULL,
+            access_token UUID UNIQUE NOT NULL,
+            email VARCHAR(255),
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_accessed_at TIMESTAMP,
+            expires_at TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_party_portal_access_txn_party
+        ON party_portal_access(transaction_id, party_type)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_party_portal_access_expiry
+        ON party_portal_access(is_active, expires_at, last_accessed_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS party_portal_access_log (
+            id SERIAL PRIMARY KEY,
+            portal_access_id INT REFERENCES party_portal_access(id) ON DELETE SET NULL,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            party_type VARCHAR(20),
+            access_token_hash VARCHAR(64),
+            event_type VARCHAR(40) NOT NULL,
+            section_name VARCHAR(80),
+            document_id INT REFERENCES documents(id) ON DELETE SET NULL,
+            success BOOLEAN DEFAULT TRUE,
+            ip_address VARCHAR(64),
+            user_agent VARCHAR(255),
+            details JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_party_portal_access_log_txn
+        ON party_portal_access_log(transaction_id, created_at DESC, event_type)
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_party_portal_access_log_token
+        ON party_portal_access_log(access_token_hash, ip_address, created_at DESC)
+        """
+    )
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS party_portal_notifications_log (
+            id SERIAL PRIMARY KEY,
+            transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+            party_type VARCHAR(20) NOT NULL,
+            milestone_key VARCHAR(140) NOT NULL,
+            channel VARCHAR(20) NOT NULL,
+            recipient VARCHAR(255),
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (transaction_id, party_type, milestone_key, channel)
+        )
+        """
+    )
+    execute_query(
+        """
+        CREATE INDEX IF NOT EXISTS idx_party_portal_notifications_txn
+        ON party_portal_notifications_log(transaction_id, sent_at DESC)
+        """
+    )
+
+
+def party_portal_base_url():
+    """Resolve base URL used in party portal links."""
+    configured = (os.getenv("CLIENT_PORTAL_BASE_URL") or os.getenv("APP_BASE_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    if has_request_context():
+        return (request.url_root or "http://localhost:5000").rstrip("/")
+    return "http://localhost:5000"
+
+
+def build_party_portal_url(access_token):
+    """Build external link for party portal token."""
+    return f"{party_portal_base_url()}/portal/{access_token}"
+
+
+def _portal_token_hash(access_token):
+    token = (access_token or "").strip()
+    return hashlib.sha256(token.encode("utf-8")).hexdigest() if token else ""
+
+
+def _portal_expiration_for_transaction(transaction_id):
+    """Calculate default token expiry (closing + 30 days by default)."""
+    grace_days_raw = (os.getenv("PORTAL_TOKEN_GRACE_DAYS") or "30").strip()
+    try:
+        grace_days = max(7, min(int(grace_days_raw), 365))
+    except (TypeError, ValueError):
+        grace_days = 30
+
+    rows = execute_query(
+        """
+        SELECT closing_date, completed_at, status
+        FROM transactions
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    if not rows:
+        return datetime.now() + timedelta(days=365)
+
+    row = rows[0]
+    closing_date = row.get("closing_date")
+    if closing_date:
+        return datetime.combine(closing_date + timedelta(days=grace_days), datetime.max.time()).replace(microsecond=0)
+    completed_at = row.get("completed_at")
+    if completed_at:
+        return completed_at + timedelta(days=grace_days)
+    return datetime.now() + timedelta(days=365)
+
+
+def _fallback_client_access_email(transaction_id, party_type):
+    if party_type not in {"buyer", "seller"}:
+        return ""
+    rows = execute_query(
+        """
+        SELECT email
+        FROM client_access
+        WHERE transaction_id = %s
+          AND client_type = %s
+        LIMIT 1
+        """,
+        (int(transaction_id), party_type),
+        fetch=True,
+    ) or []
+    if not rows:
+        return ""
+    return normalize_email(rows[0].get("email") or "")
+
+
+def create_portal_access(transaction_id, party_type, access_token=None, email=None):
+    """Create/update one party portal token row."""
+    normalized_party = (party_type or "").strip().lower()
+    if normalized_party not in PARTY_PORTAL_TYPES:
+        raise ValueError("Unsupported party type")
+    ensure_party_portal_tables()
+    token = (access_token or str(uuid4())).strip()
+    safe_email = normalize_email(email or "")
+    if safe_email and not is_email_valid(safe_email):
+        safe_email = ""
+    if not safe_email:
+        safe_email = _fallback_client_access_email(transaction_id, normalized_party)
+    expires_at = _portal_expiration_for_transaction(transaction_id)
+
+    rows = execute_query(
+        """
+        INSERT INTO party_portal_access (
+            transaction_id, party_type, access_token, email, is_active, created_at, last_accessed_at, expires_at
+        )
+        VALUES (%s, %s, %s::uuid, %s, TRUE, CURRENT_TIMESTAMP, NULL, %s)
+        ON CONFLICT (transaction_id, party_type)
+        DO UPDATE SET
+            access_token = EXCLUDED.access_token,
+            email = CASE
+                WHEN COALESCE(EXCLUDED.email, '') <> '' THEN EXCLUDED.email
+                ELSE party_portal_access.email
+            END,
+            is_active = TRUE,
+            expires_at = EXCLUDED.expires_at
+        RETURNING
+            id, transaction_id, party_type, access_token::text AS access_token,
+            email, is_active, created_at, last_accessed_at, expires_at
+        """,
+        (int(transaction_id), normalized_party, token, safe_email or None, expires_at),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    row["portal_url"] = build_party_portal_url(row["access_token"])
+    return row
+
+
+def list_party_portal_access(transaction_id):
+    """List all party portal rows for one transaction."""
+    ensure_party_portal_tables()
+    rows = execute_query(
+        """
+        SELECT
+            id, transaction_id, party_type, access_token::text AS access_token, email,
+            is_active, created_at, last_accessed_at, expires_at
+        FROM party_portal_access
+        WHERE transaction_id = %s
+        ORDER BY party_type ASC
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    for row in rows:
+        row["portal_url"] = build_party_portal_url(row["access_token"])
+    return rows
+
+
+def get_portal_access(access_token, touch=True):
+    """Resolve one party portal token to transaction + party context."""
+    ensure_party_portal_tables()
+    token = (access_token or "").strip()
+    if not token:
+        return None
+    rows = execute_query(
+        """
+        SELECT
+            ppa.id, ppa.transaction_id, ppa.party_type, ppa.access_token::text AS access_token,
+            ppa.email, ppa.is_active, ppa.created_at, ppa.last_accessed_at, ppa.expires_at,
+            t.property_address, t.status, t.closing_date, t.completed_at,
+            t.agent_name, t.agent_phone, t.agent_email,
+            t.buyer_name, t.buyer_phone, t.seller_name, t.seller_phone,
+            t.contract_s3_key
+        FROM party_portal_access ppa
+        JOIN transactions t ON t.id = ppa.transaction_id
+        WHERE ppa.access_token::text = %s
+        LIMIT 1
+        """,
+        (token,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    if not row.get("is_active"):
+        return None
+    expires_at = row.get("expires_at")
+    if expires_at and isinstance(expires_at, datetime) and expires_at < datetime.now():
+        execute_query("UPDATE party_portal_access SET is_active = FALSE WHERE id = %s", (row["id"],))
+        return None
+    if touch:
+        execute_query(
+            """
+            UPDATE party_portal_access
+            SET last_accessed_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (int(row["id"]),),
+        )
+        row["last_accessed_at"] = datetime.now()
+    row["portal_url"] = build_party_portal_url(row["access_token"])
+    return row
+
+
+def log_portal_access(
+    portal_access_id=None,
+    transaction_id=None,
+    party_type="",
+    access_token="",
+    event_type="view",
+    section_name="",
+    document_id=None,
+    success=True,
+    details=None,
+):
+    """Persist portal access/analytics events."""
+    ensure_party_portal_tables()
+    execute_query(
+        """
+        INSERT INTO party_portal_access_log (
+            portal_access_id, transaction_id, party_type, access_token_hash, event_type,
+            section_name, document_id, success, ip_address, user_agent, details, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP)
+        """,
+        (
+            int(portal_access_id) if portal_access_id else None,
+            int(transaction_id) if transaction_id else None,
+            (party_type or "").strip().lower() or None,
+            _portal_token_hash(access_token),
+            (event_type or "view").strip().lower()[:40],
+            (section_name or "").strip().lower()[:80] or None,
+            int(document_id) if document_id else None,
+            bool(success),
+            (request.remote_addr or "")[:64] if has_request_context() else "",
+            (request.headers.get("User-Agent") or "")[:255] if has_request_context() else "",
+            json.dumps(details or {}, default=str),
+        ),
+    )
+
+
+def _portal_rate_limited(access_token, ip_address):
+    """Simple DB-backed rate limit for portal abuse prevention."""
+    ensure_party_portal_tables()
+    token_hash = _portal_token_hash(access_token)
+    if not token_hash:
+        return False
+    window_raw = (os.getenv("PORTAL_RATE_LIMIT_WINDOW_MINUTES") or "5").strip()
+    max_raw = (os.getenv("PORTAL_RATE_LIMIT_MAX_REQUESTS") or "80").strip()
+    try:
+        window_minutes = max(1, min(int(window_raw), 60))
+    except (TypeError, ValueError):
+        window_minutes = 5
+    try:
+        max_requests = max(20, min(int(max_raw), 500))
+    except (TypeError, ValueError):
+        max_requests = 80
+    rows = execute_query(
+        """
+        SELECT COUNT(*) AS total
+        FROM party_portal_access_log
+        WHERE access_token_hash = %s
+          AND ip_address = %s
+          AND created_at >= (CURRENT_TIMESTAMP - (%s || ' minutes')::interval)
+          AND event_type IN ('view', 'section_view', 'document_download', 'upload')
+        """,
+        (token_hash, (ip_address or "")[:64], int(window_minutes)),
+        fetch=True,
+    ) or []
+    recent_count = int((rows[0] or {}).get("total") or 0) if rows else 0
+    return recent_count >= max_requests
+
+
+def _portal_party_phone(transaction, party_type):
+    role = (party_type or "").strip().lower()
+    if role == "buyer":
+        return normalize_phone(transaction.get("buyer_phone") or "")
+    if role == "seller":
+        return normalize_phone(transaction.get("seller_phone") or "")
+    return normalize_phone(transaction.get("agent_phone") or "")
+
+
+def _portal_party_email(transaction, party_type, fallback_email=""):
+    role = (party_type or "").strip().lower()
+    if role == "agent":
+        return normalize_email((fallback_email or transaction.get("agent_email") or ""))
+    return normalize_email(fallback_email or "")
+
+
+def send_portal_links(transaction_id, portal_tokens):
+    """Send buyer/seller/agent portal links by available channels."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return {"sent_sms": 0, "sent_email": 0}
+    sent_sms = 0
+    sent_email = 0
+    access_map = {row["party_type"]: row for row in list_party_portal_access(transaction_id)}
+
+    for party_type, token in (portal_tokens or {}).items():
+        normalized_party = (party_type or "").strip().lower()
+        if normalized_party not in PARTY_PORTAL_TYPES:
+            continue
+        access_row = access_map.get(normalized_party) or {}
+        link_url = build_party_portal_url(token)
+        recipient_phone = _portal_party_phone(transaction, normalized_party)
+        recipient_email = _portal_party_email(transaction, normalized_party, access_row.get("email") or "")
+        party_label = normalized_party.title()
+        sms_message = f"Track your transaction in your secure portal: {link_url}"
+
+        if recipient_phone:
+            send_sms_async(recipient_phone, sms_message)
+            sent_sms += 1
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'text', %s, %s, %s, %s)
+                """,
+                (
+                    int(transaction_id),
+                    normalized_party,
+                    party_label,
+                    "Party portal link sent",
+                    f"channel=sms to={recipient_phone}",
+                ),
+            )
+
+        if recipient_email and is_email_valid(recipient_email):
+            message_id = send_email(
+                to=recipient_email,
+                template="emails/client_portal_access.html",
+                data={
+                    "subject": f"Maverick Portal Access - {transaction.get('property_address')}",
+                    "property_address": transaction.get("property_address"),
+                    "client_type": party_label,
+                    "portal_url": link_url,
+                    "closing_date_label": (
+                        transaction["closing_date"].strftime("%b %d, %Y") if transaction.get("closing_date") else "TBD"
+                    ),
+                },
+            )
+            execute_query(
+                """
+                INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+                VALUES (%s, 'email', %s, %s, %s, %s)
+                """,
+                (
+                    int(transaction_id),
+                    normalized_party,
+                    party_label,
+                    "Party portal link email sent" if message_id else "Party portal link email failed",
+                    f"to={recipient_email} message_id={message_id or 'failed'}",
+                ),
+            )
+            if message_id:
+                sent_email += 1
+    return {"sent_sms": sent_sms, "sent_email": sent_email}
+
+
+def calculate_completion_percentage(transaction_id):
+    """Calculate transaction completion percentage by deadlines completed."""
+    rows = execute_query(
+        """
+        SELECT
+            COUNT(*) AS total_count,
+            COUNT(*) FILTER (WHERE completed = TRUE) AS completed_count
+        FROM deadlines
+        WHERE transaction_id = %s
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    if not rows:
+        return 0
+    total_count = int(rows[0].get("total_count") or 0)
+    completed_count = int(rows[0].get("completed_count") or 0)
+    if total_count <= 0:
+        return 0
+    return int(round((completed_count / total_count) * 100))
+
+
+def get_transaction_timeline_for_portal(transaction_id, party_type):
+    """Build portal-friendly timeline rows for a transaction."""
+    _ = party_type  # kept for future party-specific timeline filtering
+    rows = execute_query(
+        """
+        SELECT id, deadline_type, deadline_date, description, completed
+        FROM deadlines
+        WHERE transaction_id = %s
+        ORDER BY deadline_date ASC NULLS LAST, id ASC
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    timeline = []
+    today = date.today()
+    for row in rows:
+        due_date = row.get("deadline_date")
+        if row.get("completed"):
+            status = "complete"
+        elif due_date and due_date <= (today + timedelta(days=2)):
+            status = "in_progress"
+        else:
+            status = "pending"
+        timeline.append(
+            {
+                "id": row.get("id"),
+                "title": (row.get("description") or row.get("deadline_type") or "").replace("_", " ").title(),
+                "date": due_date,
+                "date_label": format_date_label(due_date),
+                "status": status,
+            }
+        )
+    return timeline
+
+
+def _portal_document_rows(transaction):
+    tx_id = int(transaction["id"])
+    rows = execute_query(
+        """
+        SELECT DISTINCT ON (document_type)
+               id, transaction_id, document_type, filename, s3_key, uploaded_at
+        FROM documents
+        WHERE transaction_id = %s
+        ORDER BY document_type, uploaded_at DESC, id DESC
+        """,
+        (tx_id,),
+        fetch=True,
+    ) or []
+    payload = list(rows)
+    has_contract_doc = any((row.get("document_type") or "").lower() == "contract" for row in payload)
+    if transaction.get("contract_s3_key") and not has_contract_doc:
+        payload.append(
+            {
+                "id": 0,
+                "transaction_id": tx_id,
+                "document_type": "contract",
+                "filename": transaction.get("contract_pdf_url") or "contract.pdf",
+                "s3_key": transaction.get("contract_s3_key"),
+                "uploaded_at": transaction.get("created_at"),
+            }
+        )
+    return payload
+
+
+def _party_document_whitelist(party_type, available_rows):
+    role = (party_type or "").strip().lower()
+    if role == "agent":
+        return sorted({(row.get("document_type") or "").lower() for row in available_rows if row.get("document_type")})
+    allowed = set(PARTY_PORTAL_DOCUMENTS_BY_TYPE.get(role, set()))
+    return sorted([doc_type for doc_type in allowed if doc_type not in PORTAL_SENSITIVE_DOCUMENT_TYPES])
+
+
+def _documents_for_portal_party(transaction, party_type, access_token):
+    available_rows = _portal_document_rows(transaction)
+    whitelist = _party_document_whitelist(party_type, available_rows)
+    latest_by_type = {}
+    for row in available_rows:
+        doc_type = (row.get("document_type") or "").lower()
+        if not doc_type:
+            continue
+        if doc_type in PORTAL_SENSITIVE_DOCUMENT_TYPES and party_type in {"buyer", "seller"}:
+            continue
+        latest_by_type[doc_type] = row
+
+    documents = []
+    for doc_type in whitelist:
+        row = latest_by_type.get(doc_type)
+        if row:
+            documents.append(
+                {
+                    "id": int(row.get("id") or 0),
+                    "document_type": doc_type,
+                    "name": document_type_label(doc_type),
+                    "status": "available",
+                    "available": True,
+                    "uploaded_at": row.get("uploaded_at"),
+                    "view_url": url_for(
+                        "party_portal_document",
+                        document_id=int(row.get("id") or 0),
+                        token=access_token,
+                    ),
+                }
+            )
+        else:
+            documents.append(
+                {
+                    "id": None,
+                    "document_type": doc_type,
+                    "name": document_type_label(doc_type),
+                    "status": "pending",
+                    "available": False,
+                    "uploaded_at": None,
+                    "view_url": "",
+                }
+            )
+    if party_type == "agent":
+        documents.sort(key=lambda row: (0 if row.get("available") else 1, row.get("name") or ""))
+    return documents
+
+
+def get_documents_for_buyer(transaction, access_token):
+    return _documents_for_portal_party(transaction, "buyer", access_token)
+
+
+def get_documents_for_seller(transaction, access_token):
+    return _documents_for_portal_party(transaction, "seller", access_token)
+
+
+def get_all_documents(transaction, access_token):
+    return _documents_for_portal_party(transaction, "agent", access_token)
+
+
+def _portal_todo_payload(description, due_date=None, source="task"):
+    return {
+        "description": (description or "").strip(),
+        "due_date": due_date,
+        "due_label": format_date_label(due_date) if due_date else "",
+        "source": source,
+    }
+
+
+def get_buyer_action_items(transaction_id):
+    items = []
+    task_rows = execute_query(
+        """
+        SELECT task_description, due_date
+        FROM tasks
+        WHERE transaction_id = %s
+          AND completed = FALSE
+          AND COALESCE(status, 'pending') <> 'completed'
+          AND LOWER(COALESCE(task_description, '')) SIMILAR TO %s
+        ORDER BY due_date ASC NULLS LAST, id ASC
+        LIMIT 10
+        """,
+        (int(transaction_id), "%(buyer|inspection|insurance|loan|document|sign)%"),
+        fetch=True,
+    ) or []
+    for row in task_rows:
+        items.append(_portal_todo_payload(row.get("task_description"), row.get("due_date"), source="task"))
+
+    request_rows = execute_query(
+        """
+        SELECT document_type, updated_at
+        FROM document_requests
+        WHERE transaction_id = %s
+          AND requested_from = 'buyer'
+          AND status <> 'received'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 8
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    for row in request_rows:
+        items.append(
+            _portal_todo_payload(
+                f"Upload {document_type_label(row.get('document_type'))}",
+                due_date=None,
+                source="document_request",
+            )
+        )
+    return items[:12]
+
+
+def get_seller_action_items(transaction_id):
+    items = []
+    task_rows = execute_query(
+        """
+        SELECT task_description, due_date
+        FROM tasks
+        WHERE transaction_id = %s
+          AND completed = FALSE
+          AND COALESCE(status, 'pending') <> 'completed'
+          AND LOWER(COALESCE(task_description, '')) SIMILAR TO %s
+        ORDER BY due_date ASC NULLS LAST, id ASC
+        LIMIT 10
+        """,
+        (int(transaction_id), "%(seller|disclosure|repair|document|sign)%"),
+        fetch=True,
+    ) or []
+    for row in task_rows:
+        items.append(_portal_todo_payload(row.get("task_description"), row.get("due_date"), source="task"))
+
+    request_rows = execute_query(
+        """
+        SELECT document_type, updated_at
+        FROM document_requests
+        WHERE transaction_id = %s
+          AND requested_from = 'seller'
+          AND status <> 'received'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 8
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    for row in request_rows:
+        items.append(
+            _portal_todo_payload(
+                f"Upload {document_type_label(row.get('document_type'))}",
+                due_date=None,
+                source="document_request",
+            )
+        )
+    return items[:12]
+
+
+def get_agent_action_items(transaction_id):
+    rows = execute_query(
+        """
+        SELECT task_description, due_date
+        FROM tasks
+        WHERE transaction_id = %s
+          AND completed = FALSE
+          AND COALESCE(status, 'pending') <> 'completed'
+        ORDER BY COALESCE(due_date, CURRENT_DATE + INTERVAL '365 days') ASC, priority DESC, id ASC
+        LIMIT 15
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    return [_portal_todo_payload(row.get("task_description"), row.get("due_date"), source="task") for row in rows]
+
+
+def get_all_tasks_for_portal(transaction_id):
+    rows = execute_query(
+        """
+        SELECT id, task_description, task_category, due_date, priority, completed
+        FROM tasks
+        WHERE transaction_id = %s
+        ORDER BY completed ASC, COALESCE(due_date, CURRENT_DATE + INTERVAL '365 days') ASC, id ASC
+        LIMIT 80
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    for row in rows:
+        row["due_label"] = format_date_label(row.get("due_date"))
+        row["status"] = "complete" if row.get("completed") else "pending"
+    return rows
+
+
+def get_recent_activity(transaction_id, limit=5):
+    rows = execute_query(
+        """
+        SELECT communication_type, contact_party, summary, outcome, created_at
+        FROM communications
+        WHERE transaction_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT %s
+        """,
+        (int(transaction_id), max(1, min(int(limit or 5), 20))),
+        fetch=True,
+    ) or []
+    payload = []
+    for row in rows:
+        description = (row.get("summary") or "").strip()
+        if row.get("outcome"):
+            description = f"{description} ({row['outcome']})"
+        payload.append(
+            {
+                "description": description[:600],
+                "type": row.get("communication_type") or "update",
+                "created_at": row.get("created_at"),
+                "timeago": format_time_ago(row.get("created_at")),
+            }
+        )
+    return payload
+
+
+def build_portal_data(transaction, party_type, access_token):
+    """
+    Build a personalized portal payload for buyer/seller/agent.
+    Keeps sensitive financial data out of this public-facing view.
+    """
+    closing_date = transaction.get("closing_date")
+    days_to_closing = (closing_date - date.today()).days if closing_date else None
+    data = {
+        "property_address": transaction.get("property_address"),
+        "closing_date": closing_date,
+        "closing_date_label": format_date_label(closing_date),
+        "days_to_closing": days_to_closing,
+        "days_to_closing_label": (
+            f"{days_to_closing} days" if isinstance(days_to_closing, int) else "Date TBD"
+        ),
+        "progress_percent": calculate_completion_percentage(transaction["id"]),
+    }
+    data["timeline"] = get_transaction_timeline_for_portal(transaction["id"], party_type)
+
+    if party_type == "buyer":
+        data["documents"] = get_documents_for_buyer(transaction, access_token)
+        data["your_todo"] = get_buyer_action_items(transaction["id"])
+    elif party_type == "seller":
+        data["documents"] = get_documents_for_seller(transaction, access_token)
+        data["your_todo"] = get_seller_action_items(transaction["id"])
+    else:
+        data["documents"] = get_all_documents(transaction, access_token)
+        data["your_todo"] = get_agent_action_items(transaction["id"])
+        data["can_upload"] = True
+        data["all_tasks"] = get_all_tasks_for_portal(transaction["id"])
+
+    data["contacts"] = {
+        "coordinator": {
+            "name": "Margaret",
+            "phone": normalize_phone(os.getenv("MARGARET_PHONE") or ""),
+            "email": normalize_email(os.getenv("MARGARET_EMAIL") or ""),
+        },
+        "agent": {
+            "name": transaction.get("agent_name") or "Agent",
+            "phone": normalize_phone(transaction.get("agent_phone") or ""),
+            "email": normalize_email(transaction.get("agent_email") or ""),
+        },
+    }
+    data["recent_updates"] = get_recent_activity(transaction["id"], limit=5)
+    return data
+
+
+def fetch_party_portal_analytics(transaction_id, lookback_days=90):
+    """Aggregate portal analytics used for support-time and adoption tracking."""
+    ensure_party_portal_tables()
+    start_ts = datetime.now() - timedelta(days=max(7, min(int(lookback_days or 90), 365)))
+    event_rows = execute_query(
+        """
+        SELECT event_type, section_name, COUNT(*) AS total
+        FROM party_portal_access_log
+        WHERE transaction_id = %s
+          AND created_at >= %s
+        GROUP BY event_type, section_name
+        """,
+        (int(transaction_id), start_ts),
+        fetch=True,
+    ) or []
+
+    views = 0
+    document_downloads = 0
+    uploads = 0
+    section_counts = {}
+    for row in event_rows:
+        event_type = (row.get("event_type") or "").strip().lower()
+        count = int(row.get("total") or 0)
+        if event_type == "view":
+            views += count
+        elif event_type == "document_download":
+            document_downloads += count
+        elif event_type == "upload":
+            uploads += count
+        elif event_type == "section_view":
+            section_name = (row.get("section_name") or "other").strip().lower()
+            section_counts[section_name] = section_counts.get(section_name, 0) + count
+
+    question_rows = execute_query(
+        """
+        SELECT COUNT(*) AS total
+        FROM communications
+        WHERE transaction_id = %s
+          AND communication_type = 'text'
+          AND created_at >= %s
+          AND (
+              COALESCE(summary, '') LIKE %s
+              OR COALESCE(outcome, '') LIKE %s
+          )
+        """,
+        (int(transaction_id), start_ts, "%?%", "%?%"),
+        fetch=True,
+    ) or []
+    text_questions = int((question_rows[0] or {}).get("total") or 0) if question_rows else 0
+    estimated_support_minutes_saved = max(0, (views * 2) + (document_downloads * 3) + (uploads * 4) - (text_questions * 4))
+    return {
+        "views": views,
+        "document_downloads": document_downloads,
+        "uploads": uploads,
+        "most_viewed_sections": sorted(
+            [{"section": key, "count": value} for key, value in section_counts.items()],
+            key=lambda item: item["count"],
+            reverse=True,
+        )[:5],
+        "text_questions_after_portal": text_questions,
+        "estimated_support_minutes_saved": estimated_support_minutes_saved,
+        "estimated_support_hours_saved": round(estimated_support_minutes_saved / 60.0, 1),
+    }
+
+
+def _portal_notification_already_sent(transaction_id, party_type, milestone_key, channel):
+    rows = execute_query(
+        """
+        SELECT id
+        FROM party_portal_notifications_log
+        WHERE transaction_id = %s
+          AND party_type = %s
+          AND milestone_key = %s
+          AND channel = %s
+        LIMIT 1
+        """,
+        (int(transaction_id), (party_type or "").strip().lower(), (milestone_key or "").strip(), (channel or "").strip()),
+        fetch=True,
+    ) or []
+    return bool(rows)
+
+
+def _log_portal_notification(transaction_id, party_type, milestone_key, channel, recipient):
+    execute_query(
+        """
+        INSERT INTO party_portal_notifications_log (
+            transaction_id, party_type, milestone_key, channel, recipient, sent_at
+        )
+        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (transaction_id, party_type, milestone_key, channel)
+        DO NOTHING
+        """,
+        (
+            int(transaction_id),
+            (party_type or "").strip().lower(),
+            (milestone_key or "").strip()[:140],
+            (channel or "").strip()[:20],
+            (recipient or "").strip()[:255] or None,
+        ),
+    )
+
+
+def notify_portal_users_milestone(transaction_id, milestone_key, message_template):
+    """Send milestone updates to all active portal users for a transaction."""
+    ensure_party_portal_tables()
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return {"sent_sms": 0, "sent_email": 0}
+    access_rows = execute_query(
+        """
+        SELECT id, transaction_id, party_type, access_token::text AS access_token, email, expires_at, is_active
+        FROM party_portal_access
+        WHERE transaction_id = %s
+          AND is_active = TRUE
+          AND (expires_at IS NULL OR expires_at >= CURRENT_TIMESTAMP)
+        ORDER BY party_type ASC
+        """,
+        (int(transaction_id),),
+        fetch=True,
+    ) or []
+    sent_sms = 0
+    sent_email = 0
+    for row in access_rows:
+        party_type = (row.get("party_type") or "").lower()
+        link = build_party_portal_url(row.get("access_token"))
+        message = (message_template or "").replace("{link}", link)
+        recipient_phone = _portal_party_phone(transaction, party_type)
+        recipient_email = _portal_party_email(transaction, party_type, row.get("email") or "")
+        party_label = party_type.title()
+
+        if recipient_phone and not _portal_notification_already_sent(transaction_id, party_type, milestone_key, "sms"):
+            send_sms_async(recipient_phone, message[:500])
+            _log_portal_notification(transaction_id, party_type, milestone_key, "sms", recipient_phone)
+            sent_sms += 1
+            log_portal_access(
+                portal_access_id=row.get("id"),
+                transaction_id=transaction_id,
+                party_type=party_type,
+                access_token=row.get("access_token"),
+                event_type="notification_sent",
+                section_name=milestone_key,
+                success=True,
+                details={"channel": "sms"},
+            )
+
+        if recipient_email and is_email_valid(recipient_email) and not _portal_notification_already_sent(
+            transaction_id, party_type, milestone_key, "email"
+        ):
+            message_id = send_email(
+                to=recipient_email,
+                template="emails/client_portal_access.html",
+                data={
+                    "subject": f"Maverick Portal Update - {transaction.get('property_address')}",
+                    "property_address": transaction.get("property_address"),
+                    "client_type": party_label,
+                    "portal_url": link,
+                    "closing_date_label": (
+                        transaction["closing_date"].strftime("%b %d, %Y") if transaction.get("closing_date") else "TBD"
+                    ),
+                },
+            )
+            if message_id:
+                _log_portal_notification(transaction_id, party_type, milestone_key, "email", recipient_email)
+                sent_email += 1
+                log_portal_access(
+                    portal_access_id=row.get("id"),
+                    transaction_id=transaction_id,
+                    party_type=party_type,
+                    access_token=row.get("access_token"),
+                    event_type="notification_sent",
+                    section_name=milestone_key,
+                    success=True,
+                    details={"channel": "email", "message_id": message_id},
+                )
+    return {"sent_sms": sent_sms, "sent_email": sent_email}
+
+
+def send_walkthrough_portal_reminders(limit=50):
+    """Send one-time walkthrough-tomorrow reminders to active portal users."""
+    ensure_party_portal_tables()
+    target_date = date.today() + timedelta(days=1)
+    rows = execute_query(
+        """
+        SELECT DISTINCT t.id
+        FROM transactions t
+        JOIN tasks tk ON tk.transaction_id = t.id
+        WHERE t.status = 'ACTIVE'
+          AND tk.completed = FALSE
+          AND COALESCE(tk.status, 'pending') <> 'completed'
+          AND tk.due_date = %s
+          AND LOWER(COALESCE(tk.task_description, '')) LIKE %s
+        ORDER BY t.id ASC
+        LIMIT %s
+        """,
+        (target_date, "%walk%through%", max(1, min(int(limit or 50), 200))),
+        fetch=True,
+    ) or []
+    sent = 0
+    for row in rows:
+        milestone_key = f"walkthrough_tomorrow_{target_date.isoformat()}"
+        result = notify_portal_users_milestone(
+            transaction_id=row["id"],
+            milestone_key=milestone_key,
+            message_template="⏰ Reminder: Final walk-through tomorrow. Check portal for details: {link}",
+        )
+        sent += int(result.get("sent_sms") or 0) + int(result.get("sent_email") or 0)
+    return sent
 
 
 def ensure_timeline_packets_table():
@@ -10851,6 +11875,10 @@ def mobile_log_communication(transaction_id):
 def tc_dashboard():
     """Render Margaret's main dashboard with status-grouped transactions."""
     cleanup_stale_batch_upload_staging()
+    try:
+        send_walkthrough_portal_reminders(limit=60)
+    except Exception as exc:
+        print(f"Portal walkthrough reminder sweep error: {exc}")
     uploaded_by = (session.get("tc_username") or "margaret").strip().lower()
     pending_batch_upload_count = fetch_batch_upload_pending_count(uploaded_by)
     session["batch_upload_pending_count"] = pending_batch_upload_count
@@ -14084,6 +15112,8 @@ def tc_transaction(transaction_id):
             "email": access_row.get("email") or "",
             "last_accessed_label": format_timestamp_label(access_row.get("last_accessed")),
         }
+    party_portal_links = fetch_party_portal_link_map(transaction_id)
+    party_portal_analytics = fetch_party_portal_analytics(transaction_id)
 
     transaction["has_contract_pdf"] = bool(transaction.get("contract_s3_key"))
     transaction["upload_time_ago"] = format_time_ago(transaction.get("created_at"))
@@ -14467,6 +15497,8 @@ def tc_transaction(transaction_id):
         extraction_review=extraction_review,
         email_status=email_status,
         client_portal_links=client_portal_links,
+        party_portal_links=party_portal_links,
+        party_portal_analytics=party_portal_analytics,
         analysis_overview={
             "total_analyzed": len(analysis_rows),
             "pending_review_count": analysis_pending_review_count,
@@ -15538,6 +16570,417 @@ def generate_client_portal_link(transaction_id):
         doc_notice_type="success",
     )
     return redirect(redirect_url)
+
+
+def fetch_party_portal_link_map(transaction_id):
+    """Resolve buyer/seller/agent party portal links for transaction view."""
+    link_map = {
+        "buyer": {"exists": False, "link": "", "email": "", "last_accessed_label": "", "expires_at_label": ""},
+        "seller": {"exists": False, "link": "", "email": "", "last_accessed_label": "", "expires_at_label": ""},
+        "agent": {"exists": False, "link": "", "email": "", "last_accessed_label": "", "expires_at_label": ""},
+    }
+    for row in list_party_portal_access(transaction_id):
+        role = (row.get("party_type") or "").strip().lower()
+        if role not in link_map:
+            continue
+        link_map[role] = {
+            "exists": bool(row.get("is_active")),
+            "link": row.get("portal_url") or "",
+            "email": row.get("email") or "",
+            "last_accessed_label": format_timestamp_label(row.get("last_accessed_at")),
+            "expires_at_label": format_timestamp_label(row.get("expires_at")),
+        }
+    return link_map
+
+
+@app.route("/tc/transaction/<int:transaction_id>/generate-portals", methods=["POST"])
+@login_required
+def generate_party_portals(transaction_id):
+    """
+    Create unique secure access tokens for buyer, seller, and agent portals.
+    """
+    ensure_party_portal_tables()
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return jsonify({"success": False, "error": "transaction_not_found"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    buyer_email = normalize_email(payload.get("buyer_email") or request.form.get("buyer_email") or "")
+    seller_email = normalize_email(payload.get("seller_email") or request.form.get("seller_email") or "")
+    agent_email = normalize_email(payload.get("agent_email") or request.form.get("agent_email") or transaction.get("agent_email") or "")
+    if buyer_email and not is_email_valid(buyer_email):
+        buyer_email = ""
+    if seller_email and not is_email_valid(seller_email):
+        seller_email = ""
+    if agent_email and not is_email_valid(agent_email):
+        agent_email = normalize_email(transaction.get("agent_email") or "")
+
+    buyer_token = str(uuid4())
+    seller_token = str(uuid4())
+    agent_token = str(uuid4())
+
+    buyer_row = create_portal_access(
+        transaction_id=transaction_id,
+        party_type="buyer",
+        access_token=buyer_token,
+        email=(buyer_email or None),
+    )
+    seller_row = create_portal_access(
+        transaction_id=transaction_id,
+        party_type="seller",
+        access_token=seller_token,
+        email=(seller_email or None),
+    )
+    agent_row = create_portal_access(
+        transaction_id=transaction_id,
+        party_type="agent",
+        access_token=agent_token,
+        email=(agent_email or None),
+    )
+    if not (buyer_row and seller_row and agent_row):
+        return jsonify({"success": False, "error": "portal_generation_failed"}), 500
+
+    send_summary = send_portal_links(
+        transaction_id=transaction_id,
+        portal_tokens={
+            "buyer": buyer_token,
+            "seller": seller_token,
+            "agent": agent_token,
+        },
+    )
+    portal_payload = {
+        "buyer": build_party_portal_url(buyer_token),
+        "seller": build_party_portal_url(seller_token),
+        "agent": build_party_portal_url(agent_token),
+    }
+    execute_query(
+        """
+        INSERT INTO communications (transaction_id, communication_type, contact_party, contact_name, summary, outcome)
+        VALUES (%s, 'note', 'system', %s, %s, %s)
+        """,
+        (
+            int(transaction_id),
+            session.get("tc_username", "margaret"),
+            "Party portal links generated",
+            (
+                f"sms_sent={int(send_summary.get('sent_sms') or 0)} "
+                f"email_sent={int(send_summary.get('sent_email') or 0)}"
+            ),
+        ),
+    )
+    wants_json = request.is_json or "application/json" in (request.headers.get("Accept") or "").lower()
+    if wants_json:
+        return jsonify(
+            {
+                "success": True,
+                "portals": portal_payload,
+                "sent_sms": int(send_summary.get("sent_sms") or 0),
+                "sent_email": int(send_summary.get("sent_email") or 0),
+            }
+        )
+
+    redirect_url = url_for(
+        "tc_transaction",
+        transaction_id=transaction_id,
+        doc_notice=(
+            f"Party portals generated. Sent via {int(send_summary.get('sent_sms') or 0)} SMS and "
+            f"{int(send_summary.get('sent_email') or 0)} email channels."
+        ),
+        doc_notice_type="success",
+    )
+    return redirect(redirect_url)
+
+
+@app.route("/portal/<access_token>")
+def party_portal(access_token):
+    """Display personalized self-service portal for buyer/seller/agent."""
+    ensure_party_portal_tables()
+    ip_address = request.remote_addr or ""
+    if _portal_rate_limited(access_token, ip_address):
+        log_portal_access(
+            portal_access_id=None,
+            transaction_id=None,
+            party_type="",
+            access_token=access_token,
+            event_type="rate_limited",
+            section_name="overview",
+            success=False,
+            details={"ip": ip_address},
+        )
+        return render_template("portal_invalid.html", reason="Too many requests. Please try again shortly."), 429
+
+    portal_access = get_portal_access(access_token, touch=True)
+    if not portal_access:
+        log_portal_access(
+            portal_access_id=None,
+            transaction_id=None,
+            party_type="",
+            access_token=access_token,
+            event_type="invalid_access",
+            section_name="overview",
+            success=False,
+            details={"ip": ip_address},
+        )
+        return render_template("portal_invalid.html", reason="This portal link is invalid or expired."), 404
+
+    transaction = get_transaction_or_none(portal_access["transaction_id"])
+    if not transaction:
+        return render_template("portal_invalid.html", reason="Transaction not found."), 404
+
+    section = (request.args.get("section") or "overview").strip().lower()
+    if section not in PORTAL_SECTION_NAMES:
+        section = "overview"
+
+    session["party_portal_token"] = portal_access["access_token"]
+    session["party_portal_access_id"] = int(portal_access["id"])
+    session["party_portal_transaction_id"] = int(portal_access["transaction_id"])
+    session["party_portal_party_type"] = portal_access["party_type"]
+
+    log_portal_access(
+        portal_access_id=portal_access["id"],
+        transaction_id=portal_access["transaction_id"],
+        party_type=portal_access["party_type"],
+        access_token=access_token,
+        event_type="view",
+        section_name=section,
+        success=True,
+    )
+    portal_data = build_portal_data(transaction, portal_access["party_type"], access_token=access_token)
+    can_upload = bool(portal_access.get("party_type") == "agent")
+    return render_template(
+        "party_portal.html",
+        transaction=transaction,
+        party_type=portal_access["party_type"],
+        data=portal_data,
+        can_upload=can_upload,
+        access_token=access_token,
+        active_section=section,
+    )
+
+
+@app.route("/portal/<access_token>/track-section", methods=["POST"])
+def track_party_portal_section(access_token):
+    """Record client-side section-view analytics for party portal."""
+    ensure_party_portal_tables()
+    portal_access = get_portal_access(access_token, touch=False)
+    if not portal_access:
+        return jsonify({"success": False, "error": "invalid_portal"}), 404
+    section = (request.get_json(silent=True) or {}).get("section") or request.form.get("section") or "overview"
+    section = section.strip().lower()
+    if section not in PORTAL_SECTION_NAMES:
+        section = "overview"
+    log_portal_access(
+        portal_access_id=portal_access["id"],
+        transaction_id=portal_access["transaction_id"],
+        party_type=portal_access["party_type"],
+        access_token=access_token,
+        event_type="section_view",
+        section_name=section,
+        success=True,
+    )
+    return jsonify({"success": True})
+
+
+@app.route("/portal/document/<int:document_id>")
+def party_portal_document(document_id):
+    """Serve one allowed document from party portal token/session context."""
+    ensure_party_portal_tables()
+    access_token = (request.args.get("token") or session.get("party_portal_token") or "").strip()
+    if not access_token:
+        return "Missing portal token.", 403
+    ip_address = request.remote_addr or ""
+    if _portal_rate_limited(access_token, ip_address):
+        return "Rate limit exceeded. Try again later.", 429
+    portal_access = get_portal_access(access_token, touch=False)
+    if not portal_access:
+        return "Portal link is invalid or expired.", 404
+    transaction = get_transaction_or_none(portal_access["transaction_id"])
+    if not transaction:
+        return "Transaction not found.", 404
+
+    allowed_documents = _documents_for_portal_party(transaction, portal_access["party_type"], access_token)
+    allowed_by_id = {
+        int(row["id"]): row
+        for row in allowed_documents
+        if row.get("available") and row.get("id") is not None
+    }
+    if int(document_id) not in allowed_by_id:
+        return "You do not have access to this document.", 403
+
+    if int(document_id) == 0:
+        if not transaction.get("contract_s3_key"):
+            return "Document not available.", 404
+        s3_key = transaction.get("contract_s3_key")
+        download_name = "contract.pdf"
+    else:
+        doc_rows = execute_query(
+            """
+            SELECT id, transaction_id, filename, s3_key
+            FROM documents
+            WHERE id = %s
+              AND transaction_id = %s
+            LIMIT 1
+            """,
+            (int(document_id), int(transaction["id"])),
+            fetch=True,
+        ) or []
+        if not doc_rows:
+            return "Document not found.", 404
+        s3_key = doc_rows[0].get("s3_key")
+        download_name = doc_rows[0].get("filename") or f"document_{document_id}"
+
+    url = get_presigned_url(s3_key, expiration=1800, download_filename=download_name)
+    if not url:
+        return "Failed to access document.", 500
+
+    log_portal_access(
+        portal_access_id=portal_access["id"],
+        transaction_id=portal_access["transaction_id"],
+        party_type=portal_access["party_type"],
+        access_token=access_token,
+        event_type="document_download",
+        section_name="documents",
+        document_id=document_id if document_id else None,
+        success=True,
+    )
+    if document_id:
+        log_document_access(
+            document_id=int(document_id),
+            user_name=f"portal_{portal_access['party_type']}",
+            user_type="portal",
+            action="download",
+            ip_address=ip_address,
+        )
+    return redirect(url)
+
+
+@app.route("/portal/<access_token>/upload", methods=["POST"])
+def party_portal_upload(access_token):
+    """Allow only agent portal users to upload files."""
+    ensure_party_portal_tables()
+    ip_address = request.remote_addr or ""
+    if _portal_rate_limited(access_token, ip_address):
+        return jsonify({"success": False, "error": "rate_limited"}), 429
+    portal_access = get_portal_access(access_token, touch=False)
+    if not portal_access:
+        return jsonify({"success": False, "error": "invalid_portal"}), 404
+    if portal_access.get("party_type") != "agent":
+        return jsonify({"success": False, "error": "upload_not_allowed"}), 403
+    transaction = get_transaction_or_none(portal_access["transaction_id"])
+    if not transaction:
+        return jsonify({"success": False, "error": "transaction_not_found"}), 404
+
+    uploaded_files = []
+    for key in request.files:
+        file_items = request.files.getlist(key)
+        for file_item in file_items:
+            if file_item and file_item.filename:
+                uploaded_files.append(file_item)
+    if not uploaded_files:
+        return jsonify({"success": False, "error": "no_files"}), 400
+    if len(uploaded_files) > 20:
+        return jsonify({"success": False, "error": "too_many_files", "max": 20}), 400
+
+    selected_type = normalize_document_type(request.form.get("document_type"), fallback="other")
+    valid_upload_types = CLIENT_UPLOAD_DOCUMENT_TYPES | REQUIRED_DOCUMENT_TYPES
+    if selected_type not in valid_upload_types:
+        selected_type = "other"
+
+    successful = 0
+    failed = 0
+    uploaded_doc_ids = []
+    for file in uploaded_files:
+        safe_filename = secure_filename(file.filename or "")
+        extension = file_extension(safe_filename)
+        if extension not in ALLOWED_DOCUMENT_EXTENSIONS:
+            failed += 1
+            continue
+        file_bytes = file.read()
+        file_size = len(file_bytes or b"")
+        if file_size <= 0 or file_size > MAX_FILE_SIZE:
+            failed += 1
+            continue
+
+        processed = process_uploaded_document(
+            file_bytes=file_bytes,
+            transaction_id=transaction["id"],
+            uploaded_by="portal_agent",
+            original_filename=safe_filename,
+            extension=extension,
+            transaction_context=transaction,
+            suggested_document_type=selected_type,
+        )
+        if not processed.get("success"):
+            failed += 1
+            continue
+
+        final_document_type = normalize_document_type(processed.get("document_type"), fallback=selected_type)
+        document_id = execute_insert(
+            """
+            INSERT INTO documents (
+                transaction_id, document_type, filename, s3_key, file_size, uploaded_by, uploaded_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING id
+            """,
+            (
+                int(transaction["id"]),
+                final_document_type,
+                processed.get("filename") or safe_filename,
+                processed.get("s3_key"),
+                file_size,
+                "portal_agent",
+            ),
+        )
+        if not document_id:
+            failed += 1
+            continue
+
+        uploaded_doc_ids.append(document_id)
+        key_info = (processed.get("analysis") or {}).get("key_info_extracted")
+        apply_document_post_upload_actions(
+            transaction_id=transaction["id"],
+            document_type=final_document_type,
+            first_page_text=processed.get("first_page_text") or "",
+            key_info_extracted=(key_info if isinstance(key_info, dict) else {}),
+            uploaded_by="portal_agent",
+        )
+        run_document_analysis_async(
+            document_id=document_id,
+            transaction_id=transaction["id"],
+            document_type=final_document_type,
+            s3_key=processed.get("s3_key"),
+            extension=extension,
+        )
+        successful += 1
+
+    log_portal_access(
+        portal_access_id=portal_access["id"],
+        transaction_id=portal_access["transaction_id"],
+        party_type=portal_access["party_type"],
+        access_token=access_token,
+        event_type="upload",
+        section_name="upload",
+        success=successful > 0,
+        details={"successful": successful, "failed": failed, "document_ids": uploaded_doc_ids[:20]},
+    )
+    return jsonify(
+        {
+            "success": successful > 0,
+            "uploaded": successful,
+            "failed": failed,
+            "document_ids": uploaded_doc_ids,
+        }
+    )
+
+
+@app.route("/tc/transaction/<int:transaction_id>/portal-analytics")
+@login_required
+def tc_transaction_portal_analytics(transaction_id):
+    """Return portal engagement analytics for one transaction."""
+    transaction = get_transaction_or_none(transaction_id)
+    if not transaction:
+        return jsonify({"success": False, "error": "transaction_not_found"}), 404
+    return jsonify({"success": True, "analytics": fetch_party_portal_analytics(transaction_id)})
 
 
 def _render_client_portal_page(access_token, active_tab):

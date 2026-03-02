@@ -518,6 +518,45 @@ CREATE TABLE client_access (
     last_accessed TIMESTAMP
 );
 
+CREATE TABLE party_portal_access (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    party_type VARCHAR(20) NOT NULL,
+    access_token UUID UNIQUE NOT NULL,
+    email VARCHAR(255),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_accessed_at TIMESTAMP,
+    expires_at TIMESTAMP
+);
+
+CREATE TABLE party_portal_access_log (
+    id SERIAL PRIMARY KEY,
+    portal_access_id INT REFERENCES party_portal_access(id) ON DELETE SET NULL,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    party_type VARCHAR(20),
+    access_token_hash VARCHAR(64),
+    event_type VARCHAR(40) NOT NULL,
+    section_name VARCHAR(80),
+    document_id INT REFERENCES documents(id) ON DELETE SET NULL,
+    success BOOLEAN DEFAULT TRUE,
+    ip_address VARCHAR(64),
+    user_agent VARCHAR(255),
+    details JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE party_portal_notifications_log (
+    id SERIAL PRIMARY KEY,
+    transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
+    party_type VARCHAR(20) NOT NULL,
+    milestone_key VARCHAR(140) NOT NULL,
+    channel VARCHAR(20) NOT NULL,
+    recipient VARCHAR(255),
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (transaction_id, party_type, milestone_key, channel)
+);
+
 CREATE TABLE contract_extractions (
     id SERIAL PRIMARY KEY,
     transaction_id INT REFERENCES transactions(id) ON DELETE CASCADE,
@@ -1233,6 +1272,11 @@ CREATE UNIQUE INDEX idx_document_requests_txn_doc_type ON document_requests(tran
 CREATE INDEX idx_document_requests_status ON document_requests(status);
 CREATE UNIQUE INDEX idx_client_access_transaction_type ON client_access(transaction_id, client_type);
 CREATE UNIQUE INDEX idx_client_access_token ON client_access(access_token);
+CREATE UNIQUE INDEX idx_party_portal_access_txn_party ON party_portal_access(transaction_id, party_type);
+CREATE INDEX idx_party_portal_access_expiry ON party_portal_access(is_active, expires_at, last_accessed_at DESC);
+CREATE INDEX idx_party_portal_access_log_txn ON party_portal_access_log(transaction_id, created_at DESC, event_type);
+CREATE INDEX idx_party_portal_access_log_token ON party_portal_access_log(access_token_hash, ip_address, created_at DESC);
+CREATE INDEX idx_party_portal_notifications_txn ON party_portal_notifications_log(transaction_id, sent_at DESC);
 CREATE UNIQUE INDEX idx_contract_extractions_txn_field ON contract_extractions(transaction_id, field_name);
 CREATE INDEX idx_document_analysis_transaction ON document_analysis_results(transaction_id, analysis_date DESC);
 CREATE INDEX idx_document_analysis_document ON document_analysis_results(document_id);
